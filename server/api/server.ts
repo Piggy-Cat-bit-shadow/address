@@ -1,5 +1,6 @@
 import { serve, type HttpBindings } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { chmod } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { Hono } from 'hono';
 import app from './index';
@@ -21,6 +22,7 @@ const database = openDatabase(databasePath);
 const controlDatabasePath = resolve(process.env.CONTROL_DATABASE_PATH || 'data/control.sqlite');
 const controlDatabase = openDatabase(controlDatabasePath, { migrate: false });
 await initializeSqliteDatabase(controlDatabase, new URL('../control/schema.sql', import.meta.url));
+await chmod(controlDatabasePath, 0o600);
 const control = new ControlStore(controlDatabase, masterKeyFrom(process.env.CONFIG_MASTER_KEY));
 await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD);
 const china = new ChinaDataService(database, control, dirname(databasePath));
