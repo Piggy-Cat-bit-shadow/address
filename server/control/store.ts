@@ -78,14 +78,19 @@ export class ControlStore {
       .bind(key, JSON.stringify(value), nowIso()).run();
   }
 
-  async setPassword(kind: SessionRole, password: string): Promise<void> {
+  async setPassword(kind: SessionRole, password: string, currentSessionToken?: string): Promise<void> {
     const value = await hashPassword(password);
     const now = nowIso();
     await this.database.prepare(`INSERT INTO auth_identities(id,kind,password_hash,password_salt,created_at,updated_at)
       VALUES (?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET password_hash=excluded.password_hash,
       password_salt=excluded.password_salt,updated_at=excluded.updated_at`)
       .bind(randomUUID(), kind, value.hash, value.salt, now, now).run();
-    await this.database.prepare('DELETE FROM auth_sessions WHERE role=?').bind(kind).run();
+    if (currentSessionToken) {
+      await this.database.prepare('DELETE FROM auth_sessions WHERE role=? AND id_hash<>?')
+        .bind(kind, tokenHash(currentSessionToken)).run();
+    } else {
+      await this.database.prepare('DELETE FROM auth_sessions WHERE role=?').bind(kind).run();
+    }
   }
 
   async verifyIdentity(kind: SessionRole, password: string): Promise<boolean> {

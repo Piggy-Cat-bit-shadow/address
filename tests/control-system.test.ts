@@ -38,6 +38,15 @@ describe('control database security', () => {
     expect(await store.authorizeApiToken(created.token, 'generate')).toBeNull();
   });
 
+  it('keeps the current admin session when changing the password', async () => {
+    const current = await store.createSession('admin');
+    const other = await store.createSession('admin');
+    await store.setPassword('admin', 'new administrator password', current.token);
+    expect(await store.verifyIdentity('admin', 'new administrator password')).toBe(true);
+    expect(await store.session(current.token, 'admin', current.csrf)).toBe(true);
+    expect(await store.session(other.token, 'admin', other.csrf)).toBe(false);
+  });
+
   it('rotates credentials by quota and health without exposing secret values', async () => {
     const first = await store.addCredential({ provider: 'amap', label: 'A', secret: 'key-a', dailyLimit: 1 });
     const second = await store.addCredential({ provider: 'amap', label: 'B', secret: 'key-b', dailyLimit: 10 });

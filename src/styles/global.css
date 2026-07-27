@@ -22,8 +22,8 @@ a { color: var(--blue); }
 .top-links { display: flex; gap: 8px; }
 .top-links a { padding: 8px 11px; color: #344054; border-radius: 7px; text-decoration: none; font-size: 12px; font-weight: 700; }
 .top-links a:hover, .top-links .language { color: var(--blue-dark); background: var(--blue-soft); }
-.top-links .github-link, .top-links .admin-link { width: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-.github-link svg, .admin-link svg { width: 18px; height: 18px; fill: currentColor; }
+.top-links .github-link { width: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.github-link svg { width: 18px; height: 18px; fill: currentColor; }
 .container { width: min(1240px, calc(100% - 32px)); margin: 20px auto 64px; }
 .panel, .country-browser, .mode-tabs { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; box-shadow: 0 2px 7px rgba(16, 24, 40, .04); }
 
@@ -164,7 +164,7 @@ footer { padding: 0 16px 28px; color: #667085; text-align: center; font-size: 9p
   .logo { font-size: 15px; }
   .top-links { gap: 2px; }
   .top-links a { padding-inline: 7px; font-size: 11px; }
-  .top-links .github-link, .top-links .admin-link { width: 30px; padding: 0; }
+  .top-links .github-link { width: 30px; padding: 0; }
   .container { width: calc(100% - 20px); margin-top: 10px; }
   .mode-tabs button { padding-inline: 10px; }
   .mode-tabs button span { display: none; }

@@ -74,7 +74,7 @@ export const createAdminApi = ({
   app.put('/admin/api/settings/access', async (context) => {
     const input = await context.req.json<{ frontendPasswordEnabled?: boolean; frontendPassword?: string; apiAuthEnabled?: boolean; adminPassword?: string }>();
     if (input.frontendPassword) await control.setPassword('frontend', input.frontendPassword);
-    if (input.adminPassword) await control.setPassword('admin', input.adminPassword);
+    if (input.adminPassword) await control.setPassword('admin', input.adminPassword, getCookie(context, adminCookie) || '');
     if (input.frontendPasswordEnabled && !input.frontendPassword && !await control.hasIdentity('frontend')) {
       return context.json({ error: 'FRONTEND_PASSWORD_REQUIRED' }, 400);
     }

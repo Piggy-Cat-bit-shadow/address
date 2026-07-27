@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 
 type View = 'dashboard' | 'access' | 'providers' | 'china' | 'tokens' | 'runs' | 'audit' | 'system';
 interface Credential { id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; usedToday: number; dailyLimit: number; qpsLimit: number; weight: number; quotaScopeId: string; lastSuccessAt?: string }
@@ -21,6 +21,7 @@ export default function SyncAdmin() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const loadId = useRef(0);
 
   const request = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
     const response = await fetch(`/admin/api${path}`, {
@@ -29,20 +30,30 @@ export default function SyncAdmin() {
       credentials: 'same-origin'
     });
     const body = await response.json() as { data?: T; error?: string; detail?: string };
+    if (response.status === 401) {
+      sessionStorage.removeItem('address-admin-csrf');
+      setAuthenticated(false);
+      setCsrf('');
+    }
     if (!response.ok) throw new Error(body.detail || body.error || `HTTP ${response.status}`);
     return body.data as T;
   }, [csrf]);
 
   const load = useCallback(async (selected: View) => {
-    setBusy(true); setError(''); setNotice('');
+    const id = ++loadId.current;
+    setBusy(true); setData(undefined); setError(''); setNotice('');
     try {
       const paths: Record<View, string> = {
         dashboard: '/dashboard', access: '/settings/access', providers: '/providers', china: '/china/status',
         tokens: '/tokens', runs: '/runs', audit: '/audit', system: '/system'
       };
-      setData(await request(paths[selected]));
-    } catch (value) { setError(value instanceof Error ? value.message : String(value)); }
-    finally { setBusy(false); }
+      const result = await request(paths[selected]);
+      if (id === loadId.current) setData(result);
+    } catch (value) {
+      if (id === loadId.current) setError(value instanceof Error ? value.message : String(value));
+    } finally {
+      if (id === loadId.current) setBusy(false);
+    }
   }, [request]);
 
   useEffect(() => {
@@ -98,7 +109,7 @@ export default function SyncAdmin() {
       <header><div><p>数据与系统管理</p><h1>{labels[view]}</h1></div><button onClick={() => void load(view)} disabled={busy}>刷新</button></header>
       {error && <div className="admin-error" role="alert">{error}</div>}
       {notice && <div className="admin-notice">{notice}</div>}
-      {busy && !data ? <p className="admin-empty">正在加载…</p> : <AdminView view={view} data={data} busy={busy} mutate={mutate} request={request} setNotice={setNotice} />}
+      {!data ? <p className="admin-empty">正在加载…</p> : <AdminView view={view} data={data} busy={busy} mutate={mutate} request={request} setNotice={setNotice} />}
     </main>
   </div>;
 }
