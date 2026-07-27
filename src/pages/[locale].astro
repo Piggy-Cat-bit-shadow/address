@@ -11,7 +11,7 @@ export function getStaticPaths() {
 }
 
 const locale = Astro.params.locale as Locale;
-const apiBaseUrl = import.meta.env.PROD ? '/api' : import.meta.env.PUBLIC_API_BASE_URL || '/api';
+const apiBaseUrl = import.meta.env.PROD ? '/web-api' : import.meta.env.PUBLIC_API_BASE_URL || '/web-api';
 ---
 <Layout locale={locale}>
   <App client:load locale={locale} apiBaseUrl={apiBaseUrl} />

@@ -2,19 +2,16 @@
 
 状态基准:2026-07-17,服务器 `/root/address`,SQLite `data/address.sqlite`(788MB + WAL)。
 
-## 0. 两层数据源(先分清)
+## 0. 三类数据源
 
-项目有两套完全独立的数据源,不要混淆:
+| | 全球门牌地址池 | 中国真实小区池 | IP 实时查询 |
+|---|---|---|---|
+| 来源 | Overture Maps + Geofabrik OSM | AreaCity 行政区划 + 高德/百度/腾讯住宅 POI | 高德 / Geoapify / HK ALS |
+| 存储 | `address.sqlite` | `address.sqlite` 的 `cn_*` 表 | 默认不落库 |
+| API Key | 否 | 是，在后台加密配置并轮换 | 按 Provider 配置 |
+| 查询方式 | 本地 SQLite | 同步后仅查本地 SQLite | 外部 API 超时后回退本地池 |
 
-| | 主地址池(离线数据库) | IP 实时查询(在线兜底) |
-|---|---|---|
-| 触发 | 所有正常生成、筛选生成(占 99%+) | **仅**用户点"按 IP 区域生成" |
-| 来源 | Overture Maps + Geofabrik OSM | 高德 / Geoapify / HK ALS |
-| 需要 API key | **否**(全公开免费) | 是 |
-| 自动同步 | **是**(每天 1 国,无人值守) | 不涉及(用户点击时实时调) |
-| 速度 | 本地索引 <100ms | 外部 API,6.5s 超时,失败即降级本地池 |
-
-**结论:正常生成完全走本地数据库,0 外部请求、无需任何 key、天然快。** 用户担心的"实时 API 慢"只发生在主动点 IP 生成时,且有超时保护。
+中国小区名称、平台登记地址和坐标不再从 OSM 小区标签提取。中国住宅生成优先使用地图平台同步的小区记录；楼栋、单元和房间按策略生成，详见 `strategies/CN-China-address-generation.md`。
 
 ### 实时 API 全局开关(2026-07-18 新增)
 
@@ -81,7 +78,8 @@
 |---|---|---|
 | 州省/城市/邮编目录(筛选下拉框) | countries-states-cities + GeoNames + 邮编库 | `catalog_regions` / `catalog_cities` / `catalog_postcodes` |
 | 住宅证据 | OSM `building=house/apartments/...` 标签;Overture buildings 主题抽查 | `address_pool_evidence(evidence_type='residential_use')` |
-| 中国真实小区(2026-07-21 新增) | china.pbf 内 OSM `landuse=residential`/`place=neighbourhood` 带名住宅区,同一次流式导出顺带提取(零额外下载);约 17 万个;机构规则+自定义黑名单过滤;拼音英文名 | `cn_communities(name,name_en,latitude,longitude)`,随 CN 快照原子替换 |
+| 中国行政区划 | AreaCity 发布数据；版本化导入省/市/区县/乡镇街道 | `cn_admin_areas` |
+| 中国真实小区 | 高德、百度、腾讯住宅小区 POI；多 Key 配额感知同步，坐标统一为 WGS-84 并保留原始坐标系 | `cn_communities_v2` / `cn_community_sources` |
 | 三语翻译 | Google Translate(免费端点)→ 有道兜底 | `translation_cache` + 组件变体 JSON |
 | IP 定位 | 本地/免密 IP 库 + TCP 源地址 | 运行时,不落库 |
 
@@ -147,18 +145,20 @@ cleanup   删原始包、checkpoint WAL、记录 sync_country_state
 - NG/SA/SG 总量受 OSM 门牌覆盖限制,每 30 天重同步随上游增长。
 - 街道级 en/zh 翻译由回填 worker 持续补齐。
 
-## 7. 外部 Provider(仅 IP 实时查询)与 key 处置(2026-07-17 决策)
+## 7. 外部 Provider 与 Key 处置
 
 | Provider | 用途 | key | 决策 |
 |---|---|---|---|
-| 高德 AMap | 中国 IP 模式住宅小区 POI | `AMAP_API_KEY`(已配 .env) | ✅ 启用,仅 CN 的 IP 生成用 |
+| 高德 AMap | 中国小区批量同步与可选实时查询 | 管理后台加密 Key 池 | ✅ |
+| 百度地图 | 中国小区批量同步与交叉验证 | 管理后台加密 Key 池 | ✅ |
+| 腾讯地图 | 中国小区批量同步与交叉验证 | 管理后台加密 Key 池 | ✅ |
 | Geoapify | 全球 IP 模式地址兜底(3000/日免费) | `GEOAPIFY_API_KEY`(已配 .env) | ✅ 启用,全球 IP 生成兜底 |
 | 香港 ALS | 香港 IP 模式官方地址 | 无需 key | ✅ 代码已支持,IP 模式自动用 |
 | OneMap(新加坡) | — | token 易过期 | ❌ 弃用,SG 改由 Geofabrik 主池覆盖 |
 | OS Data Hub(英国) | — | — | ❌ 弃用,GB 由 Geofabrik 主池覆盖 |
 | Overpass / Photon | IP 模式最末兜底 | 无需 key | ✅ 保留,低频备用 |
 
-`.env` 只写 `AMAP_API_KEY` 与 `GEOAPIFY_API_KEY` 两个;有道翻译 key 由服务器 `runtime/address.env` 单独持有,不入仓库。
+地图 Key 通过 `/admin/` 加密写入服务器 `control.sqlite`；`.env` 只保存 `CONFIG_MASTER_KEY`、初始化密码及其他服务器环境变量，均不入仓库。同步完成后的 WebUI 只查询本地 SQLite。
 
 ### 未采纳的推荐源(评估结论)
 - USDOT NAD / 法国 BAN / 澳洲 G-NAF / 日本 ABR:❌ Overture 已整合,实测 US/FR/AU/JP 主池均已填满;单独接入需逐个格式解析,G-NAF 5GB、ABR 试行版,不划算。

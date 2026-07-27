@@ -2,7 +2,6 @@
 import SyncAdmin from '../components/SyncAdmin';
 import '../styles/admin.css';
 
-const apiBase = import.meta.env.PUBLIC_SYNC_API_URL || '/sync-control';
 ---
 <!doctype html>
 <html lang="zh-CN">
@@ -13,6 +12,6 @@ const apiBase = import.meta.env.PUBLIC_SYNC_API_URL || '/sync-control';
     <title>地址热池同步</title>
   </head>
   <body>
-    <SyncAdmin apiBase={apiBase} client:load />
+    <SyncAdmin client:load />
   </body>
 </html>

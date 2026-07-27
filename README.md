@@ -56,7 +56,7 @@ The default synchronized pool uses the following source family for each country.
 | Spain (ES) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
 | Netherlands (NL) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
 | Russia (RU) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, federal subject, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| China (CN) | [Geofabrik OSM](https://download.geofabrik.de/) | Province/municipality, city, district, road, source geometry; nearby named OSM community when available | House number; lexicon community fallback; missing building/unit/room details |
+| China (CN) | [AreaCity](https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov) + AMap/Baidu/Tencent POI | Province/municipality, city, district, township, registered community name/address, and provider coordinate | Building 1–3, unit 1–3, floor 2–6, room 01–04 |
 | Hong Kong (HK) | [Geofabrik OSM](https://download.geofabrik.de/) | Building/street, district, area, source geometry | Missing floor/flat/room details may be generated |
 | Taiwan (TW) | [Overture Maps](https://overturemaps.org/) | House number, street, city/county, district, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
 | Japan (JP) | [Overture Maps](https://overturemaps.org/) | Block/house number, street, municipality, prefecture, postcode, source geometry | None for ordinary records; missing apartment room details may be generated |
@@ -81,19 +81,19 @@ The default synchronized pool uses the following source family for each country.
 | Field | Provenance |
 |---|---|
 | Country, region, city, district, and street | Source-backed and normalized from the address record; missing administrative labels may be filled from the local catalog. |
-| House number | Source-backed for non-China countries. China intentionally replaces it with a deterministic test number. |
+| House number | Keeps the source/provider registration value when present; it is not replaced by a generated China number. |
 | Postcode | Uses a valid source postcode when available; invalid or missing values may be filled from the nearest catalog entry. |
 | Coordinates | Copied from the source geometry. Depending on the source, this may be an address point, building point, or the centroid of an OSM way. |
-| Building or community | Uses a source value when present. For China, a nearby named OSM residential community is preferred; the bundled lexicon is only the no-coverage fallback. |
+| Building or community | Uses a source value when present. China residential mode only uses communities synchronized from AMap, Baidu, or Tencent; no lexicon fallback is used. |
 | Apartment, building, unit, and room | Keeps official/source-tagged values when present. Missing indoor details may be generated for China and apartment records in other countries. |
 | Name, phone, email, employment, finance, network, and sandbox card | Synthetic test data. |
 
-China therefore means **real administrative and road context plus a source coordinate, with a synthetic house number and possible synthetic indoor details**. The other countries keep source house numbers, while missing apartment/unit details may still be generated. `verified` means that source evidence and project quality checks passed; it does not mean that the address is current, occupied, or deliverable.
+China therefore means **AreaCity-validated administrative context plus a map-provider community, registered address, and coordinate, with only indoor hierarchy synthesized**. The other countries keep source house numbers, while missing apartment/unit details may still be generated. `verified` means that source evidence and project quality checks passed; it does not mean that the address is current, occupied, or deliverable.
 
 ### Google Maps and AMap behavior
 
 - **Google coordinate preview** opens `latitude,longitude` from the source geometry. It is a location preview, not a Google delivery or occupancy certificate.
-- **Google address search** uses only the address skeleton. Synthetic China house numbers, community names, and indoor units are excluded from that query; non-China searches use source-backed house number, street, locality, region, and postcode.
+- **Google address search** includes the real China provider address and community name, while generated building/unit/room details stay out of the query.
 - **AMap** is generated only for China. The source WGS-84 coordinate is converted to GCJ-02 before opening the AMap marker URL.
 - A map pin may represent an address point, building centroid, or way centroid rather than an entrance or room. The default generation path does not claim that a Google Geocoding result has independently verified every record.
 
@@ -208,7 +208,7 @@ A new database contains schema only. Run `npm run data:address-pool:bootstrap` f
 
 ## 🔑 Configuration summary
 
-Offline generation and data synchronization need no third-party API key. AMap, Geoapify, Youdao, and OneMap credentials enable optional live-provider features; `SYNC_ADMIN_TOKEN` protects VPS synchronization control. Put real values only in ignored `.env`, `.deploy.env`, or `/root/address/runtime/address.env` files. Never add credentials to source, browser code, screenshots, issues, or CI logs.
+Offline runtime generation does not call map providers after synchronization. Configure multiple AMap, Baidu, and Tencent keys in `/admin/`; they are encrypted in `control.sqlite` with the server-only `CONFIG_MASTER_KEY`. Put the master key and bootstrap password only in ignored `.env`, `.deploy.env`, or `/root/address/runtime/address.env` files. Never add credentials to source, browser code, screenshots, issues, or CI logs.
 
 ## 💾 Database size
 

@@ -24,17 +24,21 @@ Measured on 2026-07-23 after all 27 countries were synchronized at commit `08480
 | Active SQLite WAL | 0.68 GiB |
 | Complete `data/` directory | 7.89 GiB |
 | Active addresses | 722,950 records |
-| China community records | 174,327 records |
+| Legacy China residential subset | 174,327 records (historical measurement; not the new POI pool) |
 
-The initial import temporarily retains source downloads and intermediate files. The observed peak was about 11.2 GiB. Upstream releases, WAL activity, and optional retention settings change the actual total. The 60 GiB recommendation leaves room for synchronization, backups, and recovery. Shadow expansion stops at 40 GiB, writes stop before 45 GiB, and the project keeps a 50 GiB absolute ceiling.
+The new China POI pool grows after AMap, Baidu, or Tencent synchronization, so its final count and size depend on configured cities, page limits, and provider results. The initial import temporarily retains source downloads and intermediate files. The observed legacy peak was about 11.2 GiB. Upstream releases, WAL activity, and optional retention settings change the actual total. The 60 GiB recommendation leaves room for synchronization, backups, and recovery. Shadow expansion stops at 40 GiB, writes stop before 45 GiB, and the project keeps a 50 GiB absolute ceiling.
 
 ## API keys and secrets
 
-The offline address pool, Overture and Geofabrik synchronization, SQLite generation, OpenCC conversion, pinyin conversion, Google Maps links, and AMap web links require no third-party API key.
+Runtime generation uses SQLite only. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`.
 
 | Variable | Required | Feature | Where to obtain it |
 |---|---|---|---|
-| `AMAP_API_KEY` | Optional | Live China POI lookup | Create a Web Service key in the [AMap console](https://lbs.amap.com/api/webservice/guide/create-project/get-key). |
+| `CONFIG_MASTER_KEY` | Required | Encrypt provider credentials in `control.sqlite` | Generate with `openssl rand -base64 32`; keep it server-only. |
+| `ADMIN_BOOTSTRAP_PASSWORD` | Required initially | Create the first administrator identity | Generate a strong password; it is ignored after initialization. |
+| AMap keys | China sync | Community POI ingestion | Create Web Service keys in the [AMap console](https://lbs.amap.com/api/webservice/guide/create-project/get-key), then add them in `/admin/`. |
+| Baidu keys | China sync | Community POI ingestion and cross-validation | Create server-side Place API keys in the Baidu Maps console, then add them in `/admin/`. |
+| Tencent keys | China sync | Community POI ingestion and cross-validation | Create WebService API keys in the Tencent Location Service console, then add them in `/admin/`. |
 | `GEOAPIFY_API_KEY` | Optional | Live geocoding outside China and selected reverse localization | Create a project and key using the [Geoapify guide](https://www.geoapify.com/get-started-with-maps-api/). |
 | `YOUDAO_APP_KEY`, `YOUDAO_APP_SECRET` | Optional pair | Backup online translation provider | Create a translation application at [Youdao AI](https://ai.youdao.com/). |
 | `ONEMAP_ACCESS_TOKEN` | Optional | Live ordinary-address lookup for Singapore | Follow the [OneMap authentication guide](https://www.onemap.gov.sg/apidocs/authentication). Tokens expire and need refresh handling. |
@@ -63,26 +67,32 @@ cp /root/address/app/ops/address.env.example /root/address/runtime/address.env
 chmod 600 /root/address/runtime/address.env
 ```
 
-Generate the sync token without printing it:
+Generate the encryption key and sync token without printing them:
 
 ```bash
 token="$(openssl rand -hex 32)"
+master_key="$(openssl rand -base64 32)"
 sed -i "s/GENERATE_A_RANDOM_VALUE/$token/" /root/address/runtime/address.env
-unset token
+sed -i "s/GENERATE_32_BYTE_BASE64_VALUE/$master_key/" /root/address/runtime/address.env
+unset token master_key
 chmod 600 /root/address/runtime/address.env
 ```
 
-At minimum, replace `YOUR_DOMAIN.example`, generate `SYNC_ADMIN_TOKEN`, and review `TRUST_PROXY`. Add optional provider credentials only when their feature is enabled.
+At minimum, replace `YOUR_DOMAIN.example`, generate `CONFIG_MASTER_KEY` and `SYNC_ADMIN_TOKEN`, set the one-time administrator password, and review `TRUST_PROXY`. Add map keys through `/admin/`; they must not be written to Git-tracked files.
 
 ## Runtime configuration
 
 | Variable | Production default | Purpose |
 |---|---|---|
-| `PUBLIC_API_BASE_URL` | `/api` | API prefix used by the browser |
+| `PUBLIC_API_BASE_URL` | `/web-api` | Session-protected API prefix used by the browser |
 | `API_HOST` | `127.0.0.1` | Hono listen address |
 | `API_PORT` | `8787` | Hono listen port |
 | `STATIC_ROOT` | `/root/address/app/dist` | Built Astro site |
 | `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite database |
+| `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | Authentication, encrypted credentials, quotas, jobs, and audit database |
+| `CONFIG_MASTER_KEY` | Generated server-only value | AES-256-GCM key for provider credentials |
+| `ADMIN_BOOTSTRAP_PASSWORD` | One-time strong password | Creates the initial administrator identity |
+| `COOKIE_SECURE` | `true` | Send authentication cookies only over HTTPS |
 | `ALLOWED_ORIGIN` | Your HTTPS origin | CORS allowlist |
 | `TRUST_PROXY` | `true` behind the proxy | Trust forwarded client IP headers |
 | `SYNC_HOST` | `127.0.0.1` | Sync-control listen address |
@@ -91,6 +101,8 @@ At minimum, replace `YOUR_DOMAIN.example`, generate `SYNC_ADMIN_TOKEN`, and revi
 | `SYNC_UTC_HOUR` | `3` | Daily scheduler check hour in UTC |
 
 Only enable `TRUST_PROXY` when a controlled reverse proxy overwrites forwarded IP headers. Keep port `8791` private.
+
+For AreaCity, download and extract `ok_data_level4.csv` into `/root/address/data/imports/`, then use **China Sync → Import AreaCity** in `/admin/` with source `imports/ok_data_level4.csv` and the release version. An HTTPS JSON/CSV URL is also accepted; local paths are restricted to the data directory.
 
 ## First deployment
 

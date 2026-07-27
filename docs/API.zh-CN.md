@@ -2,7 +2,7 @@
 
 [English](API.md) · [简体中文](API.zh-CN.md) · [繁體中文](API.zh-TW.md)
 
-公开 API 位于 `/api/v1`，全部公开端点使用 `GET` 并返回 JSON。服务启动后，可在 `/en/api/` 或 `/zh-CN/api/` 查看交互参数说明。
+外部 API 位于 `/api/v1`，其数据端点使用 `GET` 并返回 JSON。服务启动后，可在 `/en/api/` 或 `/zh-CN/api/` 查看交互参数说明。
 
 ## 基础地址
 
@@ -12,7 +12,15 @@ https://YOUR_DOMAIN.example/api/v1
 
 本地开发默认使用 `http://127.0.0.1:8787/api/v1`。
 
-## 公开端点
+除 `/api/v1/health` 外，外部 API 请求需要管理员创建的 Bearer Token：
+
+```http
+Authorization: Bearer YOUR_API_TOKEN
+```
+
+Token 在 `/admin/` 创建，只保存哈希，可设置权限、限速、到期时间和撤销状态，明文仅显示一次。WebUI 使用独立的 `/web-api/v1` 会话通道，不嵌入该 Token。
+
+## 外部端点
 
 | 方法 | 路径 | 用途 |
 |---|---|---|

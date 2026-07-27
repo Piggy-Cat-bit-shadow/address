@@ -2,7 +2,7 @@
 
 [English](API.md) · [简体中文](API.zh-CN.md) · [繁體中文](API.zh-TW.md)
 
-The public API is served under `/api/v1`. All public endpoints use `GET` and return JSON. Interactive parameter documentation is available at `/en/api/` and `/zh-CN/api/` on a running instance.
+The external API is served under `/api/v1`. Its data endpoints use `GET` and return JSON. Interactive parameter documentation is available at `/en/api/` and `/zh-CN/api/` on a running instance.
 
 ## Base URL
 
@@ -12,7 +12,15 @@ https://YOUR_DOMAIN.example/api/v1
 
 Local development defaults to `http://127.0.0.1:8787/api/v1`.
 
-## Public endpoints
+Except for `/api/v1/health`, external API requests use an administrator-created Bearer token:
+
+```http
+Authorization: Bearer YOUR_API_TOKEN
+```
+
+Tokens are created in `/admin/`, stored as hashes, can be scoped/rate-limited/revoked, and are displayed only once. The WebUI uses its own `/web-api/v1` session channel and never embeds this token.
+
+## External endpoints
 
 | Method | Path | Purpose |
 |---|---|---|

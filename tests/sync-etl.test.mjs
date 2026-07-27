@@ -281,8 +281,7 @@ describe('built-in ETL planning and publishing', () => {
   it('uses bounded region/locality-balanced Overture sampling and addressed OSM ways', async () => {
     const overture = (await readFile('server/sync/overture-export.py', 'utf8')).replace(/\r\n/g, '\n');
     const geofabrik = (await readFile('server/sync/geofabrik-export.py', 'utf8')).replace(/\r\n/g, '\n');
-    expect(geofabrik).toContain('--communities-file');
-    expect(geofabrik).toContain('landuse') && expect(geofabrik).toContain('COMMUNITY_PLACE_TYPES');
+    expect(geofabrik).not.toContain('--communities-file');
     expect(overture).toContain('candidate_limit');
     expect(overture).toContain('USING SAMPLE system(25 PERCENT)');
     expect(overture).toContain('AND bbox.xmin >= {minimum_longitude}');

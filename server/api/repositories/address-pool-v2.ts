@@ -269,7 +269,6 @@ const regionNameCaches = new WeakMap<object, Map<string, RegionNameRow | null>>(
 const cityZhCaches = new WeakMap<object, Map<string, string | null>>();
 const regionPresenceCaches = new WeakMap<object, Map<string, boolean>>();
 const postcodeCaches = new WeakMap<object, Map<string, string | null>>();
-const communityCaches = new WeakMap<object, Map<string, Array<{ zh: string; en: string }> | null>>();
 const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: SqliteDatabase): Map<string, T> => {
   let cache = store.get(db as object);
   if (!cache) {
@@ -415,40 +414,6 @@ const lookupNearestPostcode = async (
   return code;
 };
 
-// Nearest real residential communities (CN). ~3km box, five candidates so the
-// seeded generator pick still varies. Missing table (pre-v13 data) returns null.
-const lookupNearbyCommunities = async (
-  db: SqliteDatabase,
-  coordinates: { latitude: number; longitude: number }
-): Promise<Array<{ zh: string; en: string }> | null> => {
-  const cache = cacheFor(communityCaches, db);
-  const key = `${Math.round(coordinates.latitude * 50)}:${Math.round(coordinates.longitude * 50)}`;
-  if (cache.has(key)) return cache.get(key) || null;
-  let result: Array<{ zh: string; en: string }> | null = null;
-  try {
-    const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
-    const rows = (await db.prepare(`SELECT name, name_en FROM cn_communities
-      WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-      ORDER BY ((latitude - ?) * (latitude - ?)) + ((longitude - ?) * (longitude - ?) * ? * ?)
-      LIMIT 5`)
-      .bind(
-        coordinates.latitude - 0.03, coordinates.latitude + 0.03,
-        coordinates.longitude - 0.03 / longitudeScale, coordinates.longitude + 0.03 / longitudeScale,
-        coordinates.latitude, coordinates.latitude,
-        coordinates.longitude, coordinates.longitude,
-        longitudeScale, longitudeScale
-      ).all<{ name: string; name_en: string }>()).results || [];
-    const communities = rows
-      .map((row) => ({ zh: String(row.name || '').trim(), en: String(row.name_en || '').trim() }))
-      .filter((entry) => entry.zh);
-    result = communities.length ? communities : null;
-  } catch {
-    result = null;
-  }
-  cache.set(key, result);
-  return result;
-};
-
 export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedAddress): Promise<VerifiedAddress> => {
   const variants = address.componentVariants;
   const updated: Record<'native' | 'en' | 'zh-CN', AddressComponents> = {
@@ -563,16 +528,11 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
     }
   }
 
-  const nearbyCommunities = address.countryCode === 'CN'
-    ? await lookupNearbyCommunities(db, address.coordinates)
-    : null;
-
-  if (!changed && !nearbyCommunities) return address;
+  if (!changed) return address;
   return {
     ...address,
     components: updated.native,
-    componentVariants: updated,
-    ...(nearbyCommunities ? { nearbyCommunities } : {})
+    componentVariants: updated
   };
 };
 

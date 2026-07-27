@@ -18,6 +18,7 @@ import {
 import { pickAddressPoolAddress } from './repositories/address-pool';
 import { completenessClause, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
 import { queryLocationCatalog } from './repositories/location-catalog';
+import { countChinaCommunities, pickChinaCommunityAddress } from './repositories/china-community';
 import { localizeAddress } from './services/address-localizer';
 import { clientContextFromRequest } from './services/client-context';
 import { lookupManualIpContext, ManualIpLookupError } from './services/ip-geolocation';
@@ -345,9 +346,10 @@ app.get('/api/v1/health', (context) => context.json({ status: 'ok' }));
 
 app.get('/api/v1/countries', async (context) => {
   const coverage = new Map<string, number>();
-  const [poolCounts, poolV2Counts] = await Promise.all([
+  const [poolCounts, poolV2Counts, chinaCommunities] = await Promise.all([
     addressPoolCounts(context.env.LOCATION_DB),
-    addressPoolV2Counts(context.env.ADDRESS_DB)
+    addressPoolV2Counts(context.env.ADDRESS_DB),
+    countChinaCommunities(context.env.ADDRESS_DB)
   ]);
   if (context.env.LOCATION_DB) {
     const rows = await context.env.LOCATION_DB.prepare('SELECT country_code, SUM(address_count) AS total FROM residential_coverage GROUP BY country_code')
@@ -358,7 +360,9 @@ app.get('/api/v1/countries', async (context) => {
   const data = countries.map((country) => {
     const v2 = poolV2Counts.get(country.code);
     const addressCount = context.env.ADDRESS_DB ? v2?.total || 0 : poolCounts.get(country.code) || 0;
-    const residentialCount = context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
+    const residentialCount = country.code === 'CN' && chinaCommunities > 0
+      ? chinaCommunities
+      : context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
     return {
       ...country,
       addressCount: hasPoolDatabase ? addressCount : null,
@@ -627,6 +631,20 @@ app.get('/api/v1/generate', async (context) => {
   }
 
   const pooled = candidates.length ? undefined : await measureStage(timings, 'pool', async () => {
+    if (country.code === 'CN' && residential) {
+      const community = await toleratePoolFailure(() => pickChinaCommunityAddress(
+        context.env.ADDRESS_DB,
+        ipRegionMode ? ipLocationFilters : filters,
+        seed,
+        ipRegionMode ? ipCoordinates : undefined
+      ));
+      if (community) {
+        pooledSource = 'china-map-community';
+        if (ipRegionMode) ipMatchLevel = ipCoordinates ? 'coordinate' : 'city';
+        else filterMatchLevel = 'exact';
+        return community;
+      }
+    }
     if (ipRegionMode) {
       if (ipCoordinates) {
         const nearest = await toleratePoolFailure(() => pickNearestAddressPoolV2Address(

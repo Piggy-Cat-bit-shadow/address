@@ -220,6 +220,72 @@ CREATE TABLE IF NOT EXISTS sync_country_state (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cn_admin_areas (
+  adcode TEXT PRIMARY KEY,
+  parent_adcode TEXT REFERENCES cn_admin_areas(adcode),
+  level TEXT NOT NULL CHECK (level IN ('province','city','district','township')),
+  name TEXT NOT NULL,
+  full_path TEXT NOT NULL,
+  longitude REAL,
+  latitude REAL,
+  source_version TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cn_communities_v2 (
+  id TEXT PRIMARY KEY,
+  canonical_name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  province TEXT NOT NULL,
+  city TEXT NOT NULL,
+  district TEXT NOT NULL,
+  township TEXT NOT NULL DEFAULT '',
+  provider_address TEXT NOT NULL DEFAULT '',
+  longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
+  latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
+  verification_level TEXT NOT NULL DEFAULT 'L1' CHECK (verification_level IN ('L1','L2','L3')),
+  source_count INTEGER NOT NULL DEFAULT 1 CHECK (source_count >= 1),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cn_community_sources (
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent')),
+  provider_poi_id TEXT NOT NULL,
+  community_id TEXT NOT NULL REFERENCES cn_communities_v2(id) ON DELETE CASCADE,
+  raw_name TEXT NOT NULL,
+  raw_address TEXT NOT NULL DEFAULT '',
+  raw_longitude REAL NOT NULL,
+  raw_latitude REAL NOT NULL,
+  raw_crs TEXT NOT NULL CHECK (raw_crs IN ('GCJ-02','BD-09')),
+  response_hash TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (provider, provider_poi_id)
+);
+
+CREATE TABLE IF NOT EXISTS cn_sync_targets (
+  city TEXT PRIMARY KEY,
+  province TEXT NOT NULL DEFAULT '',
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  target_count INTEGER NOT NULL DEFAULT 500 CHECK (target_count >= 1),
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cn_sync_checkpoints (
+  provider TEXT NOT NULL,
+  city TEXT NOT NULL,
+  page INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending',
+  accepted_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (provider, city)
+);
+
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id TEXT PRIMARY KEY,
   country_code TEXT NOT NULL REFERENCES sync_country_state(country_code) ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -265,6 +331,10 @@ CREATE INDEX IF NOT EXISTS idx_residential_region_id ON residential_coverage(cou
 CREATE INDEX IF NOT EXISTS idx_residential_city_id ON residential_coverage(country_code, city_id);
 CREATE INDEX IF NOT EXISTS idx_sync_country_due ON sync_country_state(status, next_sync_at, country_code);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_country_created ON sync_jobs(country_code, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,level,name);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(latitude,longitude);
+CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
 
 CREATE VIEW IF NOT EXISTS address_pool_runtime AS
 SELECT

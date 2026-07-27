@@ -179,80 +179,27 @@ parser.add_argument("--boundary")
 parser.add_argument("--exclude-boundary", action="append", default=[])
 parser.add_argument("--max-records", required=True, type=int)
 parser.add_argument("--per-locality", required=True, type=int)
-parser.add_argument("--communities-file")
 args = parser.parse_args()
-
-# Named residential communities: landuse=residential ways and
-# place=neighbourhood/quarter nodes. Collected alongside addresses in the same
-# streaming pass; boundary/exclusion polygons apply identically.
-COMMUNITY_PLACE_TYPES = {"neighbourhood", "quarter"}
-COMMUNITY_LIMIT = 200_000
-
-class CommunityCollector:
-    def __init__(self, sampler):
-        self.sampler = sampler
-        self.records = {}
-
-    def add(self, name, longitude, latitude):
-        name = (name or "").strip()
-        if not name or len(self.records) >= COMMUNITY_LIMIT:
-            return
-        if not self.sampler.inside_boundary(longitude, latitude):
-            return
-        key = f"{name}:{round(longitude * 200)}:{round(latitude * 200)}"
-        if key in self.records:
-            return
-        self.records[key] = json.dumps(
-            {"name": name, "longitude": round(longitude, 6), "latitude": round(latitude, 6)},
-            ensure_ascii=False, separators=(",", ":")
-        )
-
-    def node(self, node, tags):
-        if tags.get("place") in COMMUNITY_PLACE_TYPES and node.location.valid():
-            self.add(tags.get("name"), node.location.lon, node.location.lat)
-
-    def way(self, way, tags):
-        if tags.get("landuse") != "residential":
-            return
-        locations = [node.location for node in way.nodes if node.location.valid()]
-        if not locations:
-            return
-        self.add(
-            tags.get("name"),
-            sum(location.lon for location in locations) / len(locations),
-            sum(location.lat for location in locations) / len(locations)
-        )
 
 exclude_polygons = [polygon for path in args.exclude_boundary for polygon in polygons_from_geojson(path)]
 sampler = AddressSampler(args.max_records, args.per_locality, polygons_from_geojson(args.boundary), exclude_polygons)
-communities = CommunityCollector(sampler) if args.communities_file else None
 location_index = None
 location_storage = "flex_mem"
 if pathlib.Path(args.input).stat().st_size >= 1_000_000_000:
     location_index = pathlib.Path(args.output).with_suffix(pathlib.Path(args.output).suffix + ".locations.idx")
     location_storage = f"sparse_file_array,{location_index}"
 filter_keys = ["addr:housenumber", "addr:street", "addr:place"]
-if communities is not None:
-    filter_keys += ["landuse", "place"]
 processor = osmium.FileProcessor(args.input).with_locations(location_storage).with_filter(KeyFilter(*filter_keys))
 try:
     for entity in processor:
         if entity.is_node():
             sampler.node(entity)
-            if communities is not None:
-                communities.node(entity, {tag.k: tag.v for tag in entity.tags})
         elif entity.is_way():
             sampler.way(entity)
-            if communities is not None:
-                communities.way(entity, {tag.k: tag.v for tag in entity.tags})
 finally:
     del processor
     if location_index:
         location_index.unlink(missing_ok=True)
-if communities is not None:
-    pathlib.Path(args.communities_file).write_text(
-        "\n".join(communities.records.values()) + ("\n" if communities.records else ""), encoding="utf-8"
-    )
 selected = sorted(
     (record for group in sampler.groups.values() for record in group["records"]),
     key=lambda item: item[0]

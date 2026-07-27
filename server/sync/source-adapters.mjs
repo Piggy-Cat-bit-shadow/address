@@ -441,15 +441,11 @@ export const createSourceAdapters = ({
         file: pythonBin,
         args: [geofabrikExporter, '--input', raw, '--output', temporary,
           '--max-records', String(options.maxRecords), '--per-locality', String(options.perLocality),
-          ...(shard.countryCode === 'CN' ? ['--communities-file', `${temporary}.communities.jsonl`] : []),
           ...(discovery.boundaryUrl ? ['--boundary', boundary] : []),
           ...excludeBoundaries.flatMap((file) => ['--exclude-boundary', file])],
         phase: `materialize:${shard.id}`
       });
       await rename(temporary, output);
-      if (shard.countryCode === 'CN') {
-        await rename(`${temporary}.communities.jsonl`, `${output}.communities.jsonl`).catch(() => {});
-      }
       completed = true;
     } finally {
       await rm(boundary, { force: true });

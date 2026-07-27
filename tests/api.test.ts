@@ -41,9 +41,10 @@ describe('synchronized address registry', () => {
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
       addressCount: 10, residentialCount: 8, residentialAvailable: false, generationMode: 'synchronized-pool'
     });
-    expect(statements).toHaveLength(1);
+    expect(statements).toHaveLength(2);
     expect(statements[0]).toContain('FROM address_pool address');
     expect(statements[0]).not.toContain('address_pool_runtime');
+    expect(statements[1]).toContain('cn_communities_v2');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 
@@ -78,9 +79,10 @@ describe('synchronized address registry', () => {
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number }> };
 
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 7, residentialCount: 3 });
-    expect(statements).toHaveLength(1);
+    expect(statements).toHaveLength(2);
     expect(statements[0]).toContain('FROM address_pool address');
     expect(statements[0]).toContain('residential_use');
+    expect(statements[1]).toContain('cn_communities_v2');
   });
 
   it('does not advertise legacy residential coverage when the active pool has none', async () => {

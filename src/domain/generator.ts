@@ -157,46 +157,6 @@ const emailFor = (name: string, countryCode: CountryCode, suffix: string): strin
   return `${local || countryCode.toLowerCase()}${suffix}@outlook.com`;
 };
 
-// Decision ②: only China gets a synthetic house number (1-2999) and a community
-// name from the lexicon; the road, district, city, province and coordinates stay
-// real. Drawn from a dedicated seeded stream so profile fields keep their values.
-const chinaCommunityLexicon: Array<{ zh: string; en: string }> = [
-  { zh: '世纪花园', en: 'Century Garden' },
-  { zh: '幸福家园', en: 'Happiness Garden' },
-  { zh: '阳光小区', en: 'Sunshine Community' },
-  { zh: '翡翠湾', en: 'Emerald Bay' },
-  { zh: '锦绣华庭', en: 'Splendid Court' },
-  { zh: '龙湖天街', en: 'Longhu Paradise Walk' },
-  { zh: '绿地公馆', en: 'Greenland Mansion' },
-  { zh: '保利花园', en: 'Poly Garden' },
-  { zh: '中海国际社区', en: 'Zhonghai International Community' },
-  { zh: '招商雍景湾', en: 'Yongjing Bay' }
-];
-
-const withChinaSyntheticBase = (address: VerifiedAddress, seed: number): VerifiedAddress => {
-  if (address.countryCode !== 'CN') return address;
-  const random = randomFromSeed(hashSeed(`${seed}:cn-base`));
-  const houseNumber = String(1 + Math.floor(random() * 2999));
-  // Prefer a real community near the point (attached at read time from OSM
-  // landuse=residential); the lexicon is only the no-coverage fallback.
-  const real = address.nearbyCommunities?.length
-    ? address.nearbyCommunities[Math.floor(random() * address.nearbyCommunities.length)]
-    : undefined;
-  const fallback = chinaCommunityLexicon[Math.floor(random() * chinaCommunityLexicon.length)];
-  const community = real
-    ? { zh: real.zh, en: real.en || real.zh }
-    : fallback;
-  const override = (components: AddressComponents, buildingName: string): AddressComponents => ({
-    ...components, houseNumber, buildingName
-  });
-  const componentVariants = {
-    native: override(address.componentVariants.native, community.zh),
-    en: override(address.componentVariants.en, community.en),
-    'zh-CN': override(address.componentVariants['zh-CN'], community.zh)
-  };
-  return { ...address, components: componentVariants.native, componentVariants };
-};
-
 const generatedUnitFor = (
   address: VerifiedAddress,
   random: () => number
@@ -204,10 +164,11 @@ const generatedUnitFor = (
   if (address.components.unit || ['official', 'source_tagged'].includes(address.unitProvenance || '')) return undefined;
   const shouldGenerate = address.countryCode === 'CN' || address.propertyType === 'apartment';
   if (!shouldGenerate) return undefined;
-  const building = 1 + Math.floor(random() * 35);
-  const entrance = 1 + Math.floor(random() * 4);
-  const floor = 2 + Math.floor(random() * 28);
-  const room = 1 + Math.floor(random() * 8);
+  const china = address.countryCode === 'CN';
+  const building = 1 + Math.floor(random() * (china ? 3 : 35));
+  const entrance = 1 + Math.floor(random() * (china ? 3 : 4));
+  const floor = 2 + Math.floor(random() * (china ? 5 : 28));
+  const room = 1 + Math.floor(random() * (china ? 4 : 8));
   const roomNumber = `${floor}${String(room).padStart(2, '0')}`;
   const nativeUnits: Partial<Record<CountryCode, string>> = {
     CN: `${building}栋${entrance}单元${roomNumber}室`,
@@ -255,7 +216,7 @@ export const generateBundle = (
 
   const normalizedSeed = seed.trim() || crypto.randomUUID();
   const requestSeed = hashSeed(`${address.id}:${address.countryCode}:${normalizedSeed}`);
-  const presentedAddress = withChinaSyntheticBase(address, requestSeed);
+  const presentedAddress = address;
   const random = randomFromSeed(requestSeed);
   const faker = new Faker({ locale: [fakerLocaleByCountry[address.countryCode], en, base] });
   faker.seed(requestSeed);

@@ -24,17 +24,21 @@
 | 活跃 SQLite WAL | 0.68 GiB |
 | 完整 `data/` 目录 | 7.89 GiB |
 | 当前有效地址 | 722,950 条 |
-| 中国小区记录 | 174,327 条 |
+| 旧版中国住宅子集 | 174,327 条（历史实测，不是新版 POI 小区池） |
 
-首次导入会临时保留源文件和中间结果，历史实测峰值约 11.2 GiB。上游版本、WAL 活跃度和可选保留设置会改变实际大小。建议 60 GiB 是为了给同步、备份和恢复留出余量：影子扩容在 40 GiB 停止，写入会在达到 45 GiB 前中止，项目绝对上限为 50 GiB。
+新版中国 POI 小区池会在高德、百度或腾讯同步后增长，最终数量和容量取决于启用城市、页数及平台返回结果。首次导入会临时保留源文件和中间结果，旧版历史实测峰值约 11.2 GiB。上游版本、WAL 活跃度和可选保留设置会改变实际大小。建议 60 GiB 是为了给同步、备份和恢复留出余量：影子扩容在 40 GiB 停止，写入会在达到 45 GiB 前中止，项目绝对上限为 50 GiB。
 
 ## API Key 与密钥
 
-离线地址池、Overture/Geofabrik 同步、SQLite 生成、OpenCC、拼音转换、Google 地图链接和高德网页链接均不需要第三方 API Key。
+日常生成只查询 SQLite。中国小区同步需要一个或多个高德、百度或腾讯服务端 Key，部署后在 `/admin/` 中配置。
 
 | 变量 | 是否必需 | 功能 | 获取方式 |
 |---|---|---|---|
-| `AMAP_API_KEY` | 可选 | 中国实时 POI 查询 | 按[高德官方文档](https://lbs.amap.com/api/webservice/guide/create-project/get-key)创建“Web 服务”类型 Key。 |
+| `CONFIG_MASTER_KEY` | 必需 | 加密 `control.sqlite` 中的地图凭据 | 使用 `openssl rand -base64 32` 生成，只保留在服务器。 |
+| `ADMIN_BOOTSTRAP_PASSWORD` | 首次必需 | 初始化管理员身份 | 设置强密码；初始化完成后不再读取其明文。 |
+| 高德 Key | 中国同步 | 小区 POI 导入 | 创建“Web 服务”Key 后在 `/admin/` 添加。 |
+| 百度 Key | 中国同步 | 小区 POI 导入和交叉验证 | 创建服务端 Place API Key 后在 `/admin/` 添加。 |
+| 腾讯 Key | 中国同步 | 小区 POI 导入和交叉验证 | 创建 WebService API Key 后在 `/admin/` 添加。 |
 | `GEOAPIFY_API_KEY` | 可选 | 中国以外实时地理编码及部分反向本地化 | 按 [Geoapify 官方指南](https://www.geoapify.com/get-started-with-maps-api/)创建项目和 Key。 |
 | `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET` | 成对可选 | 在线翻译备用通道 | 在[有道智云](https://ai.youdao.com/)创建自然语言翻译应用。 |
 | `ONEMAP_ACCESS_TOKEN` | 可选 | 新加坡普通地址实时查询 | 按 [OneMap 认证文档](https://www.onemap.gov.sg/apidocs/authentication)获取；Token 到期后需要刷新。 |
@@ -63,26 +67,32 @@ cp /root/address/app/ops/address.env.example /root/address/runtime/address.env
 chmod 600 /root/address/runtime/address.env
 ```
 
-生成同步 Token，过程中不输出具体值：
+生成主密钥和同步 Token，过程中不输出具体值：
 
 ```bash
 token="$(openssl rand -hex 32)"
+master_key="$(openssl rand -base64 32)"
 sed -i "s/GENERATE_A_RANDOM_VALUE/$token/" /root/address/runtime/address.env
-unset token
+sed -i "s/GENERATE_32_BYTE_BASE64_VALUE/$master_key/" /root/address/runtime/address.env
+unset token master_key
 chmod 600 /root/address/runtime/address.env
 ```
 
-至少需要替换 `YOUR_DOMAIN.example`、生成 `SYNC_ADMIN_TOKEN` 并检查 `TRUST_PROXY`。仅在启用对应功能时填写可选服务凭据。
+至少需要替换 `YOUR_DOMAIN.example`、生成 `CONFIG_MASTER_KEY` 和 `SYNC_ADMIN_TOKEN`、设置一次性管理员密码并检查 `TRUST_PROXY`。地图 Key 统一在 `/admin/` 添加，不写入 Git 跟踪文件。
 
 ## 运行配置
 
 | 变量 | 生产默认值 | 作用 |
 |---|---|---|
-| `PUBLIC_API_BASE_URL` | `/api` | 浏览器使用的 API 前缀 |
+| `PUBLIC_API_BASE_URL` | `/web-api` | 浏览器使用的会话鉴权 API 前缀 |
 | `API_HOST` | `127.0.0.1` | Hono 监听地址 |
 | `API_PORT` | `8787` | Hono 监听端口 |
 | `STATIC_ROOT` | `/root/address/app/dist` | Astro 构建结果 |
 | `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite 数据库 |
+| `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | 认证、加密凭据、配额、任务和审计数据库 |
+| `CONFIG_MASTER_KEY` | 仅服务器保存的随机值 | 地图凭据 AES-256-GCM 主密钥 |
+| `ADMIN_BOOTSTRAP_PASSWORD` | 一次性强密码 | 创建初始管理员身份 |
+| `COOKIE_SECURE` | `true` | 仅通过 HTTPS 发送认证 Cookie |
 | `ALLOWED_ORIGIN` | 公开 HTTPS 来源 | CORS 白名单 |
 | `TRUST_PROXY` | 代理后为 `true` | 是否信任转发的客户端 IP 请求头 |
 | `SYNC_HOST` | `127.0.0.1` | 同步管理监听地址 |
@@ -91,6 +101,8 @@ chmod 600 /root/address/runtime/address.env
 | `SYNC_UTC_HOUR` | `3` | 每日调度检查时间，UTC 小时 |
 
 只有受控反向代理会覆盖转发 IP 请求头时才启用 `TRUST_PROXY`。端口 `8791` 始终保持私有。
+
+AreaCity 数据需先下载并解压 `ok_data_level4.csv` 到 `/root/address/data/imports/`，再在 `/admin/` 的“中国同步 → 导入 AreaCity”中填写 `imports/ok_data_level4.csv` 和发布版本。也可填写 HTTPS JSON/CSV 地址；本地路径仅允许位于数据目录内。
 
 ## 首次部署
 

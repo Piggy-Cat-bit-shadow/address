@@ -71,24 +71,27 @@ describe('China address domain rules', () => {
     const englishUnit = `Room ${unit.components.room}, Unit ${unit.components.unit}, Building ${unit.components.building}`;
 
     expect(unit).toMatchObject({ provenance: 'synthetic', unitProvenance: 'synthetic' });
-    // Decision ②: China swaps in a synthetic house number (1-2999) and a lexicon
-    // community while road, admin hierarchy and coordinates stay real.
     const presented = bundle.address.components;
-    const houseNumber = Number(presented.houseNumber);
-    expect(houseNumber).toBeGreaterThanOrEqual(1);
-    expect(houseNumber).toBeLessThanOrEqual(2999);
-    expect(presented.street).toBe(address.components.street);
-    const community = presented.buildingName!;
-    expect(['世纪花园', '幸福家园', '阳光小区', '翡翠湾', '锦绣华庭', '龙湖天街', '绿地公馆', '保利花园', '中海国际社区', '招商雍景湾']).toContain(community);
+    expect(presented).toEqual(address.components);
+    expect(Number(unit.components.building)).toBeGreaterThanOrEqual(1);
+    expect(Number(unit.components.building)).toBeLessThanOrEqual(3);
+    expect(Number(unit.components.unit)).toBeGreaterThanOrEqual(1);
+    expect(Number(unit.components.unit)).toBeLessThanOrEqual(3);
+    const floor = Number(unit.components.room.slice(0, -2));
+    const room = Number(unit.components.room.slice(-2));
+    expect(floor).toBeGreaterThanOrEqual(2);
+    expect(floor).toBeLessThanOrEqual(6);
+    expect(room).toBeGreaterThanOrEqual(1);
+    expect(room).toBeLessThanOrEqual(4);
     expect(bundle.address.coordinates).toEqual(address.coordinates);
     expect(bundle.address.unitProvenance).toBe('none');
-    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路${houseNumber}号${community}${nativeUnit}`);
-    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路${houseNumber}号${community}${nativeUnit}`);
+    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${nativeUnit}`);
+    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${nativeUnit}`);
 
     const english = bundle.addressFormats.en.singleLine;
-    const englishCommunity = bundle.address.componentVariants.en.buildingName!;
+    const englishCommunity = 'Guangming Residential Community';
     const ordered = [
-      englishUnit, englishCommunity, `${houseNumber} Wenhua Road`, 'Fengrun Town',
+      englishUnit, englishCommunity, '18 Wenhua Road', 'Fengrun Town',
       'Fengrun District', 'Tangshan City', 'Hebei Province', 'CHINA'
     ];
     for (let index = 1; index < ordered.length; index += 1) {
@@ -99,23 +102,21 @@ describe('China address domain rules', () => {
       expect(bundle.addressFormats[language].singleLine).not.toContain(address.components.postcode);
     }
     expect(new URL(bundle.googleMaps.openUrl).searchParams.get('query')).toBe('39.832,118.162');
-    // Map search skeleton excludes the synthetic house number and community.
     const searchQuery = new URL(bundle.googleMaps.searchUrl!).searchParams.get('query')!;
     expect(searchQuery).toContain('文化路');
-    expect(searchQuery).not.toContain(community);
+    expect(searchQuery).toContain('光明小区');
     expect(bundle.googleMaps.amapUrl).toContain('uri.amap.com/marker');
     expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).generatedUnit).toEqual(unit);
     expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).address.components).toEqual(presented);
   });
 
-  it('prefers a real nearby community over the lexicon when attached', () => {
+  it('keeps the verified provider community and ignores legacy nearby OSM hints', () => {
     const address = { ...chinaAddress(), nearbyCommunities: [{ zh: '天湖城', en: 'Tianhucheng' }] };
     const bundle = generateBundle(address, true, 'cn-community-seed', undefined, now);
-    expect(bundle.address.components.buildingName).toBe('天湖城');
-    expect(bundle.address.componentVariants.en.buildingName).toBe('Tianhucheng');
-    expect(bundle.addressFormats.native.singleLine).toContain('天湖城');
-    // Deterministic per seed.
-    expect(generateBundle(address, true, 'cn-community-seed', undefined, now).address.components.buildingName).toBe('天湖城');
+    expect(bundle.address.components.buildingName).toBe('光明小区');
+    expect(bundle.address.componentVariants.en.buildingName).toBe('Guangming Residential Community');
+    expect(bundle.addressFormats.native.singleLine).toContain('光明小区');
+    expect(generateBundle(address, true, 'cn-community-seed', undefined, now).address.components.buildingName).toBe('光明小区');
   });
 
   it('deduplicates a municipality in Chinese and English output', () => {

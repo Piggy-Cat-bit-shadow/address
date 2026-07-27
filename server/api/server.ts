@@ -1,9 +1,14 @@
 import { serve, type HttpBindings } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { Hono } from 'hono';
 import app from './index';
 import { openDatabase } from '../database/sqlite.mjs';
+import { initializeSqliteDatabase } from '../database/sqlite.mjs';
+import { masterKeyFrom } from '../control/security';
+import { ControlStore } from '../control/store';
+import { apiAuthorization, createAccessApi, createAdminApi, authorizeWebRequest } from '../control/admin-api';
+import { ChinaDataService } from '../china/service';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -13,11 +18,27 @@ const integer = (value: string | undefined, fallback: number): number => {
 
 const databasePath = resolve(process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite');
 const database = openDatabase(databasePath);
+const controlDatabasePath = resolve(process.env.CONTROL_DATABASE_PATH || 'data/control.sqlite');
+const controlDatabase = openDatabase(controlDatabasePath, { migrate: false });
+await initializeSqliteDatabase(controlDatabase, new URL('../control/schema.sql', import.meta.url));
+const control = new ControlStore(controlDatabase, masterKeyFrom(process.env.CONFIG_MASTER_KEY));
+await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD);
+const china = new ChinaDataService(database, control, dirname(databasePath));
+await china.initializeTargets();
 const port = integer(process.env.API_PORT, 8787);
 const hostname = process.env.API_HOST || '0.0.0.0';
 const staticRoot = resolve(process.env.STATIC_ROOT || 'dist');
 const syncControlUrl = process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791';
 const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
+const adminApi = createAdminApi({ control, china, addressDb: database, addressDatabasePath: databasePath, controlDatabasePath });
+const accessApi = createAccessApi(control);
+const securityHeaders = (response: Response): Response => {
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  return response;
+};
 
 const staticApp = new Hono<{ Bindings: HttpBindings }>();
 staticApp.use('*', serveStatic({ root: staticRoot }));
@@ -51,16 +72,44 @@ await Promise.all([
 ]).catch(() => undefined);
 
 const server = serve({
-  fetch: (request, node) => {
+  fetch: async (request, node) => {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/admin/api/')) return securityHeaders(await adminApi.fetch(request));
+    if (url.pathname.startsWith('/web-api/v1/auth/')) return securityHeaders(await accessApi.fetch(request));
     if (url.pathname === '/sync-control' || url.pathname.startsWith('/sync-control/')) {
-      if (!syncControlPublic) return new Response('Not Found', { status: 404 });
+      if (!syncControlPublic) return securityHeaders(new Response('Not Found', { status: 404 }));
       const target = new URL(`${url.pathname.slice('/sync-control'.length) || '/'}${url.search}`, syncControlUrl);
-      return fetch(new Request(target, request));
+      return securityHeaders(await fetch(new Request(target, request)));
     }
-    return url.pathname.startsWith('/api/')
-      ? app.fetch(request, { ...environment, ...node })
-      : staticApp.fetch(request, node);
+    if (url.pathname.startsWith('/web-api/v1/')) {
+      if (!await authorizeWebRequest(control, request)) return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401 }));
+      const target = new URL(request.url);
+      target.pathname = target.pathname.replace(/^\/web-api\/v1/u, '/api/v1');
+      const amap = await control.acquireCredential('amap');
+      return securityHeaders(await app.fetch(new Request(target, request), { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node }));
+    }
+    if (url.pathname.startsWith('/api/')) {
+      if (url.pathname !== '/api/v1/health') {
+        const authorization = await apiAuthorization(control, request);
+        if (authorization.status !== 'authorized') {
+          const rateLimited = authorization.status === 'rate_limited';
+          return securityHeaders(Response.json({ error: rateLimited ? 'RATE_LIMITED' : 'UNAUTHORIZED' }, {
+            status: rateLimited ? 429 : 401,
+            headers: rateLimited ? { 'Retry-After': '60' } : undefined
+          }));
+        }
+      }
+      const amap = await control.acquireCredential('amap');
+      return securityHeaders(await app.fetch(request, { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node }));
+    }
+    const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access')
+      || url.pathname.startsWith('/_astro/') || /\.(?:css|js|svg|png|jpg|jpeg|webp|ico|woff2?)$/iu.test(url.pathname);
+    if (!publicStatic) {
+      return securityHeaders(await authorizeWebRequest(control, request)
+        ? await staticApp.fetch(request, node)
+        : Response.redirect(new URL('/access/', request.url), 302));
+    }
+    return securityHeaders(await staticApp.fetch(request, node));
   },
   hostname,
   port
@@ -74,6 +123,7 @@ const shutdown = (): void => {
   stopping = true;
   server.close((error) => {
     database.close();
+    controlDatabase.close();
     if (error) {
       console.error(error);
       process.exitCode = 1;

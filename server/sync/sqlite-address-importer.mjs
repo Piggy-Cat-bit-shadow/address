@@ -455,7 +455,6 @@ export class SqliteAddressImporter {
           ELSE 'low'
         END
         WHERE country_code=?`).bind(shard.countryCode).run();
-      await this.importCommunities(shard, materialized, batchSize);
       await this.database.exec('COMMIT');
     } catch (error) {
       await this.database.exec('ROLLBACK').catch(() => {});
@@ -466,60 +465,6 @@ export class SqliteAddressImporter {
       datasetId, acceptedCount: localized.length, rejectedCount, localityCount: localityCounts.size,
       admin1Count: candidateAdmin1Count, residentialCount, skipped: false
     };
-  }
-
-  // Real Chinese residential communities extracted from the same china.pbf pass
-  // (landuse=residential / place=neighbourhood with names). Replaces the whole
-  // table per snapshot; institution + custom blacklists filter estate names.
-  async importCommunities(shard, materialized, batchSize) {
-    if (shard.countryCode !== 'CN') return;
-    const sidecar = `${materialized.file}.communities.jsonl`;
-    const { findNonResidentialMatch } = await import('../../src/domain/non-residential.mjs');
-    const { matchesCustomBlacklist } = await import('../lib/custom-blacklist.mjs');
-    const { pinyin } = await import('pinyin-pro');
-    const { Converter } = await import('opencc-js/t2cn');
-    const toSimplified = Converter({ from: 'hk', to: 'cn' });
-    const romanize = (value) => {
-      try {
-        const words = pinyin(toSimplified(String(value || '')), { toneType: 'none', type: 'array' })
-          .map((word) => word.trim()).filter(Boolean);
-        const joined = words.map((word) => /^[a-z]/i.test(word) ? word : '').join('');
-        return joined ? joined.charAt(0).toUpperCase() + joined.slice(1) : '';
-      } catch {
-        return '';
-      }
-    };
-    const entries = [];
-    try {
-      for await (const value of readJsonLines(sidecar)) {
-        const name = String(value?.name || '').trim();
-        const latitude = Number(value?.latitude);
-        const longitude = Number(value?.longitude);
-        if (!name || name.length > 40 || !Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
-        if (findNonResidentialMatch({ countryCode: 'CN', buildingName: name }).excluded) continue;
-        if (matchesCustomBlacklist([name])) continue;
-        entries.push({ name, nameEn: romanize(name), latitude, longitude });
-      }
-    } catch (error) {
-      if (error?.code === 'ENOENT') return;
-      throw error;
-    }
-    if (!entries.length) return;
-    await this.database.exec(`CREATE TABLE IF NOT EXISTS cn_communities(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      name_en TEXT NOT NULL DEFAULT '',
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL
-    )`);
-    await this.database.exec('CREATE INDEX IF NOT EXISTS idx_cn_communities_lat ON cn_communities(latitude)');
-    await this.database.prepare('DELETE FROM cn_communities').run();
-    for (let offset = 0; offset < entries.length; offset += batchSize) {
-      await this.database.batch(entries.slice(offset, offset + batchSize).map((entry) =>
-        this.database.prepare('INSERT INTO cn_communities(name,name_en,latitude,longitude) VALUES (?,?,?,?)')
-          .bind(entry.name, entry.nameEn, entry.latitude, entry.longitude)));
-      await new Promise((resolveTick) => setImmediate(resolveTick));
-    }
   }
 
   async close() {}

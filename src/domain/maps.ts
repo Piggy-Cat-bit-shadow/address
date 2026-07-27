@@ -40,11 +40,11 @@ export const wgs84ToGcj02 = ({ latitude, longitude }: Coordinates): Coordinates 
   };
 };
 
-// Verifiable skeleton for text search: real components only — synthetic house
-// numbers (CN), community names and indoor units never join the query.
+// Verifiable text search uses source-backed components; generated indoor units
+// are carried separately and never join the query.
 export const mapSearchQuery = (countryCode: string, components: AddressComponents): string => {
   if (countryCode === 'CN') {
-    return [components.street, components.district, components.locality, components.admin1]
+    return [components.street, components.houseNumber, components.buildingName, components.district, components.locality, components.admin1]
       .map((value) => (value || '').trim()).filter(Boolean).join('');
   }
   return [

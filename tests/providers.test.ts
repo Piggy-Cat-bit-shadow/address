@@ -127,8 +127,8 @@ describe('registered address providers', () => {
     const localized = await localizeAddress(result.candidates[0], country('CN'), {}, fetcher as typeof fetch);
     const bundle = generateBundle(localized, false, 'cn-provider-e2e', undefined);
 
-    expect(bundle.addressFormats.native.singleLine).toMatch(/河北省唐山市丰润区文化路\d+号(?:世纪花园|幸福家园|阳光小区|翡翠湾|锦绣华庭|龙湖天街|绿地公馆|保利花园|中海国际社区|招商雍景湾)\d+栋\d+单元\d+室/u);
-    expect(bundle.addressFormats.en.singleLine).toMatch(/^Room \d+, Unit \d+, Building \d+, (?:Century Garden|Happiness Garden|Sunshine Community|Emerald Bay|Splendid Court|Longhu Paradise Walk|Greenland Mansion|Poly Garden|Zhonghai International Community|Yongjing Bay), \d+ Wenhua Road, Fengrun District, Tangshan City, Hebei Province, CHINA$/u);
+    expect(bundle.addressFormats.native.singleLine).toMatch(/^河北省唐山市丰润区文化路987号丰润春城[1-3]栋[1-3]单元[2-6]0[1-4]室$/u);
+    expect(bundle.addressFormats.en.singleLine).toMatch(/^Room [2-6]0[1-4], Unit [1-3], Building [1-3], Fengrun Chuncheng, 987 Wenhua Road, Fengrun District, Tangshan City, Hebei Province, CHINA$/u);
     expect(bundle.addressFormats.en.singleLine).not.toMatch(/[\u3400-\u9fff]|064000/u);
   });
 
