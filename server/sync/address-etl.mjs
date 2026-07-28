@@ -607,7 +607,7 @@ export const runAddressEtl = async ({
         continue;
       }
       const defaults = providedImporter || providedCatalog ? null : ADDRESS_POLICY_DEFAULTS[shard.countryCode];
-      const policy = database && activeRun && !providedCatalog
+      const policy = database && activeRun && !providedImporter
         ? await loadImportPolicy(database, shard.countryCode, maxRecords, perLocality)
         : { enabled: true, targetCount: defaults?.target || maxRecords, levelLimits: defaults?.limits || [maxRecords, perLocality, perLocality, perLocality], overrides: new Map() };
       if (policy.enabled === false) {

@@ -467,21 +467,29 @@ describe('built-in ETL planning and publishing', () => {
         source: language === 'native' ? 'source' : 'fixture-translator'
       }]))
     }));
+    let materializeOptions;
     const result = await runAddressEtl({
       databasePath,
       cacheDir: resolve(directory, 'cache'),
       dataRoot: directory,
-      catalog: { schemaVersion: 1, shards: [{ id: 'fixture-us', countryCode: 'US', intervalDays: 30, source }] },
+      catalog: { schemaVersion: 1, shards: [{
+        id: 'fixture-us', countryCode: 'US', intervalDays: 30, source,
+        qualityGate: { minimumRecords: 1, minimumAdmin1: 1, minimumCountRatio: 0, minimumAdmin1Ratio: 0 }
+      }] },
       syncMode: 'manual',
       maxRecords: 10,
       perLocality: 2,
       localizeRecords,
       adapters: {
         discover: async () => ({ adapter: 'overture', version: 'fixture', dataUrl: source.dataUrl, sourceBytes: 0 }),
-        materialize: async () => ({ file, format: 'overture-jsonl', checksum: 'c'.repeat(64), cacheBytes: 1 })
+        materialize: async (_shard, _discovery, options) => {
+          materializeOptions = options;
+          return { file, format: 'overture-jsonl', checksum: 'c'.repeat(64), cacheBytes: 1 };
+        }
       }
     });
     expect(result).toMatchObject({ changed: true, selectedShards: ['fixture-us'] });
+    expect(materializeOptions).toMatchObject({ maxRecords: 150_000, perLocality: 2_000 });
     const database = openDatabase(databasePath, { readOnly: true });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM address_pool_runtime').first('count')).toBe(1);
     expect(await database.prepare('SELECT status FROM sync_country_state WHERE country_code=?').bind('US').first('status')).toBe('ready');
