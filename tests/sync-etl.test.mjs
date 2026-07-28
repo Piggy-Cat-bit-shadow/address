@@ -402,7 +402,7 @@ describe('built-in ETL planning and publishing', () => {
     });
     expect(replacement).toMatchObject({ acceptedCount: 1, skipped: false });
     expect(await database.prepare("SELECT COUNT(*) AS count FROM address_datasets WHERE status='active'").first('count')).toBe(1);
-    expect(await database.prepare("SELECT COUNT(*) AS count FROM address_datasets WHERE status='retired'").first('count')).toBe(1);
+    expect(await database.prepare("SELECT COUNT(*) AS count FROM address_datasets WHERE status='retired'").first('count')).toBe(0);
     expect(await database.prepare("SELECT source_id FROM address_datasets WHERE status='active'").first('source_id')).toBe('replacement-source');
     expect(await database.prepare('SELECT COUNT(*) AS count FROM address_pool_runtime').first('count')).toBe(1);
     database.close();

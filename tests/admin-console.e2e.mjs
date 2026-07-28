@@ -101,7 +101,7 @@ try {
   await panel(page, '地址数据').waitFor();
 
   const views = [
-    ['仪表盘', '地址数据'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
+    ['仪表盘', '地址数据'], ['同步策略', '地址数量与并发'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
     ['中国同步', '自动同步'], ['接口令牌', '接口令牌'], ['任务中心', '任务中心']
   ];
   for (let round = 0; round < 3; round += 1) {
@@ -110,6 +110,21 @@ try {
       await panel(page, title).waitFor();
     }
   }
+
+  await page.getByRole('button', { name: '同步策略', exact: true }).click();
+  await page.locator('.policy-runtime-form input').nth(0).fill('4');
+  await page.locator('.policy-runtime-form input').nth(1).fill('2');
+  await page.getByRole('button', { name: '保存并发设置', exact: true }).click();
+  await page.locator('.admin-notice').filter({ hasText: '并发设置已保存' }).waitFor();
+  const usPolicyRow = page.locator('tbody tr').filter({ hasText: /美国.*US/s }).first();
+  await usPolicyRow.getByRole('button', { name: '修改策略', exact: true }).click();
+  const policyDialog = page.getByRole('dialog', { name: '修改策略' });
+  await policyDialog.locator('input[name=targetCount]').fill('12345');
+  await policyDialog.getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.admin-notice').filter({ hasText: '同步策略已保存' }).waitFor();
+  await usPolicyRow.getByRole('button', { name: '管理区域', exact: true }).click();
+  await page.locator('.admin-empty').filter({ hasText: '当前层级暂无行政节点' }).waitFor();
+  await page.getByRole('button', { name: '返回国家', exact: true }).click();
 
   await page.getByRole('button', { name: '访问与安全', exact: true }).click();
   await page.locator('input[name=frontendPasswordEnabled]').check();

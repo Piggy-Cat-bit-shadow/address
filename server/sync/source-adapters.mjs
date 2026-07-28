@@ -179,6 +179,7 @@ export const loadSourceCatalog = async (file = catalogFile) => {
 export const createSourceAdapters = ({
   fetchImpl = fetch,
   execute = runProcess,
+  processConcurrency = 3,
   pythonBin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
   enableOvertureResidential = process.env.ADDRESS_SYNC_OVERTURE_BUILDINGS === 'true'
 } = {}) => {
@@ -187,6 +188,19 @@ export const createSourceAdapters = ({
   let overtureCatalogPromise;
   let overtureBuildingCatalogPromise;
   let geofabrikIndexPromise;
+  const processWaiters = [];
+  let activeProcesses = 0;
+  const runExecute = async (options) => {
+    if (activeProcesses >= processConcurrency) await new Promise((resolve) => processWaiters.push(resolve));
+    activeProcesses += 1;
+    try { return await execute(options); }
+    finally {
+      activeProcesses -= 1;
+      processWaiters.shift()?.();
+    }
+  };
+  const downloads = new Map();
+  const sharedRawFiles = new Set();
 
   const loadStacItems = async (collectionUrl, collection) => {
     const links = collection.links.filter((link) => link.rel === 'item');
@@ -369,6 +383,13 @@ export const createSourceAdapters = ({
     return (await stat(destination)).size;
   };
 
+  const sharedDownload = (url, destination, options) => {
+    if (!downloads.has(destination)) {
+      downloads.set(destination, download(url, destination, options).finally(() => downloads.delete(destination)));
+    }
+    return downloads.get(destination);
+  };
+
   const materializeOverture = async (shard, discovery, options) => {
     const residentialRevision = discovery.buildingAssets?.length ? `-${overtureResidentialRevision}` : '';
     const baseOutput = resolve(options.cacheDir, 'normalized', `${shard.id}-${safeVersion(discovery.version)}.jsonl`);
@@ -391,7 +412,7 @@ export const createSourceAdapters = ({
     await writeFile(assetsFile, JSON.stringify(discovery.assets), 'utf8');
     await writeFile(buildingAssetsFile, JSON.stringify(discovery.buildingAssetEntries || discovery.buildingAssets || []), 'utf8');
     try {
-      await execute({
+      await runExecute({
         file: pythonBin,
         args: [overtureExporter, '--country', shard.countryCode, '--release', discovery.version,
           '--output', temporary, '--max-records', String(options.maxRecords),
@@ -424,12 +445,14 @@ export const createSourceAdapters = ({
       const size = (await stat(output)).size;
       return { file: output, format: 'geofabrik-geojsonseq', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
     } catch {}
-    const raw = resolve(options.cacheDir, 'raw', `${shard.id}-${version}-${basename(new URL(discovery.dataUrl).pathname)}`);
-    const boundary = `${raw}.boundary.geojson`;
-    const excludeBoundaries = (discovery.excludeBoundaryUrls || []).map((_, index) => `${raw}.exclude-${index}.geojson`);
+    const rawIdentity = createHash('sha256').update(`${discovery.dataUrl}\u001f${version}`).digest('hex').slice(0, 16);
+    const raw = resolve(options.cacheDir, 'raw', `${rawIdentity}-${basename(new URL(discovery.dataUrl).pathname)}`);
+    const boundary = `${raw}.${shard.id}.boundary.geojson`;
+    const excludeBoundaries = (discovery.excludeBoundaryUrls || []).map((_, index) => `${raw}.${shard.id}.exclude-${index}.geojson`);
     const temporary = `${output}.${process.pid}.tmp`;
     await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
-    await download(discovery.dataUrl, raw, { expectedBytes: discovery.sourceBytes, maxBytes: options.maxBytes });
+    await sharedDownload(discovery.dataUrl, raw, { expectedBytes: discovery.sourceBytes, maxBytes: options.maxBytes });
+    if (options.sharedRaw && !options.retainRaw) sharedRawFiles.add(raw);
     const sourceChecksum = await sha256File(raw);
     let completed = false;
     try {
@@ -443,7 +466,7 @@ export const createSourceAdapters = ({
         + (await Promise.all(excludeBoundaries.map(async (file) => (await stat(file)).size))).reduce((sum, size) => sum + size, 0);
       const stagingBytes = (await stat(raw)).size + boundaryBytes;
       if (stagingBytes > options.maxBytes) throw new Error(`Geofabrik staging files exceed cache budget: ${stagingBytes} > ${options.maxBytes}`);
-      await execute({
+      await runExecute({
         file: pythonBin,
         args: [geofabrikExporter, '--input', raw, '--output', temporary,
           '--max-records', String(options.maxRecords), '--per-locality', String(options.perLocality),
@@ -457,7 +480,7 @@ export const createSourceAdapters = ({
       await rm(boundary, { force: true });
       await Promise.all(excludeBoundaries.map((file) => rm(file, { force: true })));
       await rm(temporary, { force: true });
-      if (!options.retainRaw && completed) await rm(raw, { force: true });
+      if (!options.retainRaw && !options.sharedRaw && completed) await rm(raw, { force: true });
     }
     const size = (await stat(output)).size;
     return { file: output, format: 'geofabrik-geojsonseq', cacheBytes: size, checksum: await sha256File(output), sourceChecksum, cacheHit: false };
@@ -467,5 +490,10 @@ export const createSourceAdapters = ({
     ? materializeOverture(shard, discovery, options)
     : materializeGeofabrik(shard, discovery, options);
 
-  return { discover, materialize };
+  const cleanupSharedRaw = async () => {
+    await Promise.all([...sharedRawFiles].map((file) => rm(file, { force: true })));
+    sharedRawFiles.clear();
+  };
+
+  return { discover, materialize, cleanupSharedRaw };
 };

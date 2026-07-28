@@ -131,6 +131,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .switch-field input:focus-visible + span { outline: 3px solid rgba(23, 105, 224, .18); }
 .panel-footer { padding-top: 16px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .panel-footer p { margin: 0; color: #667085; font-size: 11px; line-height: 1.5; }
+.policy-runtime-form { padding: 20px; display: grid; grid-template-columns: repeat(2, minmax(180px, 260px)) auto; align-items: end; gap: 14px; }
+.policy-runtime-form label { display: grid; gap: 7px; color: #344054; font-size: 11px; font-weight: 700; }
+.policy-runtime-form input { min-height: 38px; padding: 0 11px; border: 1px solid #cfd7e3; border-radius: 7px; color: #182230; background: #fff; }
+.policy-runtime-form button { justify-self: end; }
+.policy-hint { margin: 0; padding: 0 20px 20px; color: #667085; font-size: 11px; line-height: 1.6; }
+.table-subtitle { margin-top: 3px; display: block; color: #98a2b3; font-size: 9px; }
 
 .credential-summary { padding: 20px; display: grid; grid-template-columns: minmax(130px, 1.2fr) minmax(180px, 1.7fr) minmax(180px, 1.7fr) minmax(120px, 1fr) minmax(120px, 1fr) auto; align-items: start; gap: 18px; }
 .credential-summary > div { min-width: 0; }

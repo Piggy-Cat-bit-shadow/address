@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
 import { countryByCode, isCountryCode } from '../domain/countries';
 
-type View = 'dashboard' | 'access' | 'providers' | 'china' | 'tokens' | 'runs';
+type View = 'dashboard' | 'policies' | 'access' | 'providers' | 'china' | 'tokens' | 'runs';
 type AdminLocale = 'zh-CN' | 'en';
 interface Credential {
   id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
@@ -15,14 +15,19 @@ interface ProviderViewData { credentials: Credential[]; maps: MapSettings }
 interface ApiTokenView { id: string; name: string; scopes: string[]; rate_limit_per_minute: number; expires_at: string | null; revoked_at: string | null; token_mask: string; token_revealable: boolean }
 type Mutate = <T = unknown>(path: string, method: string, body?: unknown, success?: string) => Promise<T | undefined>;
 type Reveal = (path: string) => Promise<Record<string, string>>;
+type RequestData = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
+interface CountryPolicy { countryCode: string; enabled: boolean; targetCount: number; level1Limit: number; level2Limit: number; level3Limit: number; level4Limit: number; currentCount: number; deficit: number; excess: number; state: string; sourceVersion: string | null; labels: string[] }
+interface PolicyNode { key: string; parentKey: string; countryCode: string; level: number; regionName: string; currentCount: number; childCount: number; inheritedTarget: number; overrideTarget: number | null; targetCount: number; deficit: number; excess: number }
+interface PolicyViewData { runtime: { prepareConcurrency: number; cpuConcurrency: number }; countries: CountryPolicy[] }
 
 const adminText = {
   'zh-CN': {
-    labels: { dashboard: '仪表盘', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌', runs: '任务中心' },
+    labels: { dashboard: '仪表盘', policies: '同步策略', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌', runs: '任务中心' },
     providers: { amap: '高德', baidu: '百度', tencent: '腾讯', onemap: '新加坡地图' },
     brandName: '地址', brand: '管理系统', loginTitle: '管理员登录', password: '管理员密码', login: '登录', loggingIn: '登录中…', backGenerator: '返回生成器',
     bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据', dashboardDescription: '按国家和行政层级查看已收录地址。', allCountries: '全部国家', region: '区域', level: '行政层级', available: '可用地址', residential: '真实住宅', ordinary: '普通地址', children: '下级区域', updated: '更新时间', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
+    policiesTitle: '地址数量与并发', policiesDescription: '按国家和行政节点控制最新真实地址快照的数量。', prepareConcurrency: '并行准备国家数', cpuConcurrency: '重型解析并发数', countryTarget: '国家目标', actualCount: '当前数量', difference: '差额', sourceVersion: '数据版本', hierarchyLimits: '层级上限', editPolicy: '修改策略', browseNodes: '管理区域', saveRuntime: '保存并发设置', runtimeSaved: '并发设置已保存', policySaved: '同步策略已保存', nodeOverride: '区域目标', inheritedTarget: '默认上限', customTarget: '自定义目标', useInherited: '恢复默认', noPolicyNodes: '当前层级暂无行政节点。', policyHint: '目标只裁剪地址记录；行政区划和邮编目录保持完整。候选不足时显示缺口，不生成地址。', deficit: '缺少', excess: '超出', ready: '已达目标', backCountries: '返回国家', enabled: '参与自动同步', unlimitedLevel: '0 表示该层级不单独限制', manage: '管理',
     accessTitle: '访问策略', accessDescription: '先设置访问方式，再保存密码和接口保护规则。', frontendPasswordEnabled: '启用前端访问密码', apiAuthEnabled: '外部接口强制使用访问令牌', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
     providersTitle: '地图密钥', providersDescription: '管理地图平台凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: '平台', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaProvider: '平台实时', quotaLocal: '本地统计', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
@@ -33,11 +38,12 @@ const adminText = {
     status: { healthy: '正常', expired: '已过期', needs_review: '需检查', cooldown: '冷却中', quota_exhausted: '额度用尽', disabled: '已停用', succeeded: '已完成', failed: '失败' }
   },
   en: {
-    labels: { dashboard: 'Dashboard', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens', runs: 'Task Center' },
+    labels: { dashboard: 'Dashboard', policies: 'Sync Policy', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens', runs: 'Task Center' },
     providers: { amap: 'Amap', baidu: 'Baidu', tencent: 'Tencent', onemap: 'OneMap' },
     brandName: 'ADDRESS', brand: 'Admin Console', loginTitle: 'Administrator sign in', password: 'Administrator password', login: 'Sign in', loggingIn: 'Signing in…', backGenerator: 'Back to generator',
     bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address data', dashboardDescription: 'Review imported addresses by country and administrative level.', allCountries: 'All countries', region: 'Region', level: 'Administrative level', available: 'Available addresses', residential: 'Verified residential', ordinary: 'Other addresses', children: 'Child regions', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
+    policiesTitle: 'Address volume and concurrency', policiesDescription: 'Control the latest verified snapshot by country and administrative node.', prepareConcurrency: 'Countries prepared in parallel', cpuConcurrency: 'Heavy parser concurrency', countryTarget: 'Country target', actualCount: 'Current count', difference: 'Difference', sourceVersion: 'Data version', hierarchyLimits: 'Level limits', editPolicy: 'Edit policy', browseNodes: 'Manage regions', saveRuntime: 'Save concurrency', runtimeSaved: 'Concurrency settings saved', policySaved: 'Sync policy saved', nodeOverride: 'Region target', inheritedTarget: 'Default limit', customTarget: 'Custom target', useInherited: 'Restore default', noPolicyNodes: 'No administrative nodes at this level.', policyHint: 'Targets trim address rows only. Administrative and postcode catalogs remain complete. Missing candidates are reported, never generated.', deficit: 'Missing', excess: 'Excess', ready: 'On target', backCountries: 'Back to countries', enabled: 'Include in automatic sync', unlimitedLevel: '0 disables a separate cap for that level', manage: 'Manage',
     accessTitle: 'Access policy', accessDescription: 'Choose the access path first, then save password and API protection rules.', frontendPasswordEnabled: 'Require a frontend password', apiAuthEnabled: 'Require a Bearer token for external API', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
     providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaProvider: 'Provider live', quotaLocal: 'Local count', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
@@ -52,6 +58,7 @@ const adminText = {
 const labelsFor = (locale: AdminLocale): Record<View, string> => adminText[locale].labels;
 const descriptionsFor = (locale: AdminLocale): Record<View, string> => ({
   dashboard: adminText[locale].dashboardDescription,
+  policies: adminText[locale].policiesDescription,
   providers: adminText[locale].providersDescription,
   china: adminText[locale].chinaDescription,
   access: adminText[locale].accessDescription,
@@ -59,6 +66,20 @@ const descriptionsFor = (locale: AdminLocale): Record<View, string> => ({
   runs: adminText[locale].taskDescription
 });
 const providerLabel = (locale: AdminLocale, provider: string): string => adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
+const policyLevelLabels: Record<string, string[]> = {
+  US: ['州', '县/城市', '地区'], CA: ['省/地区', '城市', '区域'], MX: ['州', '市镇', '地区'],
+  GB: ['构成国/地区', '邮政城市', '区'], DE: ['联邦州', '市镇', '区'], FR: ['大区', '市镇', '区'],
+  IT: ['大区', '市镇', '区'], ES: ['自治区', '市镇', '区'], NL: ['省', '市镇', '区'],
+  JP: ['都道府县', '市区町村', '町域'], CN: ['省级', '地级市', '区县', '街道乡镇'],
+  HK: ['地区', '分区', '区域'], TW: ['县市', '区乡镇', '村里'], KR: ['道/广域市', '市郡区', '街区'],
+  SG: ['规划区', '规划区域', '地区'], MY: ['州/联邦直辖区', '县市', '地区'], TH: ['府', '县', '区'],
+  PH: ['大区', '省', '市县', '描笼涯'], VN: ['省/直辖市', '郡县', '坊社'], TR: ['省', '县', '街区'],
+  SA: ['地区', '城市', '区'], IN: ['邦/领地', '县市', '地区'], AU: ['州/领地', '城市', '区县'],
+  BR: ['州', '市', '区'], NG: ['州', '地方政府区', '地区'], ZA: ['省', '市镇', '地区'],
+  RU: ['联邦主体', '市/区', '地区']
+};
+const policyLevelLabel = (locale: AdminLocale, countryCode: string, index: number, fallback: string): string =>
+  locale === 'zh-CN' ? policyLevelLabels[countryCode]?.[index] || `第${index + 1}级` : fallback;
 const credentialDisplayLabel = (locale: AdminLocale, label: string): string => ({
   'zh-CN': { AMAP_API_KEY: '高德同步密钥', BAIDU_API_KEY: '百度同步密钥', TENCENT_API_KEY: '腾讯同步密钥', ONEMAP_ACCESS_TOKEN: '新加坡地图访问令牌', AMAP_JS_API_KEY: '高德浏览器地图密钥' },
   en: { AMAP_API_KEY: 'AMap sync key', BAIDU_API_KEY: 'Baidu sync key', TENCENT_API_KEY: 'Tencent sync key', ONEMAP_ACCESS_TOKEN: 'OneMap access token', AMAP_JS_API_KEY: 'AMap browser key' }
@@ -122,7 +143,7 @@ export default function SyncAdmin() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [coverageTrail, setCoverageTrail] = useState<CoverageNode[]>([]);
-  const loadIds = useRef<Record<View, number>>({ dashboard: 0, access: 0, providers: 0, china: 0, tokens: 0, runs: 0 });
+  const loadIds = useRef<Record<View, number>>({ dashboard: 0, policies: 0, access: 0, providers: 0, china: 0, tokens: 0, runs: 0 });
   const viewRef = useRef<View>('dashboard');
   const coverageParent = useRef('');
 
@@ -162,7 +183,7 @@ export default function SyncAdmin() {
     try {
       const paths: Record<View, string> = {
         dashboard: `/dashboard/coverage${coverageParent.current ? `?parent=${encodeURIComponent(coverageParent.current)}` : ''}`,
-        access: '/settings/access', providers: '/providers', china: '/china/status', tokens: '/tokens', runs: '/runs'
+        policies: '/sync/policies', access: '/settings/access', providers: '/providers', china: '/china/status', tokens: '/tokens', runs: '/runs'
       };
       const result = selected === 'providers'
         ? { credentials: await request('/providers'), maps: await request('/settings/maps') }
@@ -262,15 +283,15 @@ export default function SyncAdmin() {
       </header>
       {error && <div className="admin-error" role="alert">{error}</div>}
       {notice && <div className="admin-notice">{notice}</div>}
-      {data === undefined ? <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div> : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal}
+      {data === undefined ? <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div> : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
         coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
       {data !== undefined && loadingView === view && <div className="admin-refreshing" role="status" aria-label={t.loading}><span className="loading-dot" /></div>}
     </main>
   </div>;
 }
 
-function AdminView({ locale, view, data, busy, mutate, reveal, coverageTrail, openCoverage, returnCoverage }: {
-  locale: AdminLocale; view: View; data: unknown; busy: boolean; mutate: Mutate; reveal: Reveal;
+function AdminView({ locale, view, data, busy, mutate, reveal, request, coverageTrail, openCoverage, returnCoverage }: {
+  locale: AdminLocale; view: View; data: unknown; busy: boolean; mutate: Mutate; reveal: Reveal; request: RequestData;
   coverageTrail: CoverageNode[]; openCoverage: (node: CoverageNode) => void; returnCoverage: (index: number) => void;
 }) {
   const t = adminText[locale];
@@ -290,6 +311,7 @@ function AdminView({ locale, view, data, busy, mutate, reveal, coverageTrail, op
     const value = data as { frontendPasswordEnabled?: boolean; apiAuthEnabled?: boolean } | undefined;
     return <Panel title={t.accessTitle}><AccessSettingsForm value={value} locale={locale} busy={busy} mutate={mutate} /></Panel>;
   }
+  if (view === 'policies') return <PolicySettings value={data as PolicyViewData} locale={locale} busy={busy} mutate={mutate} request={request} />;
   if (view === 'providers') {
     const value = data as ProviderViewData;
     const credentials = value.credentials || [];
@@ -326,6 +348,74 @@ function AdminView({ locale, view, data, busy, mutate, reveal, coverageTrail, op
     </Panel>{tokenEditor && <TokenEditorDialog mode={tokenEditor.mode} value={tokenEditor.value} locale={locale} busy={busy} mutate={mutate} close={() => setTokenEditor(null)} created={(value) => { setTokenEditor(null); setTokenSecret(value); }} />}{tokenSecret && <TokenSecretDialog value={tokenSecret} locale={locale} close={() => setTokenSecret(null)} />}</>;
   }
   return <Panel title={t.taskCenter}><JsonTable values={(data || []) as Array<Record<string, unknown>>} locale={locale} /></Panel>;
+}
+
+function PolicySettings({ value, locale, busy, mutate, request }: { value: PolicyViewData; locale: AdminLocale; busy: boolean; mutate: Mutate; request: RequestData }) {
+  const t = adminText[locale];
+  const [runtime, setRuntime] = useState(value.runtime);
+  const [countryEditor, setCountryEditor] = useState<CountryPolicy | null>(null);
+  const [nodes, setNodes] = useState<PolicyNode[] | null>(null);
+  const [nodeTrail, setNodeTrail] = useState<Array<{ key: string; name: string }>>([]);
+  const [nodeEditor, setNodeEditor] = useState<PolicyNode | null>(null);
+  useEffect(() => setRuntime(value.runtime), [value.runtime.prepareConcurrency, value.runtime.cpuConcurrency]);
+  const loadNodes = async (parent: string, trail: Array<{ key: string; name: string }>) => {
+    const result = await request<PolicyNode[]>(`/sync/policies/nodes?parent=${encodeURIComponent(parent)}`);
+    setNodes(result); setNodeTrail(trail);
+  };
+  if (nodes) return <><Panel title={t.nodeOverride} actions={<button className="secondary-action" onClick={() => { setNodes(null); setNodeTrail([]); }}>{t.backCountries}</button>}>
+    <div className="coverage-breadcrumb">{nodeTrail.map((node, index) => <span key={node.key}>/<button onClick={() => void loadNodes(node.key, nodeTrail.slice(0, index + 1))}>{node.name}</button></span>)}</div>
+    <div className="table-scroll"><table><thead><tr><th>{t.region}</th><th>{t.level}</th><th>{t.actualCount}</th><th>{t.inheritedTarget}</th><th>{t.customTarget}</th><th>{t.difference}</th><th>{t.actions}</th></tr></thead><tbody>{nodes.map((node) => <tr key={node.key}>
+      <td><button className="drill-button" disabled={!node.childCount} onClick={() => void loadNodes(node.key, [...nodeTrail, { key: node.key, name: node.regionName }])}>{node.regionName}</button></td>
+      <td>{node.level}</td><td>{node.currentCount.toLocaleString()}</td><td>{node.inheritedTarget.toLocaleString()}</td><td>{node.overrideTarget == null ? '-' : node.overrideTarget.toLocaleString()}</td>
+      <td><PolicyDifference value={node} locale={locale} /></td><td className="row-actions"><button onClick={() => setNodeEditor(node)}>{t.edit}</button>{node.overrideTarget != null && <button disabled={busy} onClick={async () => { await mutate(`/sync/policies/nodes?key=${encodeURIComponent(node.key)}`, 'DELETE', undefined, t.policySaved); await loadNodes(node.parentKey, nodeTrail); }}>{t.useInherited}</button>}</td>
+    </tr>)}</tbody></table>{!nodes.length && <p className="admin-empty">{t.noPolicyNodes}</p>}</div>
+  </Panel>{nodeEditor && <NodePolicyDialog value={nodeEditor} locale={locale} busy={busy} close={() => setNodeEditor(null)} save={async (targetCount) => {
+    const result = await mutate('/sync/policies/nodes', 'PUT', { key: nodeEditor.key, targetCount }, t.policySaved);
+    if (result) { setNodeEditor(null); await loadNodes(nodeEditor.parentKey, nodeTrail); }
+  }} />}</>;
+  return <><Panel title={t.policiesTitle}>
+    <form className="policy-runtime-form" onSubmit={async (event) => { event.preventDefault(); await mutate('/sync/policies/runtime', 'PUT', runtime, t.runtimeSaved); }}>
+      <label><span>{t.prepareConcurrency}</span><input type="number" min="1" max="10" value={runtime.prepareConcurrency} onChange={(event) => setRuntime({ ...runtime, prepareConcurrency: Number(event.target.value) })} /></label>
+      <label><span>{t.cpuConcurrency}</span><input type="number" min="1" max="4" value={runtime.cpuConcurrency} onChange={(event) => setRuntime({ ...runtime, cpuConcurrency: Number(event.target.value) })} /></label>
+      <button className="primary-action" disabled={busy}>{t.saveRuntime}</button>
+    </form><p className="policy-hint">{t.policyHint}</p>
+  </Panel><Panel title={t.countryTarget}><div className="table-scroll"><table><thead><tr><th>{t.region}</th><th>{t.actualCount}</th><th>{t.countryTarget}</th><th>{t.difference}</th><th>{t.sourceVersion}</th><th>{t.hierarchyLimits}</th><th>{t.actions}</th></tr></thead><tbody>{value.countries.map((country) => <tr key={country.countryCode}>
+    <td><b>{isCountryCode(country.countryCode) ? countryByCode.get(country.countryCode)?.name[locale] : country.countryCode}</b><small className="table-subtitle">{country.countryCode}</small></td>
+    <td>{country.currentCount.toLocaleString()}</td><td>{country.targetCount.toLocaleString()}</td><td><PolicyDifference value={country} locale={locale} /></td><td>{country.sourceVersion || '-'}</td><td>{[country.level1Limit, country.level2Limit, country.level3Limit, country.level4Limit].join(' / ')}</td>
+    <td className="row-actions"><button onClick={() => setCountryEditor(country)}>{t.editPolicy}</button><button onClick={() => void loadNodes(country.countryCode, [{ key: country.countryCode, name: isCountryCode(country.countryCode) ? countryByCode.get(country.countryCode)?.name[locale] || country.countryCode : country.countryCode }])}>{t.browseNodes}</button></td>
+  </tr>)}</tbody></table></div></Panel>{countryEditor && <CountryPolicyDialog value={countryEditor} locale={locale} busy={busy} mutate={mutate} close={() => setCountryEditor(null)} />}</>;
+}
+
+const PolicyDifference = ({ value, locale }: { value: { deficit: number; excess: number }; locale: AdminLocale }) => {
+  const t = adminText[locale];
+  if (value.deficit) return <span className="badge cooldown">{t.deficit} {value.deficit.toLocaleString()}</span>;
+  if (value.excess) return <span className="badge needs_review">{t.excess} {value.excess.toLocaleString()}</span>;
+  return <span className="badge succeeded">{t.ready}</span>;
+};
+
+function CountryPolicyDialog({ value, locale, busy, mutate, close }: { value: CountryPolicy; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void }) {
+  const t = adminText[locale];
+  return <Dialog title={t.editPolicy} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
+    event.preventDefault(); const fields = new FormData(event.currentTarget);
+    const body = { enabled: fields.get('enabled') === 'on', targetCount: Number(fields.get('targetCount')),
+      level1Limit: Number(fields.get('level1Limit')), level2Limit: Number(fields.get('level2Limit')),
+      level3Limit: Number(fields.get('level3Limit')), level4Limit: Number(fields.get('level4Limit')) };
+    if (await mutate(`/sync/policies/countries/${value.countryCode}`, 'PUT', body, t.policySaved)) close();
+  }}><label className="check"><input name="enabled" type="checkbox" defaultChecked={value.enabled} />{t.enabled}</label>
+    <label><span>{t.countryTarget}</span><input name="targetCount" type="number" min="1" max="2000000" defaultValue={value.targetCount} required /></label>
+    {value.labels.map((label, index) => label && <label key={label}><span>{policyLevelLabel(locale, value.countryCode, index, label)}</span><input name={`level${index + 1}Limit`} type="number" min="0" max="1000000" defaultValue={value[`level${index + 1}Limit` as keyof CountryPolicy] as number} required /></label>)}
+    <small>{t.unlimitedLevel}</small><div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
+  </form></Dialog>;
+}
+
+function NodePolicyDialog({ value, locale, busy, save, close }: { value: PolicyNode; locale: AdminLocale; busy: boolean; save: (target: number) => Promise<void>; close: () => void }) {
+  const t = adminText[locale];
+  return <Dialog title={t.nodeOverride} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
+    event.preventDefault(); const fields = new FormData(event.currentTarget); await save(Number(fields.get('targetCount')));
+  }}><div className="dialog-readonly"><span>{t.region}</span><b>{value.regionName}</b></div><div className="dialog-readonly"><span>{t.inheritedTarget}</span><b>{value.inheritedTarget.toLocaleString()}</b></div>
+    <label><span>{t.customTarget}</span><input name="targetCount" type="number" min="0" max="1000000" defaultValue={value.overrideTarget ?? value.targetCount} required /></label>
+    <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
+  </form></Dialog>;
 }
 
 function AccessSettingsForm({ value, locale, busy, mutate }: { value?: { frontendPasswordEnabled?: boolean; apiAuthEnabled?: boolean }; locale: AdminLocale; busy: boolean; mutate: Mutate }) {

@@ -99,7 +99,7 @@ describe('self-hosted SQLite production readiness', () => {
 
     expect(result.status).toBe(0);
     expect(result.report).toMatchObject({
-      status: 'ready', schemaVersion: 2, hardLimitBytes: 45 * 1024 ** 3, errors: [],
+      status: 'ready', schemaVersion: 3, hardLimitBytes: 45 * 1024 ** 3, errors: [],
       countries: [
         { country: 'US', total: 1, residential: 1, syncStatus: 'ready', failureCount: 0 },
         { country: 'JP', total: 1, residential: 1, syncStatus: 'ready', failureCount: 0 }

@@ -18,6 +18,7 @@ import {
 } from './storage-budget.mjs';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
+import { ADDRESS_POLICY_DEFAULTS, getRuntimePolicy, loadImportPolicy } from './address-policy.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const defaultCacheDir = resolve(syncRoot, '../../.data-cache/address-sync');
@@ -37,6 +38,20 @@ const integer = (value, fallback, minimum = 1) => {
   return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : fallback;
 };
 const boolean = (value, fallback = false) => value === undefined ? fallback : /^(1|true|yes)$/iu.test(String(value));
+
+export const mapConcurrent = async (values, concurrency, worker) => {
+  const output = new Array(values.length);
+  let cursor = 0;
+  const count = Math.min(values.length, Math.max(1, integer(concurrency, 1)));
+  await Promise.all(Array.from({ length: count }, async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      output[index] = await worker(values[index], index);
+    }
+  }));
+  return output;
+};
 
 export const formattedAddress = (components, countryCode) => [
   [components.houseNumber, components.street].filter(Boolean).join(' '),
@@ -484,9 +499,11 @@ export const runAddressEtl = async ({
   maxShardsPerRun = integer(process.env.ADDRESS_SYNC_MAX_SHARDS_PER_RUN, !estimate && syncMode === 'daily' ? 1 : Number.MAX_SAFE_INTEGER),
   requireResidential = boolean(process.env.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
   retainRaw = boolean(process.env.ADDRESS_SYNC_RETAIN_RAW),
+  prepareConcurrency = integer(process.env.ADDRESS_SYNC_PREPARE_CONCURRENCY, 10),
+  cpuConcurrency = integer(process.env.ADDRESS_SYNC_CPU_CONCURRENCY, 3),
   now = () => new Date(),
   catalog: providedCatalog,
-  adapters = createSourceAdapters(),
+  adapters: providedAdapters,
   importer: providedImporter,
   localizeRecords = localizeAddressRecords,
   stateStore: providedStateStore,
@@ -498,6 +515,10 @@ export const runAddressEtl = async ({
   const activeRun = !dryRun && !estimate;
   const database = activeRun && !providedImporter ? providedDatabase || openDatabase(databasePath) : providedDatabase;
   const ownsDatabase = activeRun && !providedImporter && !providedDatabase;
+  const runtimePolicy = database && activeRun
+    ? await getRuntimePolicy(database)
+    : { prepareConcurrency: Math.min(10, prepareConcurrency), cpuConcurrency: Math.min(4, cpuConcurrency) };
+  const adapters = providedAdapters || createSourceAdapters({ processConcurrency: runtimePolicy.cpuConcurrency });
   const importer = activeRun ? providedImporter || new SqliteAddressImporter({
     database,
     normalizeRecord: normalizeSourceRecord,
@@ -547,151 +568,176 @@ export const runAddressEtl = async ({
     };
   });
   let changed = false;
+  const plannedRawArtifacts = new Set();
+  const disabledCountries = new Set();
   const syncErrors = [];
+  const failureReport = (task, error) => ({
+    ...task.previous,
+    shardId: task.shard.id,
+    shardKey: task.shard.id,
+    sourceId: task.shard.source.id,
+    countryCode: task.shard.countryCode,
+    intervalDays: task.shard.intervalDays,
+    lastChecked: checkedAt.toISOString(),
+    sourceVersion: task.discovery?.version || task.previous?.sourceVersion || null,
+    sourceBytes: task.discovery?.sourceBytes ?? task.previous?.sourceBytes ?? null,
+    status: 'failed',
+    error: error instanceof Error ? error.message : String(error),
+    errorCode: error?.code || (estimate ? 'SOURCE_ESTIMATE_FAILED' : 'SYNC_FAILED'),
+    errorUrl: error?.url || null,
+    errorStatus: error?.status ?? null
+  });
+  const recordFailure = async (task, error) => {
+    console.error(`[address-sync] ${task.shard.countryCode} failed`, error);
+    const report = failureReport(task, error);
+    reports.push(report);
+    if (!dryRun && !estimate) {
+      state.shards[task.shard.id] = report;
+      await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
+    }
+    if (syncMode === 'initial' || syncMode === 'manual') syncErrors.push(error);
+    else if (!estimate) throw error;
+  };
   try {
+    const work = [];
     for (const shard of selected) {
       const previous = state.shards[shard.id];
       if (syncMode === 'daily' && !estimate && !isCountryDue(previous, shard.intervalDays, checkedAt)) {
         reports.push({ shardId: shard.id, shardKey: shard.id, sourceId: shard.source.id, countryCode: shard.countryCode, status: 'not-due', intervalDays: shard.intervalDays, lastChecked: previous.lastChecked, sourceVersion: previous.sourceVersion });
         continue;
       }
-      let discovery;
+      const defaults = providedImporter || providedCatalog ? null : ADDRESS_POLICY_DEFAULTS[shard.countryCode];
+      const policy = database && activeRun && !providedCatalog
+        ? await loadImportPolicy(database, shard.countryCode, maxRecords, perLocality)
+        : { enabled: true, targetCount: defaults?.target || maxRecords, levelLimits: defaults?.limits || [maxRecords, perLocality, perLocality, perLocality], overrides: new Map() };
+      if (policy.enabled === false) {
+        disabledCountries.add(shard.countryCode);
+        reports.push({ shardId: shard.id, shardKey: shard.id, sourceId: shard.source.id, countryCode: shard.countryCode,
+          status: 'disabled', intervalDays: shard.intervalDays, lastChecked: previous?.lastChecked || null,
+          sourceVersion: previous?.sourceVersion || null });
+        continue;
+      }
+      work.push({ shard, previous, policy });
+    }
+
+    const discovered = await mapConcurrent(work, runtimePolicy.prepareConcurrency, async (task) => {
       try {
-        console.log(`[address-sync] ${shard.countryCode} discover`);
-        discovery = await adapters.discover(shard, { includeAssetSizes: estimate, syncMode, cacheDir });
-        const estimatedOutputBytes = maxRecords * 2048;
-        const estimatedDatabaseBytes = maxRecords * 2048;
-        const temporarySourceBytes = discovery.adapter === 'geofabrik' ? discovery.sourceBytes || 0 : 0;
-        const projectedCacheBytes = plannedCacheBytes + estimatedOutputBytes + temporarySourceBytes;
+        console.log(`[address-sync] ${task.shard.countryCode} discover`);
+        return { ...task, discovery: await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir }) };
+      } catch (error) { return { ...task, error }; }
+    });
+    const planned = [];
+    for (const task of discovered) {
+      if (task.error) { await recordFailure(task, task.error); continue; }
+      const estimatedOutputBytes = task.policy.targetCount * 2048;
+      const estimatedDatabaseBytes = task.policy.targetCount * 2048;
+      const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.version || ''}`;
+      const temporarySourceBytes = task.discovery.adapter === 'geofabrik' && !plannedRawArtifacts.has(rawKey)
+        ? task.discovery.sourceBytes || 0 : 0;
+      if (task.discovery.adapter === 'geofabrik') plannedRawArtifacts.add(rawKey);
+      const projectedCacheBytes = plannedCacheBytes + estimatedOutputBytes + temporarySourceBytes;
+      try {
         storageBudget = assertStorageBudget({
           currentBytes: plannedStorageBytes,
           additionalBytes: estimatedOutputBytes + estimatedDatabaseBytes + temporarySourceBytes,
           softLimitBytes,
           hardLimitBytes
         });
-        const report = {
-          shardId: shard.id,
-          shardKey: shard.id,
-          sourceId: shard.source.id,
-          countryCode: shard.countryCode,
-          adapter: discovery.adapter,
-          intervalDays: shard.intervalDays,
-          lastChecked: checkedAt.toISOString(),
-          sourceVersion: discovery.version,
-          sourceBytes: discovery.sourceBytes,
-          estimatedPeakBytes: projectedCacheBytes,
-          estimatedStoragePeakBytes: storageBudget.projectedBytes,
-          estimatedDatabaseBytes,
-          allowShadowExpansion: storageBudget.allowShadowExpansion,
-          estimateMethod: discovery.estimateMethod,
-          status: dryRun || estimate ? 'planned' : 'discovered'
-        };
-        if (dryRun || estimate) {
-          plannedCacheBytes += estimatedOutputBytes;
-          plannedStorageBytes += estimatedOutputBytes + estimatedDatabaseBytes;
-          reports.push(report);
-          continue;
+      } catch (error) { await recordFailure(task, error); continue; }
+      const report = {
+        shardId: task.shard.id, shardKey: task.shard.id, sourceId: task.shard.source.id,
+        countryCode: task.shard.countryCode, adapter: task.discovery.adapter, intervalDays: task.shard.intervalDays,
+        lastChecked: checkedAt.toISOString(), sourceVersion: task.discovery.version, sourceBytes: task.discovery.sourceBytes,
+        estimatedPeakBytes: projectedCacheBytes, estimatedStoragePeakBytes: storageBudget.projectedBytes,
+        estimatedDatabaseBytes, allowShadowExpansion: storageBudget.allowShadowExpansion,
+        estimateMethod: task.discovery.estimateMethod, targetCount: task.policy.targetCount,
+        status: dryRun || estimate ? 'planned' : 'discovered'
+      };
+      plannedCacheBytes += estimatedOutputBytes;
+      plannedStorageBytes += estimatedOutputBytes + estimatedDatabaseBytes;
+      if (dryRun || estimate) reports.push(report);
+      else planned.push({ ...task, report, estimatedOutputBytes, estimatedDatabaseBytes, storageBudget });
+    }
+
+    const prepared = [];
+    for (let offset = 0; offset < planned.length; offset += runtimePolicy.prepareConcurrency) {
+      const wave = planned.slice(offset, offset + runtimePolicy.prepareConcurrency);
+      const waveRaw = new Map();
+      for (const task of wave) {
+        if (task.discovery.adapter === 'geofabrik') {
+          waveRaw.set(`${task.discovery.dataUrl}\u001f${task.discovery.version}`, Number(task.discovery.sourceBytes || 0));
         }
-        console.log(`[address-sync] ${shard.countryCode} materialize`);
-        const materialized = await adapters.materialize(shard, discovery, {
-          cacheDir,
-          maxBytes: Math.max(1, storageBudget.remainingBytes - estimatedOutputBytes),
-          maxRecords,
-          perLocality,
-          retainRaw
-        });
-        const materializedStorageBytes = await measureStorage([dataRoot]);
-        storageBudget = assertStorageBudget({
-          currentBytes: materializedStorageBytes,
-          additionalBytes: estimatedDatabaseBytes,
+      }
+      const currentStorage = await measureStorage([dataRoot]);
+      try {
+        assertStorageBudget({
+          currentBytes: currentStorage,
+          additionalBytes: [...waveRaw.values()].reduce((total, value) => total + value, 0)
+            + wave.reduce((total, task) => total + task.estimatedOutputBytes + task.estimatedDatabaseBytes, 0),
           softLimitBytes,
           hardLimitBytes
         });
-        console.log(`[address-sync] ${shard.countryCode} import`);
+      } catch (error) {
+        for (const task of wave) await recordFailure(task, error);
+        continue;
+      }
+      prepared.push(...await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
+        try {
+          console.log(`[address-sync] ${task.shard.countryCode} materialize`);
+          const candidateLimit = Math.min(300_000, Math.max(task.policy.targetCount + 1_000, task.policy.targetCount * 3));
+          const candidatePerLocality = Math.max(perLocality, ...task.policy.levelLimits);
+          const materialized = await adapters.materialize(task.shard, task.discovery, {
+            cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
+            maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1
+          });
+          return { ...task, materialized };
+        } catch (error) { return { ...task, error }; }
+      }));
+      await adapters.cleanupSharedRaw?.().catch(() => {});
+    }
+
+    for (const task of prepared) {
+      if (task.error) { await recordFailure(task, task.error); continue; }
+      try {
+        const materializedStorageBytes = await measureStorage([dataRoot]);
+        storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
+        console.log(`[address-sync] ${task.shard.countryCode} import`);
         const imported = await importer.importShard({
-          shard,
-          discovery,
-          materialized,
-          maxRecords,
-          perLocality,
+          shard: task.shard, discovery: task.discovery, materialized: task.materialized,
+          maxRecords: task.policy.targetCount, perLocality, policy: task.policy,
           storagePolicy: { allowShadowExpansion: storageBudget.allowShadowExpansion, softLimitBytes, hardLimitBytes }
         });
         const storageBytesAfterImport = await measureStorage([dataRoot]);
         storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
-        Object.assign(report, {
-          status: imported.skipped ? 'unchanged' : 'imported',
-          checksumSha256: materialized.checksum,
-          sourceChecksumSha256: materialized.sourceChecksum || previous?.sourceChecksumSha256 || null,
-          cacheBytes: materialized.cacheBytes,
-          cacheHit: materialized.cacheHit,
-          datasetId: imported.datasetId,
-          acceptedCount: imported.acceptedCount,
-          rejectedCount: imported.rejectedCount,
-          localityCount: imported.localityCount || null,
-          residentialCount: imported.residentialCount || 0,
-          storageBytesAfterImport,
-          allowShadowExpansion: storageBudget.allowShadowExpansion,
-          lastSuccessfulAt: checkedAt.toISOString()
+        Object.assign(task.report, {
+          status: imported.skipped ? 'unchanged' : 'imported', checksumSha256: task.materialized.checksum,
+          sourceChecksumSha256: task.materialized.sourceChecksum || task.previous?.sourceChecksumSha256 || null,
+          cacheBytes: task.materialized.cacheBytes, cacheHit: task.materialized.cacheHit, datasetId: imported.datasetId,
+          acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
+          localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
+          deficit: Math.max(0, task.policy.targetCount - imported.acceptedCount), storageBytesAfterImport,
+          allowShadowExpansion: storageBudget.allowShadowExpansion, lastSuccessfulAt: checkedAt.toISOString()
         });
-        state.shards[shard.id] = report;
+        state.shards[task.shard.id] = task.report;
         await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
-        await pruneShardCache(cacheDir, shard, materialized.file);
+        await pruneShardCache(cacheDir, task.shard, task.materialized.file);
         plannedCacheBytes = await directorySize(cacheDir);
         plannedStorageBytes = await measureStorage([dataRoot]);
         changed ||= !imported.skipped;
-        reports.push(report);
-        console.log(`[address-sync] ${shard.countryCode} ready addresses=${imported.acceptedCount} residential=${imported.residentialCount || 0}`);
-      } catch (error) {
-        console.error(`[address-sync] ${shard.countryCode} failed`, error);
-        if (estimate) {
-          reports.push({
-            shardId: shard.id,
-            shardKey: shard.id,
-            sourceId: shard.source.id,
-            countryCode: shard.countryCode,
-            intervalDays: shard.intervalDays,
-            lastChecked: checkedAt.toISOString(),
-            status: 'failed',
-            error: error instanceof Error ? error.message : String(error),
-            errorCode: error?.code || 'SOURCE_ESTIMATE_FAILED',
-            errorUrl: error?.url || null,
-            errorStatus: error?.status ?? null
-          });
-          continue;
-        }
-        if (!dryRun && !estimate) {
-          const failedReport = {
-            ...previous,
-            shardId: shard.id,
-            shardKey: shard.id,
-            sourceId: shard.source.id,
-            countryCode: shard.countryCode,
-            intervalDays: shard.intervalDays,
-            lastChecked: checkedAt.toISOString(),
-            sourceVersion: discovery?.version || previous?.sourceVersion || null,
-            sourceBytes: discovery?.sourceBytes ?? previous?.sourceBytes ?? null,
-            status: 'failed',
-            error: error instanceof Error ? error.message : String(error)
-          };
-          state.shards[shard.id] = failedReport;
-          await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
-          if (syncMode === 'initial' || syncMode === 'manual') {
-            reports.push(failedReport);
-            syncErrors.push(error);
-            continue;
-          }
-        }
-        throw error;
-      }
+        reports.push(task.report);
+        console.log(`[address-sync] ${task.shard.countryCode} ready addresses=${imported.acceptedCount} target=${task.policy.targetCount} deficit=${task.report.deficit}`);
+      } catch (error) { await recordFailure(task, error); }
     }
     if (syncErrors.length) throw new AggregateError(syncErrors, `Address sync failed for ${syncErrors.length} country shard(s)`);
     if (syncMode === 'initial' && requireResidential) {
-      const missingResidential = requested.filter((shard) => Number(state.shards[shard.id]?.residentialCount || 0) < 1);
+      const missingResidential = requested.filter((shard) => !disabledCountries.has(shard.countryCode)
+        && Number(state.shards[shard.id]?.residentialCount || 0) < 1);
       if (missingResidential.length) {
         throw new Error(`Initial residential sync incomplete for: ${missingResidential.map(({ countryCode }) => countryCode).join(', ')}`);
       }
     }
   } finally {
+    await adapters.cleanupSharedRaw?.().catch(() => {});
     if (!providedImporter) await importer?.close();
     if (ownsDatabase) database.close();
   }

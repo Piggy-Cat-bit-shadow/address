@@ -1,3 +1,5 @@
+import { applyHierarchicalQuota } from './address-policy.mjs';
+
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
 const randomKey = (hash) => Number.parseInt(hash.slice(0, 8), 16) & 0x7fffffff;
@@ -294,16 +296,25 @@ export class SqliteAddressImporter {
     this.rebuildFormattedAddress = rebuildFormattedAddress;
   }
 
-  async importShard({ shard, discovery, materialized, maxRecords, perLocality, batchSize = 800 }) {
-    const datasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${IMPORT_REVISION}`;
+  async importShard({ shard, discovery, materialized, maxRecords, perLocality, policy, batchSize = 800 }) {
+    const activePolicy = policy || {
+      targetCount: maxRecords,
+      levelLimits: [maxRecords, perLocality, perLocality, perLocality],
+      overrides: new Map()
+    };
+    const policyHash = this.hash(JSON.stringify({
+      targetCount: activePolicy.targetCount,
+      levelLimits: activePolicy.levelLimits,
+      overrides: [...activePolicy.overrides].sort(([left], [right]) => left.localeCompare(right))
+    })).slice(0, 8);
+    const datasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${IMPORT_REVISION}-${policyHash}`;
     const existing = await this.database.prepare("SELECT status,active_count FROM address_datasets WHERE id=?").bind(datasetId).first();
     if (existing?.status === 'active') {
       return { datasetId, acceptedCount: Number(existing.active_count), rejectedCount: 0, skipped: true };
     }
 
     const seen = new Set();
-    const localityCounts = new Map();
-    const records = [];
+    const candidates = [];
     let rejectedCount = 0;
     const geocoder = this.reverseGeocoder ? await this.reverseGeocoder(shard.countryCode) : null;
     for await (const value of readJsonLines(materialized.file)) {
@@ -316,24 +327,22 @@ export class SqliteAddressImporter {
         rejectedCount += 1;
         continue;
       }
-      const cityName = cleanKey(record.samplingLocality || record.components.locality || record.components.postalLocality || record.postcode || '');
-      // Geo-anchored countries collapse into few prefecture-city buckets, so the
-      // sampling cap keys on city:district to keep per-district coverage instead.
-      const districtName = geoAnchorCountries.has(shard.countryCode)
-        ? cleanKey(record.components.district || '')
-        : '';
-      const localityName = districtName ? `${cityName}:${districtName}` : cityName;
-      const locality = localityName
-        || (Number.isFinite(record.longitude) && Number.isFinite(record.latitude)
-          ? `grid:${Math.floor(record.longitude * 10)}:${Math.floor(record.latitude * 10)}`
-          : '*');
-      const count = localityCounts.get(locality) || 0;
-      if (count >= perLocality || records.length >= maxRecords) continue;
-      localityCounts.set(locality, count + 1);
       seen.add(record.canonicalHash);
-      records.push(record);
+      candidates.push(record);
     }
+    candidates.sort((left, right) =>
+      Number(Boolean(right.residentialSourceRecordId)) - Number(Boolean(left.residentialSourceRecordId))
+      || Number(right.qualityScore || 0) - Number(left.qualityScore || 0)
+      || left.canonicalHash.localeCompare(right.canonicalHash));
+    const records = applyHierarchicalQuota(candidates, activePolicy);
     if (!records.length) throw new Error(`Shard ${shard.id} produced no valid addresses`);
+
+    const localityCounts = new Map();
+    for (const record of records) {
+      const locality = cleanKey(record.samplingLocality || record.components.locality
+        || record.components.postalLocality || record.postcode || '*');
+      localityCounts.set(locality, (localityCounts.get(locality) || 0) + 1);
+    }
 
     const localized = [];
     for (let offset = 0; offset < records.length; offset += batchSize) {
@@ -352,11 +361,12 @@ export class SqliteAddressImporter {
       GROUP BY dataset.id,dataset.active_count ORDER BY dataset.imported_at DESC LIMIT 1`
     ).bind(shard.source.id, shard.countryCode).first();
     const configuredGate = shard.qualityGate || {};
+    const effectiveMaxRecords = activePolicy.targetCount;
     const compactMinimum = shard.countryCode === 'SG' ? 50 : shard.countryCode === 'HK' ? 500 : 1_000;
     const minimumRecords = configuredGate.minimumRecords
-      ?? (maxRecords >= 1_000 ? Math.max(10, Math.min(compactMinimum, Math.ceil(maxRecords * 0.01))) : 1);
+      ?? (effectiveMaxRecords >= 1_000 ? Math.max(10, Math.min(compactMinimum, Math.ceil(effectiveMaxRecords * 0.01))) : 1);
     const minimumAdmin1 = configuredGate.minimumAdmin1
-      ?? (shard.countryCode === 'SG' ? 0 : maxRecords >= 1_000 && shard.countryCode !== 'HK' ? 2 : 1);
+      ?? (shard.countryCode === 'SG' ? 0 : effectiveMaxRecords >= 1_000 && shard.countryCode !== 'HK' ? 2 : 1);
     const minimumCountRatio = configuredGate.minimumCountRatio ?? DEFAULT_MINIMUM_RATIO;
     const minimumAdmin1Ratio = configuredGate.minimumAdmin1Ratio ?? DEFAULT_MINIMUM_RATIO;
     const metrics = {
@@ -374,11 +384,11 @@ export class SqliteAddressImporter {
     if (metrics.candidateAdmin1Count < minimumAdmin1) failures.push(`admin1 coverage ${metrics.candidateAdmin1Count} < ${minimumAdmin1}`);
     // Ratio gates only compare snapshots produced by the same import methodology; a revision
     // change intentionally replaces the sampling/enrichment rules, so the old counts are not a baseline.
-    const sameRevision = Boolean(previous?.id && String(previous.id).endsWith(`-${IMPORT_REVISION}`));
+    const sameRevision = Boolean(previous?.id && String(previous.id).endsWith(`-${policyHash}`));
     if (sameRevision) {
       const previousCountFloor = Math.ceil(Math.min(
         metrics.previousCount * minimumCountRatio,
-        maxRecords * minimumCountRatio
+        effectiveMaxRecords * minimumCountRatio
       ));
       if (metrics.previousCount && metrics.candidateCount < previousCountFloor) {
         failures.push(`count ${metrics.candidateCount} < capped previous floor ${previousCountFloor}`);
@@ -428,6 +438,7 @@ export class SqliteAddressImporter {
         this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=?,active_count=? WHERE id=?")
           .bind(localized.length, rejectedCount, localized.length, datasetId)
       ]);
+      const coverageTarget = activePolicy.levelLimits[1] || perLocality;
       const coverageEntries = [...coverage];
       for (let offset = 0; offset < coverageEntries.length; offset += batchSize) {
         await this.database.batch(coverageEntries.slice(offset, offset + batchSize).map(([key, entry]) =>
@@ -441,8 +452,8 @@ export class SqliteAddressImporter {
           ).bind(
             key, shard.countryCode, cleanKey(entry.record.admin1Code || entry.record.admin1),
             cleanKey(entry.record.postalLocality || entry.record.locality), postcodeKey(entry.record.postcode),
-            entry.record.propertyType, perLocality, entry.count, entry.residential,
-            entry.count >= perLocality ? 'ready' : 'low', datasetId, observedAt, context.expiresAt
+            entry.record.propertyType, coverageTarget, entry.count, entry.residential,
+            entry.count >= coverageTarget ? 'ready' : 'low', datasetId, observedAt, context.expiresAt
           )));
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -455,6 +466,17 @@ export class SqliteAddressImporter {
           ELSE 'low'
         END
         WHERE country_code=?`).bind(shard.countryCode).run();
+      await this.database.batch([
+        this.database.prepare('DELETE FROM pool_coverage WHERE country_code=? AND generation<>?')
+          .bind(shard.countryCode, datasetId),
+        this.database.prepare(`DELETE FROM address_pool_evidence WHERE dataset_id IN (
+          SELECT id FROM address_datasets WHERE country_code=? AND status='retired'
+        )`).bind(shard.countryCode),
+        this.database.prepare("DELETE FROM address_datasets WHERE country_code=? AND status='retired'").bind(shard.countryCode),
+        this.database.prepare(`DELETE FROM address_pool WHERE country_code=? AND active=0
+          AND NOT EXISTS (SELECT 1 FROM address_pool_evidence evidence WHERE evidence.address_id=address_pool.id)`)
+          .bind(shard.countryCode)
+      ]);
       await this.database.exec('COMMIT');
     } catch (error) {
       await this.database.exec('ROLLBACK').catch(() => {});

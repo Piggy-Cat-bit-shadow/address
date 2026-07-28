@@ -7,6 +7,10 @@ import { providerFetcher, ProviderRequestError } from '../china/providers';
 import { safeEqual } from './security';
 import type { BrowserMapCredentialInput, BrowserMapCredentialUpdate, ControlStore, CredentialInput, CredentialProviderName, MapDisplayConfig, ProviderName, ProviderQuotaObservation } from './store';
 import { listAddressCoverage, refreshAddressCoverage } from './coverage';
+import {
+  deleteNodePolicy, getRuntimePolicy, listCountryPolicies, listNodePolicies,
+  updateCountryPolicy, updateRuntimePolicy, upsertNodePolicy
+} from '../sync/address-policy.mjs';
 
 const adminCookie = 'address_admin_session';
 const adminCsrfCookie = 'address_admin_csrf';
@@ -176,7 +180,7 @@ export const createAdminApi = ({
   app.onError((error, context) => {
     context.header('Cache-Control', 'no-store');
     const code = error.message || 'INTERNAL_ERROR';
-    const clientError = /^(?:INVALID_|PASSWORD_LENGTH|PASSWORD_CONFIRM_MISMATCH|FRONTEND_PASSWORD_REQUIRED|TOKEN_NAME_REQUIRED|TOKEN_ALREADY_EXISTS|API_TOKEN_|AREACITY_SOURCE_|AREACITY_DATA_|SOURCE_AND_VERSION_REQUIRED)/u.test(code);
+    const clientError = /^(?:INVALID_|PASSWORD_LENGTH|PASSWORD_CONFIRM_MISMATCH|FRONTEND_PASSWORD_REQUIRED|TOKEN_NAME_REQUIRED|TOKEN_ALREADY_EXISTS|API_TOKEN_|AREACITY_SOURCE_|AREACITY_DATA_|SOURCE_AND_VERSION_REQUIRED|POLICY_)/u.test(code);
     const status = ['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY', 'BROWSER_MAP_CREDENTIAL_EXISTS', 'TOKEN_ALREADY_EXISTS'].includes(code) ? 409
       : ['CREDENTIAL_NOT_FOUND', 'BROWSER_MAP_CREDENTIAL_NOT_FOUND', 'API_TOKEN_NOT_FOUND'].includes(code) ? 404
         : ['API_TOKEN_SECRET_UNAVAILABLE'].includes(code) ? 409 : clientError ? 400 : 500;
@@ -242,6 +246,45 @@ export const createAdminApi = ({
     if (parent.length > 512) return context.json({ error: 'INVALID_COVERAGE_PARENT' }, 400);
     await ensureCoverage(context.req.query('refresh') === 'true');
     return context.json({ data: await listAddressCoverage(addressDb, parent) });
+  });
+
+  app.get('/admin/api/sync/policies', async (context) => {
+    await ensureCoverage();
+    const [runtime, countries] = await Promise.all([getRuntimePolicy(addressDb), listCountryPolicies(addressDb)]);
+    return context.json({ data: { runtime, countries } });
+  });
+  app.put('/admin/api/sync/policies/runtime', async (context) => {
+    const value = await updateRuntimePolicy(addressDb, await context.req.json<Record<string, unknown>>());
+    await control.audit('admin', 'sync_policy.runtime.update', 'global', {
+      prepareConcurrency: value.prepareConcurrency, cpuConcurrency: value.cpuConcurrency
+    });
+    return context.json({ data: value });
+  });
+  app.put('/admin/api/sync/policies/countries/:country', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    const value = await updateCountryPolicy(addressDb, countryCode, await context.req.json<Record<string, unknown>>());
+    await control.audit('admin', 'sync_policy.country.update', countryCode, value);
+    return context.json({ data: value });
+  });
+  app.get('/admin/api/sync/policies/nodes', async (context) => {
+    const parent = String(context.req.query('parent') || '');
+    if (parent.length > 512) return context.json({ error: 'INVALID_POLICY_PARENT' }, 400);
+    await ensureCoverage();
+    return context.json({ data: await listNodePolicies(addressDb, parent) });
+  });
+  app.put('/admin/api/sync/policies/nodes', async (context) => {
+    const input = await context.req.json<{ key?: string; targetCount?: number }>();
+    if (!input.key || input.key.length > 512) return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
+    const value = await upsertNodePolicy(addressDb, input.key, input.targetCount);
+    await control.audit('admin', 'sync_policy.node.update', input.key, { targetCount: input.targetCount });
+    return context.json({ data: value });
+  });
+  app.delete('/admin/api/sync/policies/nodes', async (context) => {
+    const key = String(context.req.query('key') || '');
+    if (!key || key.length > 512) return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
+    await deleteNodePolicy(addressDb, key);
+    await control.audit('admin', 'sync_policy.node.delete', key);
+    return context.json({ data: { success: true } });
   });
 
   app.get('/admin/api/settings/access', async (context) => context.json({ data: await control.status() }));

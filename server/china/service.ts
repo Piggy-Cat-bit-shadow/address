@@ -12,6 +12,7 @@ import {
 } from '../api/repositories/china-community';
 import { distanceMeters } from './coordinates';
 import { providerFetcher, ProviderRequestError, type CommunityCandidate } from './providers';
+import { getCountryPolicy } from '../sync/address-policy.mjs';
 
 export const initialChinaCities = [
   '北京市', '天津市', '上海市', '重庆市', '石家庄市', '太原市', '呼和浩特市', '沈阳市', '长春市', '哈尔滨市',
@@ -220,9 +221,18 @@ export class ChinaDataService {
     let requests = 0;
     const unavailable = new Set<ProviderName>();
     try {
+      const policy = await getCountryPolicy(this.addressDb, 'CN');
+      if (!policy.enabled) {
+        await this.control.updateRun(runId, 'succeeded', { phase: 'disabled', accepted, requests, targets: 0, providers: 0 });
+        return;
+      }
+      const countryTarget = policy.targetCount;
+      const quotaReached = async () => await this.publishedCommunityCount() >= countryTarget;
       await this.control.updateRun(runId, 'running', { phase: 'baseline', accepted, requests, target: '', provider: '', page: 0 });
       for (const target of targets) {
+        if (await quotaReached()) break;
         for (const provider of providers) {
+          if (await quotaReached()) break;
           if (unavailable.has(provider)) continue;
           const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
           for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
@@ -240,6 +250,7 @@ export class ChinaDataService {
             }
             await this.writeCheckpoint(provider, target.id, page + 1, 'baseline', accepted);
             await this.control.updateRun(runId, 'running', { phase: 'baseline', accepted, requests, target: target.query, provider, page });
+            if (await quotaReached()) break;
             if (await this.targetCount(target) >= target.targetCount) break;
           }
         }
@@ -251,7 +262,9 @@ export class ChinaDataService {
       if (await this.baselineComplete()) await this.retireLegacyChinaResidential();
       await this.control.updateRun(runId, 'running', { phase: 'enrichment', accepted, requests, target: '', provider: '', page: 0 });
       for (const target of targets) {
+        if (await quotaReached()) break;
         for (const provider of providers) {
+          if (await quotaReached()) break;
           if (unavailable.has(provider)) continue;
           const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
           for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
@@ -263,6 +276,7 @@ export class ChinaDataService {
             }
             await this.writeCheckpoint(provider, target.id, page + 1, 'enrichment', accepted);
             await this.control.updateRun(runId, 'running', { phase: 'enrichment', accepted, requests, target: target.query, provider, page });
+            if (await quotaReached()) break;
           }
         }
         if (unavailable.size === providers.length) {
@@ -278,6 +292,11 @@ export class ChinaDataService {
     } finally {
       await refreshAddressCoverage(this.addressDb).catch(() => undefined);
     }
+  }
+
+  private async publishedCommunityCount(): Promise<number> {
+    return Number(await this.addressDb.prepare(`SELECT COUNT(*) AS total FROM cn_communities_v2 community
+      WHERE ${chinaCommunityPublicationClause('community')}`).first('total') || 0);
   }
 
   private async targetCount(target: SyncTarget): Promise<number> {

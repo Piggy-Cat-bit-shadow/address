@@ -328,6 +328,32 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_country_policies (
+  country_code TEXT PRIMARY KEY CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  target_count INTEGER NOT NULL CHECK (target_count >= 1),
+  level1_limit INTEGER NOT NULL CHECK (level1_limit >= 0),
+  level2_limit INTEGER NOT NULL CHECK (level2_limit >= 0),
+  level3_limit INTEGER NOT NULL CHECK (level3_limit >= 0),
+  level4_limit INTEGER NOT NULL CHECK (level4_limit >= 0),
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_node_overrides (
+  node_key TEXT PRIMARY KEY,
+  country_code TEXT NOT NULL REFERENCES sync_country_policies(country_code) ON UPDATE CASCADE ON DELETE CASCADE,
+  level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 4),
+  target_count INTEGER NOT NULL CHECK (target_count >= 0),
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_runtime_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  prepare_concurrency INTEGER NOT NULL DEFAULT 10 CHECK (prepare_concurrency BETWEEN 1 AND 10),
+  cpu_concurrency INTEGER NOT NULL DEFAULT 3 CHECK (cpu_concurrency BETWEEN 1 AND 4),
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_pool_country_random ON address_pool(country_code, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_property_random ON address_pool(country_code, property_type, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_residential_random ON address_pool(country_code, active, random_key, id)
@@ -363,6 +389,7 @@ CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(la
 CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
 CREATE INDEX IF NOT EXISTS idx_cn_sync_area_priority ON cn_sync_area_targets(enabled,priority,adcode);
 CREATE INDEX IF NOT EXISTS idx_admin_coverage_parent ON admin_coverage_stats(parent_key,country_code,region_name);
+CREATE INDEX IF NOT EXISTS idx_sync_node_overrides_country ON sync_node_overrides(country_code,level,node_key);
 
 CREATE VIEW IF NOT EXISTS address_pool_runtime AS
 SELECT
@@ -406,3 +433,4 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
