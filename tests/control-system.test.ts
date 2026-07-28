@@ -605,6 +605,15 @@ describe('control database security', () => {
     expect(await store.acquireCredential('tencent')).toBeNull();
   });
 
+  it('gives keys independent quotas unless a shared scope is explicitly configured', async () => {
+    const first = await store.addCredential({ provider: 'amap', label: 'A', secret: 'independent-a', dailyLimit: 1 });
+    const second = await store.addCredential({ provider: 'amap', label: 'B', secret: 'independent-b', dailyLimit: 1 });
+    expect((await store.acquireCredentialById(first))?.id).toBe(first);
+    await store.reportCredential(first, 'success');
+    expect(await store.acquireCredentialById(first)).toBeNull();
+    expect((await store.acquireCredentialById(second))?.id).toBe(second);
+  });
+
   it('distinguishes API rate limiting from invalid credentials', async () => {
     const created = await store.createApiToken({ name: 'limited', scopes: ['generate'], rateLimit: 1 });
     expect((await store.authorizeApiTokenDetailed(created.token, 'generate')).status).toBe('authorized');

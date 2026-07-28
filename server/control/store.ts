@@ -661,7 +661,7 @@ export class ControlStore {
       id,provider,label,secret_ciphertext,secret_iv,secret_tag,weight,qps_limit,daily_limit,quota_scope_id,created_at,updated_at
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       id, input.provider, input.label.trim().slice(0, 80), encrypted.ciphertext, encrypted.iv, encrypted.tag,
-      weight, qpsLimit, dailyLimit, input.quotaScopeId?.trim().slice(0, 120) || `${input.provider}:default`, now, now
+      weight, qpsLimit, dailyLimit, input.quotaScopeId?.trim().slice(0, 120) || `${input.provider}:${id}`, now, now
     ).run();
     return id;
   }
