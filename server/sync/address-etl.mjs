@@ -347,7 +347,11 @@ export const normalizeSourceRecord = (value, shard, format) => {
     longitude = Number(point?.[0]);
     latitude = Number(point?.[1]);
     const building = clean(properties.building).toLowerCase();
-    if (residentialBuildings.has(building)) propertyType = building === 'apartments' ? 'apartment' : 'residential';
+    if (residentialBuildings.has(building)) {
+      propertyType = building === 'apartments' ? 'apartment' : 'residential';
+      residentialSourceRecordId = sourceRecordId;
+      residentialSourceClass = `building=${building}`;
+    }
   } else {
     throw new Error(`Unsupported normalized source format: ${format}`);
   }

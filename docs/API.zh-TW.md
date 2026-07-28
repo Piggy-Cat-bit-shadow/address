@@ -25,10 +25,10 @@ Token 在 `/admin/` 創建，只保存雜湊，可設置權限、限速、到期
 | 方法 | 路徑 | 用途 |
 |---|---|---|
 | `GET` | `/health` | API 基礎健康檢查 |
-| `GET` | `/countries` | 國家註冊表、同步數量和住宅模式可用性 |
+| `GET` | `/countries` | 國家註冊表、同步數量和嚴格住宅覆蓋 |
 | `GET` | `/client-context` | 將請求 IP 或指定 IP 解析到支持地區 |
 | `GET` | `/locations/search` | 搜索州省、城市和郵編選項 |
-| `GET` | `/generate` | 生成地址和相關測試資料 |
+| `GET` | `/generate` | 生成通過證據門禁的真實住宅地址和相關測試資料 |
 | `GET` | `/data-health` | 檢查地址池覆蓋和就緒狀態 |
 
 ## 健康檢查
@@ -47,7 +47,7 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/health
 curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
 ```
 
-響應格式為 `{ "data": [...] }`。每個國家包含代碼、本地化名稱、支持的篩選條件、地址數量、住宅數量、住宅模式可用性和 `generationMode`。未連接數據庫時，數量為 `null`。
+響應格式為 `{ "data": [...] }`。每個國家包含代碼、本地化名稱、支持的篩選條件、同步總量、真實住宅數量、住宅覆蓋狀態和 `generationMode`。公開生成只使用真實住宅池；同步總量僅用於遷移和健康報告。未連接數據庫時，數量為 `null`。
 
 ## 客戶端地區
 
@@ -75,7 +75,7 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8"
 | `region` | 空 | 上級州省文本 |
 | `regionId` | 空 | 穩定州省 ID |
 | `cityId` | 空 | 穩定城市 ID |
-| `residential` | `false` | 只返回具備住宅覆蓋的選項 |
+| `residential` | `false`（目錄兼容） | 傳入 `true` 時只列出具備真實住宅覆蓋的選項；`/generate` 始終使用住宅記錄 |
 | `cursor` | 空 | 上一頁返回的分頁游標 |
 | `limit` | `100` | 請求頁大小 |
 
@@ -90,38 +90,44 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=
 | 參數 | 默認值 | 說明 |
 |---|---|---|
 | `country` | `US` | 國家代碼；IP 模式成功解析國家時忽略 |
-| `mode` | 普通模式 | 使用 `ip-region` 開啟 IP 就近生成 |
+| `mode` | `residential` | 使用 `ip-region` 開啟 IP 座標或城市匹配 |
 | `ip` | 請求 IP | `mode=ip-region` 時使用的指定 IP |
-| `residential` | 國家能力 | `true` 或 `false` |
+| `residential` | `true` | 舊客戶端兼容參數；`true`、`false` 均可傳入，但公開生成始終執行住宅證據門禁 |
 | `region`、`city`、`postcode` | 空 | 可讀地區篩選 |
 | `regionId`、`cityId`、`postcodeId` | 空 | 穩定目錄 ID |
 | `q` | 空 | 自由文本地區提示 |
-| `strategy` | `random` | `random` 或 `instant` |
+| `strategy` | `random` | 用 `random` 或 `instant` 選擇合格真實記錄，不合成地址字段 |
 | `seed` | 自動 UUID | 確定性生成種子 |
 | `requestId` | 自動 UUID | 調用方關聯 ID |
-| `live` | `false` | 單次請求啟用已配置實時服務 |
+| `live` | `false` | 單次請求啟用已配置實時服務；候選記錄仍需具備真實住宅證據 |
 
-美國普通地址：
+美國真實住宅地址：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US&residential=false"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US"
 ```
 
 中國城市篩選：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=南京&residential=false"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=南京"
 ```
 
-IP 就近生成：
+IP 地區生成：
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8"
 ```
 
-響應外層為 `{ "data": { ... } }`。生成數據包含請求 ID、模式、國家、篩選、回退等級、嘗試的數據源和耗時；其中 `result` 包含地址三語變體、郵政格式、來源證據、合成測試資料、沙盒銀行卡、工作、財務、網絡字段以及 Google/高德地圖鏈接。
+響應外層為 `{ "data": { ... } }`。生成數據包含請求 ID、模式、國家、篩選、精確 `filterMatchLevel` 或 IP `ipMatchLevel`、嘗試的數據源和耗時。地址三語變體與室內字段均來自來源，缺失值保持為空；人物資料、沙盒銀行卡、工作、財務和網絡字段仍為合成測試數據。地區篩選嚴格匹配，IP 模式只接受座標或城市匹配。
 
-需要測試資料穩定復現時傳入 `seed`。地址源同步後，底層地址池仍可能變化。
+需要穩定復現合格記錄選擇與測試資料時傳入 `seed`；該參數不會生成缺失的地址組件。地址源同步後，底層住宅池仍可能變化。
+
+## WebUI 地圖配置
+
+地圖顯示屬於 WebUI 配置，不改變 `/generate` 的地址證據。受會話保護的 `/web-api/v1` 通道只返回顯示開關，以及啟用高德時瀏覽器加載所需的專用 JS API Key；不會返回高德 JS 安全密鑰或任何同步 Key。
+
+Google 與高德分別提供中國和國外開關，默認均為 Google 開啟、高德關閉。中國高德標記使用 GCJ-02 座標；高德國外地圖需要賬號已開通世界地圖權限。高德服務請求統一使用同源 `/_AMapService` 前綴，由伺服器讀取加密安全密鑰並附加後再轉發到固定高德上游。
 
 ## 數據健康
 
@@ -170,5 +176,6 @@ curl -fsS -X POST http://127.0.0.1:8791/api/v1/sync/jobs \
 
 - 生產環境將 `ALLOWED_ORIGIN` 設置為公開 HTTPS 來源。
 - API Key 和 `SYNC_ADMIN_TOKEN` 不進入查詢參數、瀏覽器代碼、截圖或日誌。
+- 瀏覽器渲染應使用專用且受域名限制的高德 JS API Key。JS Key 按平台機制會出現在瀏覽器請求中；配套安全密鑰和所有 WebService 同步 Key 始終留在伺服器。
 - 生成的個人資料和銀行卡號是測試數據，不對應真實個人或支付賬戶。
-- 普通地址生成讀取本地 SQLite；只有模式配置或 `live=true` 明確啟用時才調用實時服務。
+- 公開生成從 active SQLite 讀取具備證據的真實住宅記錄；啟用實時服務後，候選記錄仍執行地址存在性和住宅證據門禁。

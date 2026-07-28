@@ -238,18 +238,16 @@ const addressPoolV2Counts = async (db: SqliteDatabase | undefined): Promise<Map<
   const cached = poolMetadataCache.get(db as object);
   if (cached?.v2 && cached.expiresAt > Date.now()) return cached.v2;
   try {
-    const rows = await db.prepare(`SELECT address.country_code, COUNT(*) AS total,
-      SUM(CASE WHEN address.property_type IN ('residential','apartment') AND EXISTS (
-        SELECT 1 FROM address_pool_evidence residential
-        JOIN address_datasets dataset ON dataset.id=residential.dataset_id
-          AND dataset.status='active' AND dataset.redistribution_allowed=1
-        JOIN address_sources source ON source.id=dataset.source_id AND source.redistribution_allowed=1
-        WHERE residential.address_id=address.id AND residential.evidence_type='residential_use'
-          AND residential.is_current=1
-      ) THEN 1 ELSE 0 END) AS residential
-      FROM address_pool address WHERE address.active=1 AND address.quality_score>=0.7
+    const rows = await db.prepare(`SELECT address.country_code,
+      COUNT(DISTINCT address.id) AS total, COUNT(DISTINCT address.id) AS residential
+      FROM address_pool_runtime address
+      WHERE address.evidence_type='address_existence' AND address.residential_evidence=1
+        AND address.active=1 AND address.property_type IN ('residential','apartment')
+        AND address.quality_score>=0.7
         AND ${completenessClause('address.')}
-        AND (address.expires_at IS NULL OR address.expires_at>?)
+        AND (address.expires_at IS NULL OR (
+          datetime(address.expires_at) IS NOT NULL AND datetime(address.expires_at)>datetime(?)
+        ))
       GROUP BY address.country_code`)
       .bind(new Date().toISOString()).all<AddressPoolV2CountRow>();
     for (const row of rows.results || []) {
@@ -346,8 +344,7 @@ app.get('/api/v1/health', (context) => context.json({ status: 'ok' }));
 
 app.get('/api/v1/countries', async (context) => {
   const coverage = new Map<string, number>();
-  const [poolCounts, poolV2Counts, chinaCommunities] = await Promise.all([
-    addressPoolCounts(context.env.LOCATION_DB),
+  const [poolV2Counts, chinaCommunities] = await Promise.all([
     addressPoolV2Counts(context.env.ADDRESS_DB),
     countChinaCommunities(context.env.ADDRESS_DB)
   ]);
@@ -359,7 +356,7 @@ app.get('/api/v1/countries', async (context) => {
   const hasPoolDatabase = Boolean(context.env.LOCATION_DB || context.env.ADDRESS_DB);
   const data = countries.map((country) => {
     const v2 = poolV2Counts.get(country.code);
-    const addressCount = context.env.ADDRESS_DB ? v2?.total || 0 : poolCounts.get(country.code) || 0;
+    const addressCount = context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
     const residentialCount = country.code === 'CN' && chinaCommunities > 0
       ? chinaCommunities
       : context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
@@ -367,7 +364,7 @@ app.get('/api/v1/countries', async (context) => {
       ...country,
       addressCount: hasPoolDatabase ? addressCount : null,
       residentialCount: hasPoolDatabase ? residentialCount : country.residentialCapability ? null : 0,
-      residentialAvailable: hasPoolDatabase ? residentialCount >= RESIDENTIAL_MIN_POOL : country.residentialCapability,
+      residentialAvailable: hasPoolDatabase ? residentialCount >= RESIDENTIAL_MIN_POOL : false,
       generationMode: addressCount > 0 ? 'synchronized-pool' : 'sync-required'
     };
   });
@@ -479,7 +476,10 @@ app.get('/api/v1/generate', async (context) => {
   if (residentialQuery && !['true', 'false'].includes(residentialQuery)) {
     throw new DomainError('INVALID_RESIDENTIAL', 'Residential must be true or false.');
   }
-  const residential = country.residentialCapability && residentialQuery !== 'false';
+  // The public generator exposes verified residential records only. The
+  // legacy query flag is accepted for client compatibility but never
+  // re-enables an ordinary-address pool.
+  const residential = true;
   const seed = context.req.query('seed') || crypto.randomUUID();
   const strategy = context.req.query('strategy') === 'instant' ? 'instant' : 'random';
   const requestId = context.req.query('requestId') || crypto.randomUUID();
@@ -488,7 +488,7 @@ app.get('/api/v1/generate', async (context) => {
     .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
   // Per-request opt-in via ?live=true always allows live lookup; otherwise the server-wide LIVE_API_MODES decides.
   const liveRequested = ['true', '1'].includes((context.req.query('live') || '').toLowerCase());
-  const liveApiEnabled = liveRequested || liveApiModes.has(mode);
+  const liveApiEnabled = (liveRequested || liveApiModes.has(mode)) && !(country.code === 'CN' && residential);
   const requestedFilters: AddressFilters = {
     q: context.req.query('q') || undefined,
     region: context.req.query('region') || undefined,
@@ -644,6 +644,7 @@ app.get('/api/v1/generate', async (context) => {
         else filterMatchLevel = 'exact';
         return community;
       }
+      return undefined;
     }
     if (ipRegionMode) {
       if (ipCoordinates) {
@@ -652,7 +653,8 @@ app.get('/api/v1/generate', async (context) => {
           country.code,
           residential,
           ipCoordinates,
-          seed
+          seed,
+          25
         ));
         if (nearest) {
           pooledSource = 'address-pool-v2';
@@ -681,46 +683,9 @@ app.get('/api/v1/generate', async (context) => {
         }
       }
 
-      const regionTarget: CatalogTarget | undefined = target?.region ? {
-        coordinates: target.coordinates,
-        regionId: target.regionId,
-        region: target.region,
-        regionNative: target.regionNative,
-        regionCode: target.regionCode,
-        regionAliases: target.regionAliases,
-        cityAliases: [],
-        bucket: `ip-region-${target.regionId || target.regionCode || target.region}`
-      } : undefined;
-      const regionFilters: AddressFilters = {
-        q: filters.q,
-        region: regionTarget?.region || ipContext?.regionCode || ipContext?.region
-      };
-      if (regionFilters.region) {
-        const regionAddress = await toleratePoolFailure(() => pickAddressPoolV2Address(
-          context.env.ADDRESS_DB, country.code, residential, regionFilters, regionTarget, seed
-        )) || await toleratePoolFailure(() => pickAddressPoolAddress(
-          context.env.LOCATION_DB, country.code, residential, regionFilters, regionTarget, seed
-        ));
-        if (regionAddress) {
-          pooledSource = regionAddress.id.startsWith('pool-v2-') ? 'address-pool-v2' : 'address-pool-v1';
-          ipMatchLevel = 'region';
-          resolvedFilters = regionFilters;
-          resolvedTarget = regionTarget;
-          return regionAddress;
-        }
-      }
-
-      const countryAddress = await toleratePoolFailure(() => pickAddressPoolV2Address(
-        context.env.ADDRESS_DB, country.code, residential, filters, undefined, seed
-      )) || await toleratePoolFailure(() => pickAddressPoolAddress(
-        context.env.LOCATION_DB, country.code, residential, filters, undefined, seed
-      ));
-      if (countryAddress) {
-        pooledSource = countryAddress.id.startsWith('pool-v2-') ? 'address-pool-v2' : 'address-pool-v1';
-        ipMatchLevel = 'country';
-        resolvedTarget = undefined;
-      }
-      if (countryAddress) return countryAddress;
+      // A city or coordinate match is required for IP mode. Returning a
+      // region-wide or country-wide record would make the location claim
+      // misleading, so an uncovered city is reported as no result.
       return undefined;
     }
 
@@ -740,45 +705,10 @@ app.get('/api/v1/generate', async (context) => {
       filterMatchLevel = 'exact';
       return legacyExact;
     }
-    // Fallback chain so a country with data never 404s: nearby → region → country.
-    if (hasLocationFilter) {
-      if (target?.coordinates) {
-        const nearby = await toleratePoolFailure(() => pickNearestAddressPoolV2Address(
-          context.env.ADDRESS_DB, country.code, residential, target.coordinates, seed, 150
-        ));
-        if (nearby) {
-          pooledSource = 'address-pool-v2';
-          filterMatchLevel = 'nearby';
-          ipDistanceKm = nearby.distanceKm;
-          return nearby.address;
-        }
-      }
-      if (target?.region) {
-        const regionOnly: AddressFilters = { q: filters.q, region: target.region };
-        const regionTarget: CatalogTarget = {
-          coordinates: target.coordinates,
-          regionId: target.regionId,
-          region: target.region,
-          regionNative: target.regionNative,
-          regionCode: target.regionCode,
-          regionAliases: target.regionAliases,
-          cityAliases: [],
-          bucket: `filter-region-${target.regionId || target.regionCode || target.region}`
-        };
-        const regionAddress = await toleratePoolFailure(() =>
-          pickAddressPoolV2Address(context.env.ADDRESS_DB, country.code, residential, regionOnly, regionTarget, seed)
-        ) || await toleratePoolFailure(() =>
-          pickAddressPoolAddress(context.env.LOCATION_DB, country.code, residential, regionOnly, regionTarget, seed)
-        );
-        if (regionAddress) {
-          pooledSource = regionAddress.id.startsWith('pool-v2-') ? 'address-pool-v2' : 'address-pool-v1';
-          filterMatchLevel = 'region';
-          resolvedFilters = regionOnly;
-          resolvedTarget = regionTarget;
-          return regionAddress;
-        }
-      }
-    }
+    // A location-filtered request is exact-or-empty. Nearby, region-only and
+    // nationwide substitutions can silently return an address from the wrong
+    // place, so they are deliberately excluded from the publication path.
+    if (hasLocationFilter) return undefined;
     const nationwide = await toleratePoolFailure(() =>
       pickAddressPoolV2Address(context.env.ADDRESS_DB, country.code, residential, { q: filters.q }, undefined, seed)
     ) || await toleratePoolFailure(() =>

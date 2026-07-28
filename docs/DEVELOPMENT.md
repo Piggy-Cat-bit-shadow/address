@@ -18,7 +18,9 @@ Browser
        -> validation and atomic country snapshot publication
 ```
 
-Ordinary generation reads the local SQLite pool. Live providers are opt-in and constrained by `LIVE_API_MODES` or a request's `live=true` flag.
+Public generation reads only verified residential records from the active SQLite pool. Live providers are opt-in through `LIVE_API_MODES` or `live=true`, and their candidates must pass the same address-existence and residential-evidence gates.
+
+Map rendering is isolated from address verification. Google uses a coordinate preview; AMap uses a dedicated JS API key plus the same-origin `/_AMapService` proxy. The AMap JS security code remains encrypted in the control database and never enters the browser bundle or map-configuration response.
 
 ## Repository layout
 
@@ -66,7 +68,7 @@ Useful commands:
 
 ## Configuration model
 
-Copy `.env.example` to the ignored `.env` file. Keep secrets server-side. Only variables explicitly prefixed for Astro's public environment are eligible for browser bundling; third-party provider keys and `SYNC_ADMIN_TOKEN` must remain in the API/sync process environment.
+Copy `.env.example` to the ignored `.env` file. Keep secrets server-side. Only variables explicitly prefixed for Astro's public environment are eligible for browser bundling; third-party provider keys and `SYNC_ADMIN_TOKEN` must remain in the API/sync process environment. `AMAP_API_KEY` is a server-side WebService credential. `AMAP_JS_API_KEY` is a separate domain-restricted browser loading key, while `AMAP_JS_SECURITY_CODE` remains server-side and is applied only by `/_AMapService`.
 
 Regular development needs no third-party API key. Optional live integrations are documented in the [deployment guide](DEPLOYMENT.md).
 
@@ -107,17 +109,19 @@ Country behavior spans metadata, formatting, location options, localization, pos
 1. Define its metadata and supported filters in `src/domain/`.
 2. Add formatting and postcode behavior.
 3. Add a source shard and verify licensing/attribution metadata.
-4. Validate ordinary and residential evidence separately.
-5. Add localization, determinism, fallback, and postal-format tests.
+4. Validate address-existence evidence and independent residential-use evidence for the same address/building relation.
+5. Add localization, deterministic selection, exact-or-empty filtering, IP coordinate/city matching, and postal-format tests.
 6. Regenerate catalogs only through the existing scripts.
 
-Generated indoor fields and synthetic profile data must remain explicitly distinguishable from source-backed address components.
+All address and indoor fields must stay source-backed; missing values remain empty. Synthetic profile data must remain explicitly separate from address provenance.
 
 ## WebUI development
 
 Localized pages enter through `src/pages/[locale].astro` and mount `src/components/App.tsx`. Shared presentation rules live in `src/styles/global.css`; the synchronization surface uses `SyncAdmin.tsx` and `admin.css`.
 
 When changing result fields, update the domain type first, then generation, API serialization, UI rendering, exports, translations, and tests as one contract. Preserve stable result-section dimensions and verify both English and Chinese values.
+
+Map display has four independent booleans: Google/AMap for China and Google/AMap for overseas addresses. Defaults are Google on and AMap off. China coordinates are converted from WGS-84 to GCJ-02 for AMap; overseas AMap uses the source coordinate with `showOversea` and therefore requires World Map permission. Provider components must fail independently so one unavailable map does not blank the result page.
 
 ## Validation and release gate
 
@@ -144,6 +148,7 @@ This checks database integrity, required tables, country readiness, and storage 
 
 - Keep changes scoped and avoid unrelated dependency or formatting churn.
 - Add tests proportional to the behavioral change.
+- For map changes, cover all four regional/provider switches, persisted administrator settings, masked credentials, proxy host allowlisting, and the absence of the AMap security code from browser responses and logs.
 - Update English, Simplified Chinese, and Traditional Chinese documentation together.
 - Keep real credentials, databases, logs, screenshots with private data, and runtime state out of Git.
 - Run `git diff --check` in addition to the project commands.

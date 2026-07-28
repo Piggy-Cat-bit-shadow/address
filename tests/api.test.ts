@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GeneratedBundle, LocationOption } from '../src/domain/types';
 import app from '../server/api/index';
+import { openDatabase } from '../server/database/sqlite.mjs';
 
 const overpassMock = (country: string, city: string, index = 1) => JSON.stringify({ elements: [{
   type: 'way', id: Number(`${country.charCodeAt(0)}${country.charCodeAt(1)}${index}`),
@@ -39,11 +40,13 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean; generationMode: string }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
-      addressCount: 10, residentialCount: 8, residentialAvailable: false, generationMode: 'synchronized-pool'
+      addressCount: 8, residentialCount: 8, residentialAvailable: false, generationMode: 'synchronized-pool'
     });
     expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM address_pool address');
-    expect(statements[0]).not.toContain('address_pool_runtime');
+    expect(statements[0]).toContain('FROM address_pool_runtime address');
+    expect(statements[0]).toContain('COUNT(DISTINCT address.id)');
+    expect(statements[0]).toContain("address.evidence_type='address_existence'");
+    expect(statements[0]).toContain('address.residential_evidence=1');
     expect(statements[1]).toContain('cn_communities_v2');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
@@ -78,11 +81,66 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number }> };
 
-    expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 7, residentialCount: 3 });
+    expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 3, residentialCount: 3 });
     expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM address_pool address');
-    expect(statements[0]).toContain('residential_use');
+    expect(statements[0]).toContain('FROM address_pool_runtime address');
+    expect(statements[0]).toContain('datetime(address.expires_at) IS NOT NULL');
     expect(statements[1]).toContain('cn_communities_v2');
+  });
+
+  it('counts each publishable residential runtime address once and rejects stale or invalid records', async () => {
+    const database = openDatabase(':memory:');
+    const observedAt = '2026-07-01T00:00:00Z';
+    try {
+      await database.prepare(`INSERT INTO address_sources VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        'fixture-source', 'Fixture source', 'https://example.test', 'https://example.test/data', 'fixture', 'Fixture',
+        'https://example.test/license', 'Fixture attribution', 'https://example.test/attribution',
+        'https://example.test/terms', 0, 0, 1, '{}', observedAt, observedAt
+      ).run();
+      for (const [id, version, checksum] of [['dataset-a', '1', 'a'.repeat(64)]]) {
+        await database.prepare(`INSERT INTO address_datasets(
+          id,source_id,country_code,version,published_at,retrieved_at,imported_at,input_checksum,format,
+          license_code,license_name,license_url,attribution_text,attribution_url,terms_url,
+          share_alike,notice_required,redistribution_allowed,status
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+          id, 'fixture-source', 'US', version, observedAt, observedAt, observedAt, checksum, 'fixture',
+          'fixture', 'Fixture', 'https://example.test/license', 'Fixture attribution',
+          'https://example.test/attribution', 'https://example.test/terms', 0, 0, 1, 'active'
+        ).run();
+      }
+      const insertAddress = async (id: string, expiresAt: string | null, residentialEvidence: boolean) => {
+        const components = { houseNumber: '10', street: 'Market Street', locality: 'Philadelphia', admin1: 'Pennsylvania', admin1Code: 'PA', postcode: '19103' };
+        await database.prepare(`INSERT INTO address_pool(
+          id,country_code,admin1,admin1_code,locality,postal_locality,postcode,street,house_number,
+          latitude,longitude,native_language,component_variants_json,address_variants_json,
+          property_type,quality_score,generation,coverage,random_key,first_seen_at,last_seen_at,expires_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+          id, 'US', 'Pennsylvania', 'PA', 'Philadelphia', 'Philadelphia', '19103', 'Market Street', '10',
+          39.95, -75.16, 'en', JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+          JSON.stringify({ native: '10 Market Street, Philadelphia, PA 19103', en: '10 Market Street, Philadelphia, PA 19103', 'zh-CN': '美国宾夕法尼亚州费城市场街10号' }),
+          'residential', 0.95, 'fixture', 'US:PA:Philadelphia', 1, observedAt, observedAt, expiresAt
+        ).run();
+        await database.prepare('INSERT INTO address_pool_evidence VALUES (?,?,?,?,?,?,?,?,?,?)').bind(
+          `${id}-dataset-a-address`, id, 'dataset-a', `${id}-record`, '', observedAt, 'address_existence', 1, 1, observedAt
+        ).run();
+        if (residentialEvidence) {
+          await database.prepare('INSERT INTO address_pool_evidence VALUES (?,?,?,?,?,?,?,?,?,?)').bind(
+            `${id}-residential`, id, 'dataset-a', `${id}-building`, '', observedAt, 'residential_use', 0, 1, observedAt
+          ).run();
+        }
+      };
+      await insertAddress('valid', '2099-01-01T00:00:00Z', true);
+      await insertAddress('expired', '2000-01-01T00:00:00Z', true);
+      await insertAddress('invalid-date', 'not-a-date', true);
+      await insertAddress('no-residential-evidence', null, false);
+
+      const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: database });
+      const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number }> };
+      expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 1, residentialCount: 1 });
+    } finally {
+      database.close();
+    }
   });
 
   it('does not advertise legacy residential coverage when the active pool has none', async () => {
@@ -111,7 +169,7 @@ describe('synchronized address registry', () => {
     });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
-      addressCount: 10, residentialCount: 0, residentialAvailable: false
+      addressCount: 0, residentialCount: 0, residentialAvailable: false
     });
   });
 

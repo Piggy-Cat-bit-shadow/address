@@ -30,21 +30,23 @@ The new China POI pool grows after AMap, Baidu, or Tencent synchronization, so i
 
 ## API keys and secrets
 
-Runtime generation uses SQLite only. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`.
+Runtime generation reads only verified residential records from the active SQLite snapshot. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`; publication still requires multi-provider consistency.
 
 | Variable | Required | Feature | Where to obtain it |
 |---|---|---|---|
 | `CONFIG_MASTER_KEY` | Required | Encrypt provider credentials in `control.sqlite` | Generate with `openssl rand -base64 32`; keep it server-only. |
 | `ADMIN_BOOTSTRAP_PASSWORD` | Required initially | Create the first administrator identity | Generate a strong password; it is ignored after initialization. |
-| AMap keys | China sync | Community POI ingestion | Create Web Service keys in the [AMap console](https://lbs.amap.com/api/webservice/guide/create-project/get-key), then add them in `/admin/`. |
+| `AMAP_API_KEY` / additional AMap WebService keys | China sync, server-side only | Community POI ingestion | Create Web Service keys in the [AMap console](https://lbs.amap.com/api/webservice/guide/create-project/get-key), then import the first ignored runtime value or add keys in `/admin/`. Do not reuse a browser JS key. |
+| `AMAP_JS_API_KEY` | Optional initial import | Browser AMap rendering | Create a dedicated Web platform (JS API) key, restrict it to the production domain and local test origins, then import it through ignored runtime configuration or `/admin/`. |
+| `AMAP_JS_SECURITY_CODE` | Required with the JS key | Authenticate AMap JS service requests | Obtain it with the JS API key. Keep it server-only; the application encrypts it and applies it through `/_AMapService`. |
 | Baidu keys | China sync | Community POI ingestion and cross-validation | Create server-side Place API keys in the Baidu Maps console, then add them in `/admin/`. |
 | Tencent keys | China sync | Community POI ingestion and cross-validation | Create WebService API keys in the Tencent Location Service console, then add them in `/admin/`. |
 | `GEOAPIFY_API_KEY` | Optional | Live geocoding outside China and selected reverse localization | Create a project and key using the [Geoapify guide](https://www.geoapify.com/get-started-with-maps-api/). |
 | `YOUDAO_APP_KEY`, `YOUDAO_APP_SECRET` | Optional pair | Backup online translation provider | Create a translation application at [Youdao AI](https://ai.youdao.com/). |
-| `ONEMAP_ACCESS_TOKEN` | Optional | Live ordinary-address lookup for Singapore | Follow the [OneMap authentication guide](https://www.onemap.gov.sg/apidocs/authentication). Tokens expire and need refresh handling. |
+| `ONEMAP_ACCESS_TOKEN` | Optional | Singapore address-existence, postcode, and coordinate verification | Follow the [OneMap authentication guide](https://www.onemap.gov.sg/apidocs/authentication). Tokens are valid for 3 days and require renewal; OneMap alone does not establish residential use. |
 | `SYNC_ADMIN_TOKEN` | Required on a VPS | Protect sync-control mutations | Generate locally; this is not a third-party credential. |
 
-Keep `LIVE_API_MODES=ip-region` to restrict live providers to IP-nearby generation. Regular generation then uses the local database. Set `GOOGLE_TRANSLATION_ENABLED=false` unless online translation is explicitly needed.
+Keep `LIVE_API_MODES=ip-region` to restrict live providers to IP coordinate/city matching. Standard public generation uses the active residential SQLite pool, and every live candidate must pass the same address-existence and residential-evidence gates. IP mode reports no coverage instead of substituting a region-wide or nationwide address. Set `GOOGLE_TRANSLATION_ENABLED=false` unless online translation is explicitly needed.
 
 ## Secret handling
 
@@ -58,6 +60,8 @@ The repository templates contain placeholders only:
 | `ops/deploy.env.example` | Private SSH deployment settings |
 
 `.env`, `.deploy.env`, databases, logs, runtime state, caches, private keys, and `plan.md` are ignored by Git. Store real values only in ignored private files. Do not place secrets in browser variables, source code, screenshots, issues, command output, or CI logs.
+
+The AMap JS API key is a browser loading parameter and is visible in browser requests by design. Treat it as a dedicated, domain-restricted public identifier rather than a reusable server credential. Its paired security code, all WebService keys, and `CONFIG_MASTER_KEY` remain server-only. The [official AMap production pattern](https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode) sets `serviceHost=/_AMapService`; the Node server adds the encrypted security code and forwards only to the fixed AMap upstream.
 
 On the VPS, use a mode-`600` runtime file:
 
@@ -90,7 +94,9 @@ At minimum, replace `YOUR_DOMAIN.example`, generate `CONFIG_MASTER_KEY` and `SYN
 | `STATIC_ROOT` | `/root/address/app/dist` | Built Astro site |
 | `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite database |
 | `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | Authentication, encrypted credentials, quotas, jobs, and audit database |
-| `CONFIG_MASTER_KEY` | Generated server-only value | AES-256-GCM key for provider credentials |
+| `CONFIG_MASTER_KEY` | Generated server-only value | AES-256-GCM key for provider credentials and AMap JS security configuration |
+| `AMAP_JS_API_KEY` | Empty | Optional first-import value for the dedicated browser JS API key |
+| `AMAP_JS_SECURITY_CODE` | Empty | Optional first-import value for the server-only JS security code |
 | `ADMIN_BOOTSTRAP_PASSWORD` | One-time strong password | Creates the initial administrator identity |
 | `COOKIE_SECURE` | `true` | Send authentication cookies only over HTTPS |
 | `ALLOWED_ORIGIN` | Your HTTPS origin | CORS allowlist |
@@ -101,6 +107,8 @@ At minimum, replace `YOUR_DOMAIN.example`, generate `CONFIG_MASTER_KEY` and `SYN
 | `SYNC_UTC_HOUR` | `3` | Daily scheduler check hour in UTC |
 
 Only enable `TRUST_PROXY` when a controlled reverse proxy overwrites forwarded IP headers. Keep port `8791` private.
+
+Map display switches are stored in the control database and managed in `/admin/`. Google and AMap each have independent China and overseas switches. The default is Google enabled and AMap disabled for both regions. Enabling overseas AMap requires [World Map](https://lbs.amap.com/api/javascript-api-v2/guide/map/world-map) permission; without that permission, keep the overseas AMap switch off.
 
 For AreaCity, download and extract `ok_data_level4.csv` into `/root/address/data/imports/`, then use **China Sync → Import AreaCity** in `/admin/` with source `imports/ok_data_level4.csv` and the release version. An HTTPS JSON/CSV URL is also accepted; local paths are restricted to the data directory.
 
@@ -221,6 +229,8 @@ The deployment script archives the current `HEAD`, uploads it through SSH, prese
 - `SYNC_ADMIN_TOKEN` is random, private, and absent from Git history.
 - `SYNC_CONTROL_PUBLIC=false` and port `8791` is not public.
 - Optional provider keys have provider-side restrictions and usage alerts.
+- The AMap JS key is dedicated and domain-restricted; its security code is absent from browser responses, logs, and Git.
+- Overseas AMap is enabled only after World Map permission is confirmed; all four map switches were tested.
 - `npm run check:production` passes after the database is initialized.
 - A current backup exists and restore has been tested.
 - At least 60 GiB is allocated and free-space monitoring is enabled.

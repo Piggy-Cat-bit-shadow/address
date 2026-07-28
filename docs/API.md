@@ -25,10 +25,10 @@ Tokens are created in `/admin/`, stored as hashes, can be scoped/rate-limited/re
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Lightweight API health check |
-| `GET` | `/countries` | Country registry, synchronized counts, and residential availability |
+| `GET` | `/countries` | Country registry, synchronized counts, and strict residential coverage |
 | `GET` | `/client-context` | Resolve the request IP or an explicit IP to a supported region |
 | `GET` | `/locations/search` | Search region, city, and postcode options |
-| `GET` | `/generate` | Generate an address and related test profile |
+| `GET` | `/generate` | Generate a verified residential address and related test profile |
 | `GET` | `/data-health` | Inspect synchronized pool coverage and readiness |
 
 ## Health
@@ -47,7 +47,7 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/health
 curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
 ```
 
-The response is `{ "data": [...] }`. Each country includes its code, localized name, supported filters, address count, residential count, residential availability, and `generationMode`. Counts are `null` when no database is attached.
+The response is `{ "data": [...] }`. Each country includes its code, localized name, supported filters, total synchronized count, verified residential count, residential availability, and `generationMode`. Public generation uses only the verified residential pool; total counts remain visible for migration and health reporting. Counts are `null` when no database is attached.
 
 ## Client context
 
@@ -75,7 +75,7 @@ The response may contain `publicIp`, country, region, city, postcode, latitude, 
 | `region` | empty | Parent region text |
 | `regionId` | empty | Stable parent region ID |
 | `cityId` | empty | Stable parent city ID |
-| `residential` | `false` | Restrict options to residential coverage |
+| `residential` | `false` (catalog compatibility) | Set `true` to list only verified residential coverage; `/generate` always uses residential records |
 | `cursor` | empty | Pagination cursor returned by the previous request |
 | `limit` | `100` | Requested page size |
 
@@ -90,38 +90,44 @@ The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a c
 | Parameter | Default | Description |
 |---|---|---|
 | `country` | `US` | Country code; ignored when IP mode resolves a country |
-| `mode` | standard | Set `ip-region` for IP-nearby generation |
+| `mode` | `residential` | Set `ip-region` for IP coordinate/city matching |
 | `ip` | request IP | Explicit IP used with `mode=ip-region` |
-| `residential` | country capability | `true` or `false` |
+| `residential` | `true` | Legacy compatibility flag; `true` and `false` are accepted, while public generation always enforces residential evidence |
 | `region`, `city`, `postcode` | empty | Human-readable location filters |
 | `regionId`, `cityId`, `postcodeId` | empty | Stable catalog IDs |
 | `q` | empty | Free-text location hint |
-| `strategy` | `random` | `random` or `instant` |
+| `strategy` | `random` | Select an eligible verified record with `random` or `instant`; it never synthesizes address fields |
 | `seed` | generated UUID | Deterministic generation seed |
 | `requestId` | generated UUID | Caller correlation ID |
-| `live` | `false` | Per-request opt-in to configured live providers |
+| `live` | `false` | Per-request opt-in to configured live providers; candidates still need verified residential evidence |
 
-Standard synchronized-pool generation:
+Verified residential generation:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US&residential=false"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US"
 ```
 
 China generation with a location filter:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=Nanjing&residential=false"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=Nanjing"
 ```
 
-IP-nearby generation:
+IP-region generation:
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8"
 ```
 
-The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, fallback level, sources tried, timing information, and a `result` bundle. The bundle contains address variants, postal formats, provenance, a synthetic test profile, sandbox card data, employment, finance, internet fields, and Google/AMap links.
+The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
 
-Use `seed` when tests need reproducible synthetic profile fields. Source synchronization can still change the selected address pool over time.
+Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. It does not create missing address components. Source synchronization can still change the selected residential pool over time.
+
+## WebUI map configuration
+
+Map display is a WebUI concern and does not change `/generate` address evidence. The session-protected `/web-api/v1` channel returns only display flags and, when enabled, the dedicated AMap JS API key required by the browser. It never returns the AMap JS security code or any synchronization key.
+
+Google and AMap each have independent China and overseas switches. Defaults are Google enabled and AMap disabled in both regions. China AMap markers use GCJ-02 coordinates; overseas AMap rendering requires the account's World Map permission. AMap service requests use the same-origin `/_AMapService` prefix, where the server adds the encrypted security code before forwarding to the fixed AMap upstream.
 
 ## Data health
 
@@ -172,5 +178,6 @@ The main API hides `/sync-control/*` by default. Keep `SYNC_CONTROL_PUBLIC=false
 
 - Set `ALLOWED_ORIGIN` to the public HTTPS origin in production.
 - Do not place API keys or `SYNC_ADMIN_TOKEN` in query strings, browser code, screenshots, or logs.
+- Use a dedicated, domain-restricted AMap JS API key for browser rendering. The JS key is necessarily visible in browser requests; the paired security code and all WebService synchronization keys remain server-only.
 - Generated profiles and card numbers are test fixtures. They do not identify a real person or payment account.
-- Regular address generation reads the local SQLite pool. Live providers are used only when explicitly enabled by mode or `live=true`.
+- Public generation reads verified residential records from the active SQLite pool. Enabled live providers remain subject to the same address-existence and residential-evidence gates.

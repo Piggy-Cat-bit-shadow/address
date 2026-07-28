@@ -25,11 +25,11 @@ const addressFromSource = (
   components: AddressComponents,
   coordinates: { latitude: number; longitude: number },
   formatted: string,
-  residential: boolean,
   now: Date,
   detectedPropertyType?: PropertyType,
   recordId?: string,
-  classifications: string[] = []
+  classifications: string[] = [],
+  residentialEvidence?: string
 ): VerifiedAddress | undefined => {
   if (!components.street || !components.locality || !formatted) return undefined;
   const observedAt = now.toISOString();
@@ -37,13 +37,13 @@ const addressFromSource = (
     { sourceId: source.id, sourceName: source.name, sourceUrl: source.url, sourceFamily: source.id, type: 'address_existence', value: formatted, observedAt },
     { sourceId: source.id, sourceName: source.name, sourceUrl: source.url, sourceFamily: source.id, type: 'coordinate', value: `${coordinates.latitude},${coordinates.longitude}`, observedAt }
   ];
-  if (residential) {
-    evidence.push({ sourceId: source.id, sourceName: source.name, sourceUrl: source.url, sourceFamily: source.id, type: 'residential_use', value: 'provider residential category', observedAt });
+  if (residentialEvidence) {
+    evidence.push({ sourceId: source.id, sourceName: source.name, sourceUrl: source.url, sourceFamily: source.id, type: 'residential_use', value: residentialEvidence, observedAt });
   }
   if (detectedPropertyType === 'apartment') {
     evidence.push({ sourceId: source.id, sourceName: source.name, sourceUrl: source.url, sourceFamily: source.id, type: 'building_status', value: 'provider multi-unit building tag', observedAt });
   }
-  const propertyType: PropertyType = detectedPropertyType || (residential ? 'residential' : 'unknown');
+  const propertyType: PropertyType = detectedPropertyType || 'unknown';
   if (findNonResidentialMatch({
     countryCode: country.code,
     buildingName: components.buildingName,
@@ -52,8 +52,10 @@ const addressFromSource = (
     propertyType,
     classifications
   }).excluded) return undefined;
+  const sourcePathId = new URL(source.url).pathname.split('/').filter(Boolean).pop();
+  const sourceRecordId = recordId || sourcePathId || formatted;
   return {
-    id: `${source.id}-${country.code.toLowerCase()}-${source.id === 'geoapify' ? encodeURIComponent(recordId || formatted) : source.url.split('/').pop()}`,
+    id: `${source.id}-${country.code.toLowerCase()}-${source.id === 'geoapify' || !sourcePathId ? encodeURIComponent(sourceRecordId) : sourceRecordId}`,
     countryCode: country.code,
     nativeAddress: formatted,
     formattedAddress: formatted,
@@ -136,7 +138,9 @@ const fetchGeoapify = async (
       const classifications = [building, ...(item.categories || [])]
         .flatMap((value) => [value, ...value.split(/[.:/]/u)])
         .filter(Boolean);
-      return addressFromSource(country, source, components, { latitude: item.lat, longitude: item.lon }, formatted, residential, now, detectedType, item.place_id, classifications);
+      const residentialEvidence = ['apartments', 'house', 'residential', 'detached', 'semidetached_house', 'terrace', 'bungalow', 'dormitory'].includes(building)
+        ? `building=${building}` : undefined;
+      return addressFromSource(country, source, components, { latitude: item.lat, longitude: item.lon }, formatted, now, detectedType, item.place_id, classifications, residentialEvidence);
     }).filter((item): item is VerifiedAddress => Boolean(item));
     const filtered = filterCandidates(candidates, filters, target);
     const numbered = filtered.filter((candidate) => candidate.components.houseNumber);
@@ -159,30 +163,9 @@ interface AmapPoi {
   type?: string; typecode?: string;
 }
 
-const chinaRoadFallbacks: Record<string, readonly string[]> = {
-  '北京市': ['朝阳路', '广渠路', '阜通东大街', '西直门外大街'],
-  '上海市': ['中山北路', '瑞金二路', '天山路', '浦东南路'],
-  '广州市': ['中山大道', '广州大道', '天河路', '工业大道'],
-  '深圳市': ['深南大道', '滨河大道', '红荔路', '宝安大道'],
-  '成都市': ['人民南路', '蜀都大道', '建设路', '锦江大道'],
-  '唐山市': ['新华道', '建设北路', '文化路', '北新道'],
-  '铜川市': ['中山路', '红旗街', '延安路', '长虹路']
-};
-const defaultChinaRoads = ['中山路', '文化路', '人民路', '建设路', '新华路', '解放路'] as const;
-
-const stableNumber = (value: string, minimum: number, maximum: number): number => {
-  let hash = 2166136261;
-  for (const character of value) {
-    hash ^= character.codePointAt(0) || 0;
-    hash = Math.imul(hash, 16777619);
-  }
-  return minimum + ((hash >>> 0) % (maximum - minimum + 1));
-};
-
 const amapStreetAddress = (item: AmapPoi, address: string): {
   street: string;
   houseNumber: string;
-  synthetic: boolean;
 } | undefined => {
   let localAddress = address.trim();
   for (const administrative of unique([item.pname, item.cityname, item.adname])) {
@@ -190,19 +173,13 @@ const amapStreetAddress = (item: AmapPoi, address: string): {
   }
   const numbered = localAddress.match(/^(.+?(?:大道|大街|公路|路|街|巷|道|弄))(\d+(?:-\d+)?(?:号|弄|巷))(.*)$/u);
   if (numbered?.[1]) {
-    return { street: numbered[1].trim(), houseNumber: numbered[2], synthetic: false };
+    return { street: numbered[1].trim(), houseNumber: numbered[2] };
   }
-  const namedRoad = localAddress.match(/^(.+?(?:大道|大街|公路|路|街|巷|道|弄))/u)?.[1]?.trim();
-  const roads = chinaRoadFallbacks[item.cityname || ''] || defaultChinaRoads;
-  const seed = `${item.id || item.name || address}|${item.cityname || ''}|${item.adname || ''}`;
-  const street = namedRoad || roads[stableNumber(seed, 0, roads.length - 1)];
-  if (!street) return undefined;
-  return { street, houseNumber: `${stableNumber(`${seed}|house`, 1, 999)}号`, synthetic: true };
+  return undefined;
 };
 
 const fetchAmap = async (
   country: CountryConfig,
-  residential: boolean,
   filters: AddressFilters,
   apiKey: string,
   fetcher: typeof fetch,
@@ -229,7 +206,7 @@ const fetchAmap = async (
     const [longitude, latitude] = (item.location || '').split(',').map(Number);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return undefined;
     const streetAddress = amapStreetAddress(item, address);
-    if (!streetAddress || (residential && streetAddress.synthetic)) return undefined;
+    if (!streetAddress) return undefined;
     const components: AddressComponents = {
       houseNumber: streetAddress.houseNumber, street: streetAddress.street, buildingName: item.name,
       locality: item.cityname || '', district: item.adname, admin1: item.pname, postcode: ''
@@ -237,16 +214,7 @@ const fetchAmap = async (
     const source = { id: 'amap', name: '高德地图', url: item.id ? `https://www.amap.com/place/${item.id}` : 'https://www.amap.com/' };
     const administrative = [item.pname, item.cityname, item.adname].filter((value, index, values) => value && values.indexOf(value) === index).join('');
     const formatted = `${administrative}${streetAddress.street}${streetAddress.houseNumber}${item.name || ''}`;
-    const candidate = addressFromSource(country, source, components, gcj02ToWgs84(latitude, longitude), formatted, true, now, 'apartment');
-    if (!candidate || !streetAddress.synthetic) return candidate;
-    const providerAddress = `${administrative}${address || item.name || ''}`;
-    return {
-      ...candidate,
-      addressStatus: 'synthetic',
-      evidence: candidate.evidence.map((evidence) => evidence.type === 'address_existence'
-        ? { ...evidence, value: providerAddress }
-        : evidence)
-    };
+    return addressFromSource(country, source, components, gcj02ToWgs84(latitude, longitude), formatted, now, 'apartment', item.id, [], 'amap:typecode=120302');
   }).filter((item): item is VerifiedAddress => Boolean(item));
   return filterCandidates(candidates, filters, target);
 };
@@ -277,7 +245,9 @@ const fetchOneMap = async (
       houseNumber: oneMapValue(item.BLK_NO), street: oneMapValue(item.ROAD_NAME), buildingName: oneMapValue(item.BUILDING) || undefined,
       locality: 'Singapore', postalLocality: 'Singapore', admin1: 'Singapore', postcode: oneMapValue(item.POSTAL)
     };
-    return addressFromSource(country, source, components, { latitude, longitude }, item.ADDRESS || item.SEARCHVAL || '', false, now);
+    const recordId = oneMapValue(item.POSTAL)
+      || [oneMapValue(item.BLK_NO), oneMapValue(item.ROAD_NAME), item.LATITUDE, item.LONGITUDE].filter(Boolean).join(':');
+    return addressFromSource(country, source, components, { latitude, longitude }, item.ADDRESS || item.SEARCHVAL || '', now, undefined, recordId);
   }).filter((item): item is VerifiedAddress => Boolean(item));
   return filterCandidates(candidates, filters, target);
 };
@@ -376,7 +346,9 @@ export const fetchExternalCandidates = async (
     for (let index = 0; index < 2; index += 1) {
       try {
         const candidates = await provider();
-        if (candidates.length) return candidates;
+        const eligible = candidates.filter((candidate) => candidate.addressStatus === 'verified'
+          && (!residential || candidate.evidence.some((item) => item.type === 'residential_use')));
+        if (eligible.length) return eligible;
       } catch {
         if (index === 1) return [];
       }
@@ -384,7 +356,7 @@ export const fetchExternalCandidates = async (
     return [];
   };
   if (country.code === 'CN' && keys.amap) {
-    const candidates = await attempt(() => fetchAmap(country, residential, filters, keys.amap!, fetcher, now, target, timeoutMs));
+    const candidates = await attempt(() => fetchAmap(country, filters, keys.amap!, fetcher, now, target, timeoutMs));
     if (candidates.length) return { candidates, sources: ['amap'] };
     return { candidates: [], sources: ['amap'] };
   }

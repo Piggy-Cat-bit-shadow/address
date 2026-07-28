@@ -178,12 +178,9 @@ describe('local SQLite address pool', () => {
       db, 'US', true, { region: 'CA', city: 'Los Angeles', postcode: '90001' }, target, 'pool-seed', current
     );
 
-    expect(address?.id).toBe('pool-fixture-address');
-    expect(address?.components).toEqual(expect.objectContaining({ admin1Code: 'CA', postalLocality: 'Los Angeles' }));
-    expect(address?.evidence.map(({ type }) => type)).toEqual(['address_existence', 'coordinate', 'residential_use']);
-    expect(address?.coordinates).toEqual({ latitude: row.latitude, longitude: row.longitude });
-    expect(statements[0]).toContain('random_key >= ?');
-    expect(bindingCounts[0]).toBe((statements[0].match(/\?/g) || []).length);
+    expect(address).toBeUndefined();
+    expect(statements).toHaveLength(0);
+    expect(bindingCounts).toHaveLength(0);
   });
 
   it('falls through cleanly before the address-pool schema is initialized', async () => {

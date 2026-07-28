@@ -8,13 +8,14 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:api\"",
+    "dev": "npm run build && npm run dev:api",
     "dev:web": "astro dev",
-    "dev:api": "tsx --env-file-if-exists=.env watch server/api/server.ts",
+    "dev:api": "tsx watch --env-file-if-exists=.env server/api/server.ts",
     "start": "tsx --env-file-if-exists=.env server/api/server.ts",
     "build": "astro build",
     "check": "astro check && tsc -p server/api/tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:admin-e2e": "npm run build && node tests/admin-console.e2e.mjs",
     "test:watch": "vitest",
     "data:regions": "node scripts/update-regions.mjs",
     "data:catalog": "node scripts/sync-location-catalog.mjs",
@@ -56,6 +57,7 @@
     "@types/react-dom": "latest",
     "concurrently": "latest",
     "fflate": "^0.8.3",
+    "playwright": "^1.61.1",
     "tsx": "latest",
     "typescript": "latest",
     "vitest": "latest"

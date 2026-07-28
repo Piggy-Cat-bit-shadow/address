@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
+const candidates = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { encoding: 'utf8' })
+  .split('\0').filter(Boolean);
 const failures = [];
 const report = (path, type) => failures.push({ path, type });
 
@@ -25,10 +27,13 @@ const secretShapes = [
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u],
   ['github-token', /(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}/u],
   ['aws-access-key', /AKIA[0-9A-Z]{16}/u],
-  ['slack-token', /xox[baprs]-[A-Za-z0-9-]{20,}/u]
+  ['slack-token', /xox[baprs]-[A-Za-z0-9-]{20,}/u],
+  ['jwt-token', /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u],
+  ['google-api-key', /\bAIza[A-Za-z0-9_-]{30,}\b/u],
+  ['tencent-map-key', /\b(?:[A-Z0-9]{5}-){5}[A-Z0-9]{5}\b/u]
 ];
 
-for (const path of tracked) {
+for (const path of candidates) {
   let content;
   try {
     content = readFileSync(path, 'utf8');
@@ -59,5 +64,5 @@ if (failures.length) {
   }
   process.exitCode = 1;
 } else {
-  console.log(`public-release audit passed (${tracked.length} tracked files)`);
+  console.log(`public-release audit passed (${tracked.length} tracked, ${candidates.length - tracked.length} untracked candidates)`);
 }

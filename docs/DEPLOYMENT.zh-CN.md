@@ -30,21 +30,23 @@
 
 ## API Key 与密钥
 
-日常生成只查询 SQLite。中国小区同步需要一个或多个高德、百度或腾讯服务端 Key，部署后在 `/admin/` 中配置。
+日常生成只查询 active SQLite 中通过证据门禁的真实住宅记录。中国小区同步需要一个或多个高德、百度或腾讯服务端 Key，部署后在 `/admin/` 中配置；发布仍要求多平台一致。
 
 | 变量 | 是否必需 | 功能 | 获取方式 |
 |---|---|---|---|
 | `CONFIG_MASTER_KEY` | 必需 | 加密 `control.sqlite` 中的地图凭据 | 使用 `openssl rand -base64 32` 生成，只保留在服务器。 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 首次必需 | 初始化管理员身份 | 设置强密码；初始化完成后不再读取其明文。 |
-| 高德 Key | 中国同步 | 小区 POI 导入 | 创建“Web 服务”Key 后在 `/admin/` 添加。 |
+| `AMAP_API_KEY` / 其他高德 WebService Key | 中国同步，仅服务端 | 小区 POI 导入 | 创建“Web 服务”Key 后，通过被忽略的运行配置导入首个值，或在 `/admin/` 添加；不要复用浏览器 JS Key。 |
+| `AMAP_JS_API_KEY` | 可选首次导入 | 浏览器高德地图渲染 | 创建专用“Web 端（JS API）”Key，在控制台限制生产域名和本地测试来源，再通过被忽略的运行配置或 `/admin/` 导入。 |
+| `AMAP_JS_SECURITY_CODE` | 与 JS Key 配套 | 鉴权高德 JS 服务请求 | 随 JS API Key 获取，只保留在服务器；应用加密保存并通过 `/_AMapService` 使用。 |
 | 百度 Key | 中国同步 | 小区 POI 导入和交叉验证 | 创建服务端 Place API Key 后在 `/admin/` 添加。 |
 | 腾讯 Key | 中国同步 | 小区 POI 导入和交叉验证 | 创建 WebService API Key 后在 `/admin/` 添加。 |
 | `GEOAPIFY_API_KEY` | 可选 | 中国以外实时地理编码及部分反向本地化 | 按 [Geoapify 官方指南](https://www.geoapify.com/get-started-with-maps-api/)创建项目和 Key。 |
 | `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET` | 成对可选 | 在线翻译备用通道 | 在[有道智云](https://ai.youdao.com/)创建自然语言翻译应用。 |
-| `ONEMAP_ACCESS_TOKEN` | 可选 | 新加坡普通地址实时查询 | 按 [OneMap 认证文档](https://www.onemap.gov.sg/apidocs/authentication)获取；Token 到期后需要刷新。 |
+| `ONEMAP_ACCESS_TOKEN` | 可选 | 新加坡地址存在性、邮编和坐标核验 | 按 [OneMap 认证文档](https://www.onemap.gov.sg/apidocs/authentication)获取；Token 有效期为 3 天并需要续期，OneMap 单独结果不构成住宅用途证据。 |
 | `SYNC_ADMIN_TOKEN` | VPS 必需 | 保护同步控制写操作 | 在本机随机生成，不属于第三方凭据。 |
 
-保留 `LIVE_API_MODES=ip-region` 可把实时服务限制在 IP 就近生成；普通生成只查询本地数据库。除非明确需要在线翻译，否则保留 `GOOGLE_TRANSLATION_ENABLED=false`。
+保留 `LIVE_API_MODES=ip-region` 可把实时服务限制在 IP 坐标或城市匹配。公开生成只查询 active SQLite 住宅池，实时候选也必须通过地址存在性和住宅证据门禁；IP 模式无覆盖时返回 `IP_REGION_NO_RESULT`，不替换成州省或全国地址。除非明确需要在线翻译，否则保留 `GOOGLE_TRANSLATION_ENABLED=false`。
 
 ## 密钥保护
 
@@ -58,6 +60,8 @@
 | `ops/deploy.env.example` | 私密 SSH 部署配置 |
 
 `.env`、`.deploy.env`、数据库、日志、运行状态、缓存、私钥和 `plan.md` 均被 Git 忽略。真实值只写入被忽略的私密文件，不要放入浏览器变量、源码、截图、Issue、命令输出或 CI 日志。
+
+高德 JS API Key 按平台机制属于浏览器加载参数，会出现在浏览器请求中，因此必须使用专用 Key 并设置域名限制，不能把它当作服务端通用凭据。配套安全密钥、全部 WebService Key 和 `CONFIG_MASTER_KEY` 始终留在服务器。生产环境按[高德官方安全密钥方案](https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode)设置 `serviceHost=/_AMapService`，由 Node 服务读取密文安全密钥并只转发到固定高德上游。
 
 VPS 使用权限为 `600` 的运行配置：
 
@@ -90,7 +94,9 @@ chmod 600 /root/address/runtime/address.env
 | `STATIC_ROOT` | `/root/address/app/dist` | Astro 构建结果 |
 | `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite 数据库 |
 | `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | 认证、加密凭据、配额、任务和审计数据库 |
-| `CONFIG_MASTER_KEY` | 仅服务器保存的随机值 | 地图凭据 AES-256-GCM 主密钥 |
+| `CONFIG_MASTER_KEY` | 仅服务器保存的随机值 | 地图凭据和高德 JS 安全配置的 AES-256-GCM 主密钥 |
+| `AMAP_JS_API_KEY` | 空 | 专用浏览器 JS API Key 的可选首次导入值 |
+| `AMAP_JS_SECURITY_CODE` | 空 | 仅服务器使用的 JS 安全密钥可选首次导入值 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 一次性强密码 | 创建初始管理员身份 |
 | `COOKIE_SECURE` | `true` | 仅通过 HTTPS 发送认证 Cookie |
 | `ALLOWED_ORIGIN` | 公开 HTTPS 来源 | CORS 白名单 |
@@ -101,6 +107,8 @@ chmod 600 /root/address/runtime/address.env
 | `SYNC_UTC_HOUR` | `3` | 每日调度检查时间，UTC 小时 |
 
 只有受控反向代理会覆盖转发 IP 请求头时才启用 `TRUST_PROXY`。端口 `8791` 始终保持私有。
+
+地图显示开关保存在控制数据库并通过 `/admin/` 管理。Google 与高德分别具有中国和国外开关，默认均为 Google 开启、高德关闭。启用高德国外地图前需要申请[世界地图](https://lbs.amap.com/api/javascript-api-v2/guide/map/world-map)权限；未开通时保持国外高德关闭。
 
 AreaCity 数据需先下载并解压 `ok_data_level4.csv` 到 `/root/address/data/imports/`，再在 `/admin/` 的“中国同步 → 导入 AreaCity”中填写 `imports/ok_data_level4.csv` 和发布版本。也可填写 HTTPS JSON/CSV 地址；本地路径仅允许位于数据目录内。
 
@@ -221,6 +229,8 @@ bash ops/deploy.sh --dist
 - `SYNC_ADMIN_TOKEN` 随机且私密，Git 历史中没有具体值。
 - `SYNC_CONTROL_PUBLIC=false`，端口 `8791` 未公开。
 - 可选服务 Key 已在服务商侧设置限制和用量告警。
+- 高德 JS Key 为专用且已限制域名；安全密钥未出现在浏览器响应、日志或 Git 中。
+- 仅在确认世界地图权限后启用国外高德，并已测试四个地图开关。
 - 数据库初始化后，`npm run check:production` 通过。
 - 已生成当前备份并验证恢复流程。
 - 应用卷至少 60 GiB，并启用剩余空间监控。

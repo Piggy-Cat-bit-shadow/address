@@ -276,11 +276,10 @@ describe('generated profile, card and keyless maps', () => {
     }
   });
 
-  it('keeps generated units separate from the verified source address', () => {
+  it('does not invent indoor units for a verified source address', () => {
     const apartment = eligibleAddresses('US', true, current).find((item) => item.propertyType === 'apartment')!;
     const generated = generateBundle(apartment, true, 'generated-unit', undefined, current);
-    expect(generated.generatedUnit?.provenance).toBe('synthetic');
-    expect(generated.generatedUnit?.variants.native).toBeTruthy();
+    expect(generated.generatedUnit).toBeUndefined();
     expect(generated.address).toEqual(apartment);
     expect(generated.address.components.unit).toBe(apartment.components.unit);
     expect(generated.address.addressVariants).toEqual(apartment.addressVariants);

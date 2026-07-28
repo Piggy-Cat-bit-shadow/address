@@ -4,7 +4,7 @@
 
 <h1 align="center">Address</h1>
 
-<p align="center">A self-hosted address and synthetic test-profile generator for 27 countries and regions.</p>
+<p align="center">A self-hosted verified residential-address and synthetic test-profile generator for 27 countries and regions.</p>
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -20,82 +20,85 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live_Demo-address.333186.xyz-0f766e" alt="Live Demo" /></a>
 </p>
 
-Address combines real open-data streets, administrative areas, coordinates, and postcodes with clearly marked synthetic indoor details. It produces source-language, English, and Simplified-Chinese address presentations plus coherent profile fields for form and software testing.
+Address publishes only records that pair source-backed address existence with independent residential-use evidence. Address components, including indoor fields, are never invented; absent values remain empty. It produces source-language, English, and Simplified-Chinese presentations plus coherent synthetic profile fields for form and software testing.
 
 > Generated records are test data. They do not prove deliverability, residency, identity, payment-account validity, or ownership.
 
 ## 🚀 Workflow
 
-Choose a country and location → select ordinary or evidence-backed residential mode → generate an address and test profile → copy individual fields or export the result.
+Choose a country and location → generate a verified residential address and test profile → copy individual fields or export the result.
 
 ## ✨ Features
 
 - Covers 27 countries and regions with region, city, and postcode filters.
-- Uses exact → nearby → same-region → nationwide fallback for synchronized countries.
-- Supports IP-nearby generation with a local SQLite RTree fallback.
+- Treats location filters as exact-or-empty; an uncovered selection returns `NO_POOL_COVERAGE` rather than a different place.
+- IP-region generation requires a coordinate or city match and never substitutes a region-wide or nationwide record.
 - Presents addresses in the source language, English, and Simplified Chinese.
-- Separates source-backed address components from labeled synthetic indoor fields.
+- Keeps every address component source-backed; missing house, building, unit, floor, room, or postcode values remain empty.
 - Generates coherent basic profile, sandbox card, employment, finance, and network fields.
-- Provides Google coordinate preview, address search, and an AMap link for China.
+- Supports independently configurable Google and AMap previews for China and other countries; both can be disabled.
 - Hot-reloads a custom blacklist and preserves evidence/source attribution.
 - Supports resumable initial imports, daily country rotation, quality gates, and storage limits.
 
 ## 🧭 Address Sources and Field Provenance
 
-The default synchronized pool uses the following source family for each country. Live providers may be used only when the corresponding mode and credential are enabled; they do not replace the default offline pool.
+The active pool uses the following source family for each country. Every public result must pass address-existence and residential-use gates. Live providers are optional inputs and their candidates pass the same gates before publication.
 
-| Country / region | Default source | Real/source-backed address fields | Generated/synthetic address fields |
+| Country / region | Default source | Real/source-backed address fields | Generated address fields |
 |---|---|---|---|
-| United States (US) | [Overture Maps](https://overturemaps.org/) | House number, street, city, state, ZIP, source geometry | None for ordinary records; missing apartment details may generate `Apt`/room |
-| Canada (CA) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postal code, source geometry | None for ordinary records; missing apartment details may generate `Unit`/room |
-| Mexico (MX) | [Overture Maps](https://overturemaps.org/) | House number, street, municipality, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| United Kingdom (GB) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, town, postcode, source geometry | None for ordinary records; missing apartment details may generate `Flat` |
-| Germany (DE) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| France (FR) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Italy (IT) | [Overture Maps](https://overturemaps.org/) | House number, street, city, region, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Spain (ES) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Netherlands (NL) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Russia (RU) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, federal subject, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| China (CN) | [AreaCity](https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov) + AMap/Baidu/Tencent POI | Province/municipality, city, district, township, registered community name/address, and provider coordinate | Building 1–3, unit 1–3, floor 2–6, room 01–04 |
-| Hong Kong (HK) | [Geofabrik OSM](https://download.geofabrik.de/) | Building/street, district, area, source geometry | Missing floor/flat/room details may be generated |
-| Taiwan (TW) | [Overture Maps](https://overturemaps.org/) | House number, street, city/county, district, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Japan (JP) | [Overture Maps](https://overturemaps.org/) | Block/house number, street, municipality, prefecture, postcode, source geometry | None for ordinary records; missing apartment room details may be generated |
-| South Korea (KR) | [Geofabrik OSM](https://download.geofabrik.de/) | Road, building number, district, city/province, postcode, source geometry | Missing building/unit/room details may be generated |
-| Singapore (SG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, locality, postcode, source geometry | Missing apartment unit may be generated |
-| Vietnam (VN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, province, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Thailand (TH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Philippines (PH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, barangay/district, city, region, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Malaysia (MY) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| India (IN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Australia (AU) | [Overture Maps](https://overturemaps.org/) | House number, street, suburb, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Türkiye (TR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Saudi Arabia (SA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Brazil (BR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| Nigeria (NG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
-| South Africa (ZA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, suburb, postcode, source geometry | None for ordinary records; missing apartment details may be generated |
+| United States (US) | [Overture Maps](https://overturemaps.org/) | House number, street, city, state, ZIP, source geometry | None; missing values remain empty |
+| Canada (CA) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postal code, source geometry | None; missing values remain empty |
+| Mexico (MX) | [Overture Maps](https://overturemaps.org/) | House number, street, municipality, state, postcode, source geometry | None; missing values remain empty |
+| United Kingdom (GB) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, town, postcode, source geometry | None; missing values remain empty |
+| Germany (DE) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
+| France (FR) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
+| Italy (IT) | [Overture Maps](https://overturemaps.org/) | House number, street, city, region, postcode, source geometry | None; missing values remain empty |
+| Spain (ES) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
+| Netherlands (NL) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
+| Russia (RU) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, federal subject, postcode, source geometry | None; missing values remain empty |
+| China (CN) | [AreaCity](https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov) + AMap/Baidu/Tencent POI | Province/municipality, city, district, township, registered community name/address, and provider coordinate | None; missing values remain empty |
+| Hong Kong (HK) | [Geofabrik OSM](https://download.geofabrik.de/) | Building/street, district, area, source geometry | None; missing values remain empty |
+| Taiwan (TW) | [Overture Maps](https://overturemaps.org/) | House number, street, city/county, district, postcode, source geometry | None; missing values remain empty |
+| Japan (JP) | [Overture Maps](https://overturemaps.org/) | Block/house number, street, municipality, prefecture, postcode, source geometry | None; missing values remain empty |
+| South Korea (KR) | [Geofabrik OSM](https://download.geofabrik.de/) | Road, building number, district, city/province, postcode, source geometry | None; missing values remain empty |
+| Singapore (SG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, locality, postcode, source geometry | None; missing values remain empty |
+| Vietnam (VN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, province, postcode, source geometry | None; missing values remain empty |
+| Thailand (TH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
+| Philippines (PH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, barangay/district, city, region, postcode, source geometry | None; missing values remain empty |
+| Malaysia (MY) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None; missing values remain empty |
+| India (IN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None; missing values remain empty |
+| Australia (AU) | [Overture Maps](https://overturemaps.org/) | House number, street, suburb, state, postcode, source geometry | None; missing values remain empty |
+| Türkiye (TR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
+| Saudi Arabia (SA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
+| Brazil (BR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None; missing values remain empty |
+| Nigeria (NG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None; missing values remain empty |
+| South Africa (ZA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, suburb, postcode, source geometry | None; missing values remain empty |
 
-`None for ordinary records` means the street-level address fields are not invented; an apartment record can still receive a synthetic indoor field when the source has no official unit.
+`None` means the generator does not synthesize address components. A missing house number, building, apartment, unit, floor, room, postcode, or community value stays empty.
 
-### Real and synthetic fields
+### Address provenance and synthetic profile fields
 
 | Field | Provenance |
 |---|---|
-| Country, region, city, district, and street | Source-backed and normalized from the address record; missing administrative labels may be filled from the local catalog. |
-| House number | Keeps the source/provider registration value when present; it is not replaced by a generated China number. |
-| Postcode | Uses a valid source postcode when available; invalid or missing values may be filled from the nearest catalog entry. |
+| Country, region, city, district, and street | Source-backed and normalized from the same address record or an exact administrative relation; conflicts fail validation. |
+| House number | Keeps only the source/provider registration value; absence remains empty. |
+| Postcode | Keeps a valid source value or an exact authoritative relation; invalid or missing values remain empty. |
 | Coordinates | Copied from the source geometry. Depending on the source, this may be an address point, building point, or the centroid of an OSM way. |
-| Building or community | Uses a source value when present. China residential mode only uses communities synchronized from AMap, Baidu, or Tencent; no lexicon fallback is used. |
-| Apartment, building, unit, and room | Keeps official/source-tagged values when present. Missing indoor details may be generated for China and apartment records in other countries. |
+| Building or community | Uses only a source value tied to the address object. China publishes communities only after at least two independent map providers agree. |
+| Apartment, building, unit, floor, and room | Keeps only official or source-tagged values; missing indoor details remain empty in every country. |
 | Name, phone, email, employment, finance, network, and sandbox card | Synthetic test data. |
 
-China therefore means **AreaCity-validated administrative context plus a map-provider community, registered address, and coordinate, with only indoor hierarchy synthesized**. The other countries keep source house numbers, while missing apartment/unit details may still be generated. `verified` means that source evidence and project quality checks passed; it does not mean that the address is current, occupied, or deliverable.
+China uses **AreaCity-validated administrative context plus a map-provider community, registered address, and coordinate that pass multi-provider consistency checks**. Other countries combine a source address object with independent residential building/use evidence. `verified` means the evidence and quality gates passed; it does not establish current occupancy or deliverability.
 
 ### Google Maps and AMap behavior
 
 - **Google coordinate preview** opens `latitude,longitude` from the source geometry. It is a location preview, not a Google delivery or occupancy certificate.
-- **Google address search** includes the real China provider address and community name, while generated building/unit/room details stay out of the query.
-- **AMap** is generated only for China. The source WGS-84 coordinate is converted to GCJ-02 before opening the AMap marker URL.
+- **Google address search** uses source-backed address components only; absent indoor fields are omitted.
+- **AMap for China** converts the source WGS-84 coordinate to GCJ-02 before placing the marker. Overseas AMap display keeps the source coordinate and requires the AMap World Map capability.
+- Google and AMap have separate China/overseas switches. The default is Google enabled and AMap disabled for both regions; enabling or disabling one provider does not affect the other.
 - A map pin may represent an address point, building centroid, or way centroid rather than an entrance or room. The default generation path does not claim that a Google Geocoding result has independently verified every record.
+
+AMap uses three separate values: server-only `AMAP_API_KEY` is the WebService credential for China POI synchronization; domain-restricted `AMAP_JS_API_KEY` is the dedicated browser loading key and is visible in browser network requests when AMap is enabled; `AMAP_JS_SECURITY_CODE` remains AES-GCM encrypted on the server and is applied only by the same-origin `/_AMapService` proxy. AMap's official documentation recommends the [proxy pattern](https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode), while overseas rendering additionally needs [World Map permission](https://lbs.amap.com/api/javascript-api-v2/guide/map/world-map). Every credential value shown in repository examples is a placeholder; no real key or token belongs in tracked files.
 
 For detailed field examples and source notes, see [address formats](docs/address-formats.md), [data sources](docs/data-sources.md), and the [API documentation](docs/API.md).
 
@@ -208,7 +211,7 @@ A new database contains schema only. Run `npm run data:address-pool:bootstrap` f
 
 ## 🔑 Configuration summary
 
-Offline runtime generation does not call map providers after synchronization. Configure multiple AMap, Baidu, and Tencent keys in `/admin/`; they are encrypted in `control.sqlite` with the server-only `CONFIG_MASTER_KEY`. Put the master key and bootstrap password only in ignored `.env`, `.deploy.env`, or `/root/address/runtime/address.env` files. Never add credentials to source, browser code, screenshots, issues, or CI logs.
+Offline runtime generation does not call map providers after synchronization. Configure multiple AMap, Baidu, and Tencent server keys in `/admin/`; they are encrypted in `control.sqlite` with the server-only `CONFIG_MASTER_KEY`. AMap browser display uses a separate domain-restricted JS API key and an encrypted server-side security code through `/_AMapService`. Put all real credentials only in ignored local/runtime configuration or encrypted administrator storage. Never add them to source, screenshots, issues, or CI logs.
 
 ## 💾 Database size
 
@@ -231,7 +234,7 @@ United States, Canada, Mexico, United Kingdom, Germany, France, Italy, Spain, Ne
 - [Overture Maps](https://overturemaps.org/) provides selected address records with source-specific metadata and terms.
 - [OpenStreetMap](https://www.openstreetmap.org/copyright) and [Geofabrik](https://download.geofabrik.de/) provide other source data under ODbL 1.0.
 - Client IP is used only for a requested location lookup and is not written to the address database.
-- Indoor details, profiles, and card fields are synthetic test data.
+- Address and indoor fields are source-backed; missing values remain empty. Profiles and card fields are synthetic test data.
 
 Project code is released under the [MIT License](LICENSE). Redistributed data remains subject to its source licenses, attribution, and share-alike terms. The repository and releases contain no production database or private credentials.
 

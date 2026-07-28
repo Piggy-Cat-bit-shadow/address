@@ -111,17 +111,19 @@ describe('postal-grade formats per docs/address-formats.md', () => {
     expect(deLine).not.toContain('Apt');
   });
 
-  it('produces per-country synthetic unit variants from the generator', () => {
+  it('does not produce synthetic unit variants from the generator', () => {
     const gbBundle = generateBundle(addressFor('GB', {
       admin1: 'Greater London', locality: 'London', street: 'Baker Street', houseNumber: '21', postcode: 'NW1 6XE'
     }), false, 'unit-i18n-seed', undefined, now);
-    expect(gbBundle.generatedUnit?.variants.en).toMatch(/^Flat \d+$/);
-    expect(gbBundle.addressFormats.en.singleLine).toMatch(/Flat \d+, 21 Baker Street/);
+    expect(gbBundle.generatedUnit).toBeUndefined();
+    expect(gbBundle.addressFormats.en.singleLine).toContain('21 Baker Street');
+    expect(gbBundle.addressFormats.en.singleLine).not.toMatch(/Flat \d+/);
 
     const krBundle = generateBundle(addressFor('KR', {
       admin1: '서울특별시', locality: '관악구', street: '신원로3길', houseNumber: '57', postcode: '08753'
     }), false, 'unit-i18n-seed', undefined, now);
-    expect(krBundle.generatedUnit?.variants.native).toMatch(/^\d+동 \d+호$/);
-    expect(krBundle.addressFormats.native.singleLine).toMatch(/신원로3길 57 \d+동 \d+호/);
+    expect(krBundle.generatedUnit).toBeUndefined();
+    expect(krBundle.addressFormats.native.singleLine).toContain('신원로3길 57');
+    expect(krBundle.addressFormats.native.singleLine).not.toMatch(/\d+동 \d+호/);
   });
 });

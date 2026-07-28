@@ -26,6 +26,22 @@ describe('China map community providers', () => {
       .rejects.toMatchObject({ outcome: 'quota' });
   });
 
+  it('redacts raw and URL-encoded provider keys from network errors', async () => {
+    const key = 'secret/key value';
+    const encoded = new URLSearchParams({ key }).toString().slice('key='.length);
+    let failure: unknown;
+    try {
+      await fetchAmapCommunities('北京市', 1, key, async (input) => {
+        throw new Error(`network request failed: ${String(input)}`);
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ outcome: 'network' });
+    const message = failure instanceof Error ? failure.message : String(failure);
+    expect(message).not.toContain(key);
+    expect(message).not.toContain(encoded);
+    expect(message).toContain('REDACTED');
+  });
+
   it('converts provider coordinates into the common WGS-84 system', () => {
     const source: [number, number] = [39.9042, 116.4074];
     const gcj = wgs84ToGcj02(...source);

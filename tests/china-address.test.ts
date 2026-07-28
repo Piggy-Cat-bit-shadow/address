@@ -63,35 +63,21 @@ describe('China address domain rules', () => {
     expect(schema.resultFields.map(({ field }) => field)).toContain('postcode');
   });
 
-  it('formats the complete hierarchy and synthetic indoor components in country order', () => {
+  it('formats the complete verified hierarchy without inventing indoor components', () => {
     const address = chinaAddress();
     const bundle = generateBundle(address, true, 'cn-hierarchy-seed', undefined, now);
-    const unit = bundle.generatedUnit!;
-    const nativeUnit = `${unit.components.building}栋${unit.components.unit}单元${unit.components.room}室`;
-    const englishUnit = `Room ${unit.components.room}, Unit ${unit.components.unit}, Building ${unit.components.building}`;
-
-    expect(unit).toMatchObject({ provenance: 'synthetic', unitProvenance: 'synthetic' });
+    expect(bundle.generatedUnit).toBeUndefined();
     const presented = bundle.address.components;
     expect(presented).toEqual(address.components);
-    expect(Number(unit.components.building)).toBeGreaterThanOrEqual(1);
-    expect(Number(unit.components.building)).toBeLessThanOrEqual(3);
-    expect(Number(unit.components.unit)).toBeGreaterThanOrEqual(1);
-    expect(Number(unit.components.unit)).toBeLessThanOrEqual(3);
-    const floor = Number(unit.components.room.slice(0, -2));
-    const room = Number(unit.components.room.slice(-2));
-    expect(floor).toBeGreaterThanOrEqual(2);
-    expect(floor).toBeLessThanOrEqual(6);
-    expect(room).toBeGreaterThanOrEqual(1);
-    expect(room).toBeLessThanOrEqual(4);
     expect(bundle.address.coordinates).toEqual(address.coordinates);
     expect(bundle.address.unitProvenance).toBe('none');
-    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${nativeUnit}`);
-    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${nativeUnit}`);
+    expect(bundle.addressFormats.native.singleLine).toBe('河北省唐山市丰润区丰润镇文化路18号光明小区');
+    expect(bundle.addressFormats['zh-CN'].singleLine).toBe('河北省唐山市丰润区丰润镇文化路18号光明小区');
 
     const english = bundle.addressFormats.en.singleLine;
     const englishCommunity = 'Guangming Residential Community';
     const ordered = [
-      englishUnit, englishCommunity, '18 Wenhua Road', 'Fengrun Town',
+      englishCommunity, '18 Wenhua Road', 'Fengrun Town',
       'Fengrun District', 'Tangshan City', 'Hebei Province', 'CHINA'
     ];
     for (let index = 1; index < ordered.length; index += 1) {
@@ -106,7 +92,7 @@ describe('China address domain rules', () => {
     expect(searchQuery).toContain('文化路');
     expect(searchQuery).toContain('光明小区');
     expect(bundle.googleMaps.amapUrl).toContain('uri.amap.com/marker');
-    expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).generatedUnit).toEqual(unit);
+    expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).generatedUnit).toBeUndefined();
     expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).address.components).toEqual(presented);
   });
 

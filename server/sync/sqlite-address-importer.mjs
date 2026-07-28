@@ -263,7 +263,7 @@ const addressStatements = (database, records, context) => {
   const evidenceBindings = [];
   const evidenceRows = records.flatMap((record) => {
     const evidence = [{ type: 'address_existence', sourceRecordId: record.sourceRecordId }];
-    if (record.propertyType === 'residential' || record.propertyType === 'apartment') {
+    if ((record.propertyType === 'residential' || record.propertyType === 'apartment') && record.residentialSourceRecordId) {
       evidence.push({ type: 'residential_use', sourceRecordId: record.residentialSourceRecordId || record.sourceRecordId });
     }
     return evidence.map(({ type, sourceRecordId }) => {

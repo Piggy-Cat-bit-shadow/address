@@ -60,64 +60,50 @@ describe('registered address providers', () => {
     expect(bundle.address.addressVariants.native).toBe('北京市丰台区南四环西路129号怡海花园');
     expect(bundle.address.components.unit).toBeUndefined();
     expect(bundle.address.unitProvenance).not.toBe('synthetic');
-    expect(bundle.generatedUnit?.provenance).toBe('synthetic');
-    expect(bundle.generatedUnit?.unitProvenance).toBe('synthetic');
-    expect(bundle.generatedUnit?.variants.native).toMatch(/^\d+栋\d+单元\d+室$/);
-    expect(bundle.addressFormats.native.singleLine).toContain(bundle.generatedUnit!.variants.native);
-    expect(bundle.addressFormats.en.singleLine).toContain(bundle.generatedUnit!.variants.en);
+    expect(bundle.generatedUnit).toBeUndefined();
+    expect(bundle.addressFormats.native.singleLine).not.toMatch(/栋|单元|室$/u);
     expect(bundle.addressFormats.en.singleLine).not.toMatch(/[\u3400-\u9fff]/u);
   });
 
-  it('uses a deterministic synthetic street number only for ordinary China results', async () => {
+  it('rejects a China community without a source-provided premise number', async () => {
     const fetcher = async () => new Response(JSON.stringify({ status: '1', pois: [{
       id: 'B0FALLBACK', name: '光明小区', address: '文化路', location: '118.162000,39.832000',
       pname: '河北省', cityname: '唐山市', adname: '丰润区', type: '商务住宅;住宅区;住宅小区', typecode: '120302'
     }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     const ordinary = await fetchExternalCandidates(country('CN'), false, { city: '唐山市' }, { amap: 'test' }, fetcher as typeof fetch);
     const residential = await fetchExternalCandidates(country('CN'), true, { city: '唐山市' }, { amap: 'test' }, fetcher as typeof fetch);
-    expect(ordinary.candidates[0]).toMatchObject({
-      addressStatus: 'synthetic',
-      components: { street: '文化路', buildingName: '光明小区', postcode: '' }
-    });
-    expect(ordinary.candidates[0].components.houseNumber).toMatch(/^\d{1,3}号$/u);
-    expect(ordinary.candidates[0].evidence).toContainEqual(expect.objectContaining({
-      type: 'address_existence', value: '河北省唐山市丰润区文化路'
-    }));
+    expect(ordinary.candidates).toEqual([]);
     expect(residential.candidates).toEqual([]);
   });
 
-  it('uses the controlled city road fallback when Amap omits the road', async () => {
+  it('rejects an Amap community when the provider omits the road address', async () => {
     const fetcher = async () => new Response(JSON.stringify({ status: '1', pois: [{
       id: 'B0NOROAD', name: '保利花园', address: [], location: '108.950000,34.900000',
       pname: '陕西省', cityname: '铜川市', adname: '印台区', type: '商务住宅;住宅区;住宅小区', typecode: '120302'
     }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     const first = await fetchExternalCandidates(country('CN'), false, { city: '铜川市' }, { amap: 'test' }, fetcher as typeof fetch);
     const second = await fetchExternalCandidates(country('CN'), false, { city: '铜川市' }, { amap: 'test' }, fetcher as typeof fetch);
-    expect(first.candidates[0].addressStatus).toBe('synthetic');
-    expect(['中山路', '红旗街', '延安路', '长虹路']).toContain(first.candidates[0].components.street);
-    expect(second.candidates[0].components).toEqual(first.candidates[0].components);
+    expect(first.candidates).toEqual([]);
+    expect(second.candidates).toEqual([]);
   });
 
   it.each([
-    ['文化路光明小区', '文化路'],
-    ['光明小区3号楼', undefined]
-  ])('does not confuse an Amap community or building number with a street: %s', async (address, expectedStreet) => {
+    '文化路光明小区',
+    '光明小区3号楼'
+  ])('rejects an Amap community result without an explicit premise number: %s', async (address) => {
     const fetcher = async () => new Response(JSON.stringify({ status: '1', pois: [{
       id: `B0EDGE-${address}`, name: '光明小区', address, location: '118.162000,39.832000',
       pname: '河北省', cityname: '唐山市', adname: '丰润区', type: '商务住宅;住宅区;住宅小区', typecode: '120302'
     }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     const result = await fetchExternalCandidates(country('CN'), false, { city: '唐山市' }, { amap: 'test' }, fetcher as typeof fetch);
-    if (expectedStreet) expect(result.candidates[0].components.street).toBe(expectedStreet);
-    else expect(['新华道', '建设北路', '文化路', '北新道']).toContain(result.candidates[0].components.street);
-    expect(result.candidates[0].components.street).not.toContain('小区');
-    expect(result.candidates[0].addressStatus).toBe('synthetic');
+    expect(result.candidates).toEqual([]);
   });
 
   it('keeps a complete China English address when translation fails after an Amap fallback', async () => {
     const fetcher = async (input: RequestInfo | URL) => {
       if (String(input).startsWith('https://restapi.amap.com/')) {
         return new Response(JSON.stringify({ status: '1', pois: [{
-          id: 'B0E2E', name: '丰润春城', address: '文化路', location: '118.162000,39.832000',
+          id: 'B0E2E', name: '丰润春城', address: '文化路987号', location: '118.162000,39.832000',
           pname: '河北省', cityname: '唐山市', adname: '丰润区', type: '商务住宅;住宅区;住宅小区', typecode: '120302'
         }] }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
@@ -127,8 +113,8 @@ describe('registered address providers', () => {
     const localized = await localizeAddress(result.candidates[0], country('CN'), {}, fetcher as typeof fetch);
     const bundle = generateBundle(localized, false, 'cn-provider-e2e', undefined);
 
-    expect(bundle.addressFormats.native.singleLine).toMatch(/^河北省唐山市丰润区文化路987号丰润春城[1-3]栋[1-3]单元[2-6]0[1-4]室$/u);
-    expect(bundle.addressFormats.en.singleLine).toMatch(/^Room [2-6]0[1-4], Unit [1-3], Building [1-3], Fengrun Chuncheng, 987 Wenhua Road, Fengrun District, Tangshan City, Hebei Province, CHINA$/u);
+    expect(bundle.addressFormats.native.singleLine).toBe('河北省唐山市丰润区文化路987号丰润春城');
+    expect(bundle.addressFormats.en.singleLine).toBe('Fengrun Chuncheng, 987 Wenhua Road, Fengrun District, Tangshan City, Hebei Province, CHINA');
     expect(bundle.addressFormats.en.singleLine).not.toMatch(/[\u3400-\u9fff]|064000/u);
   });
 
@@ -152,6 +138,19 @@ describe('registered address providers', () => {
     const result = await fetchExternalCandidates(country('SG'), false, { postcode: '307683' }, { oneMap: 'test' }, fetcher as typeof fetch);
     expect(result.sources).toEqual(['onemap']);
     expect(result.candidates[0].components).toMatchObject({ houseNumber: '238', street: 'THOMSON ROAD', postcode: '307683' });
+    expect(result.candidates[0].id).toBe('onemap-sg-307683');
+  });
+
+  it('keeps OneMap records distinct when the source URL has no path identifier', async () => {
+    const fetcher = async () => new Response(JSON.stringify({ results: [{
+      SEARCHVAL: 'BLOCK ONE', BLK_NO: '1', ROAD_NAME: 'TEST ROAD', ADDRESS: '1 TEST ROAD',
+      POSTAL: '100001', LATITUDE: '1.30', LONGITUDE: '103.80'
+    }, {
+      SEARCHVAL: 'BLOCK TWO', BLK_NO: '2', ROAD_NAME: 'TEST ROAD', ADDRESS: '2 TEST ROAD',
+      POSTAL: '100002', LATITUDE: '1.31', LONGITUDE: '103.81'
+    }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const result = await fetchExternalCandidates(country('SG'), false, {}, { oneMap: 'test' }, fetcher as typeof fetch);
+    expect(result.candidates.map(({ id }) => id)).toEqual(['onemap-sg-100001', 'onemap-sg-100002']);
   });
 
   it('uses Geoapify geocoding plus residential building lookup', async () => {
@@ -162,7 +161,8 @@ describe('registered address providers', () => {
         ? { features: [{ properties: { lat: 53.4808, lon: -2.2426 } }] }
         : { features: [{ properties: {
           country_code: 'gb', housenumber: '19', street: 'Dickinson Street', city: 'Manchester', state: 'England',
-          postcode: 'M1 4LX', formatted: '19 Dickinson Street, Manchester, M1 4LX, United Kingdom', lat: 53.478, lon: -2.24
+          postcode: 'M1 4LX', formatted: '19 Dickinson Street, Manchester, M1 4LX, United Kingdom', lat: 53.478, lon: -2.24,
+          datasource: { raw: { building: 'residential' } }
         } }] };
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
     };

@@ -9,7 +9,7 @@ const healthDatabase = ({ low = false }: { low?: boolean } = {}) => {
       const statement = {
         bind() { return statement; },
         async all() {
-          if (sql.includes('FROM address_pool address')) {
+          if (sql.includes('FROM address_pool_runtime address')) {
             return { results: [
               { country_code: 'US', total: 20, residential: 12 },
               { country_code: 'JP', total: 16, residential: 9 }
@@ -54,9 +54,12 @@ describe('data health hot-pool readiness', () => {
       },
       configurationErrors: []
     });
-    const countQuery = statements.find((sql) => sql.includes('FROM address_pool address'));
-    expect(countQuery).toContain('COUNT(*) AS total');
-    expect(countQuery).toContain("evidence_type='residential_use'");
+    const countQuery = statements.find((sql) => sql.includes('FROM address_pool_runtime address'));
+    expect(countQuery).toContain('COUNT(DISTINCT address.id) AS total');
+    expect(countQuery).toContain("evidence_type='address_existence'");
+    expect(countQuery).toContain('residential_evidence=1');
+    expect(countQuery).toContain('datetime(address.expires_at) IS NOT NULL');
+    expect(countQuery).toContain('datetime(address.expires_at)>datetime(?)');
     expect(statements.find((sql) => sql.includes('ready_slot_count'))).toContain(
       "THEN coverage.residential_count ELSE coverage.active_count END AS active_count"
     );

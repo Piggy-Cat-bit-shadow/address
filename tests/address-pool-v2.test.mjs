@@ -105,6 +105,36 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?)');
   });
 
+  it('attributes Overture residential classification to the buildings theme', async () => {
+    const overture = {
+      ...row,
+      source_id: 'overture-addresses',
+      source_name: 'Overture Maps addresses',
+      source_url: 'https://overturemaps.org/',
+      record_url: 'https://stac.overturemaps.org/catalog.json'
+    };
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            return { results: sql.startsWith('SELECT id FROM address_pool') ? [{ id: overture.id }] : [overture] };
+          }
+        };
+        return statement;
+      }
+    };
+
+    const address = await pickAddressPoolV2Address(database, 'JP', true, {}, undefined, 'overture-source');
+    expect(address?.evidence.find(({ type }) => type === 'address_existence')).toMatchObject({
+      sourceId: 'overture-addresses'
+    });
+    expect(address?.evidence.find(({ type }) => type === 'residential_use')).toMatchObject({
+      sourceId: 'overture-buildings', sourceFamily: 'overture-buildings',
+      sourceUrl: 'https://docs.overturemaps.org/guides/buildings'
+    });
+  });
+
   it('only treats a missing v2 runtime view as a compatibility miss', async () => {
     const missing = { prepare() { throw new Error('no such table: address_pool_runtime'); } };
     const broken = { prepare() { throw new Error('SQLITE_BUSY: database is locked'); } };

@@ -7,8 +7,11 @@ import app from './index';
 import { openDatabase } from '../database/sqlite.mjs';
 import { initializeSqliteDatabase } from '../database/sqlite.mjs';
 import { masterKeyFrom } from '../control/security';
-import { ControlStore } from '../control/store';
-import { apiAuthorization, createAccessApi, createAdminApi, authorizeWebRequest } from '../control/admin-api';
+import { ControlStore, credentialsFromEnvironment } from '../control/store';
+import {
+  apiAuthorization, authorizeWebRequest, createAccessApi, createAdminApi,
+  createAmapProxyRateLimiter, proxyAmapServiceRequest, requestClientAddress
+} from '../control/admin-api';
 import { ChinaDataService } from '../china/service';
 
 const integer = (value: string | undefined, fallback: number): number => {
@@ -24,16 +27,19 @@ const controlDatabase = openDatabase(controlDatabasePath, { migrate: false });
 await initializeSqliteDatabase(controlDatabase, new URL('../control/schema.sql', import.meta.url));
 await chmod(controlDatabasePath, 0o600);
 const control = new ControlStore(controlDatabase, masterKeyFrom(process.env.CONFIG_MASTER_KEY));
-await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD);
+await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD, process.env);
+await Promise.all(credentialsFromEnvironment(process.env).map((credential) => control.ensureCredential(credential)));
 const china = new ChinaDataService(database, control, dirname(databasePath));
 await china.initializeTargets();
 const port = integer(process.env.API_PORT, 8787);
 const hostname = process.env.API_HOST || '0.0.0.0';
+const trustProxy = process.env.TRUST_PROXY === 'true';
 const staticRoot = resolve(process.env.STATIC_ROOT || 'dist');
 const syncControlUrl = process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791';
 const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
-const adminApi = createAdminApi({ control, china, addressDb: database, addressDatabasePath: databasePath, controlDatabasePath });
-const accessApi = createAccessApi(control);
+const adminApi = createAdminApi({ control, china, addressDb: database, addressDatabasePath: databasePath, controlDatabasePath, trustProxy });
+const accessApi = createAccessApi(control, { trustProxy });
+const amapProxyRateLimit = createAmapProxyRateLimiter();
 const securityHeaders = (response: Response): Response => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
@@ -68,7 +74,7 @@ const environment = {
 
 await Promise.all([
   Promise.resolve(app.fetch(new Request(
-    'http://127.0.0.1/api/v1/generate?country=US&residential=false&strategy=instant&seed=startup-warmup&requestId=startup-warmup'
+    'http://127.0.0.1/api/v1/generate?country=US&residential=true&strategy=instant&seed=startup-warmup&requestId=startup-warmup'
   ), environment)),
   Promise.resolve(app.fetch(new Request('http://127.0.0.1/api/v1/countries'), environment))
 ]).catch(() => undefined);
@@ -76,8 +82,23 @@ await Promise.all([
 const server = serve({
   fetch: async (request, node) => {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/admin/api/')) return securityHeaders(await adminApi.fetch(request));
-    if (url.pathname.startsWith('/web-api/v1/auth/')) return securityHeaders(await accessApi.fetch(request));
+    const remoteAddress = node.incoming.socket?.remoteAddress || '';
+    const requestBindings = { remoteAddress };
+    if (url.pathname.startsWith('/admin/api/')) return securityHeaders(await adminApi.fetch(request, requestBindings));
+    if (url.pathname === '/_AMapService' || url.pathname.startsWith('/_AMapService/')) {
+      if (!amapProxyRateLimit(requestClientAddress(request, remoteAddress, trustProxy))) {
+        return securityHeaders(Response.json({ error: 'RATE_LIMITED' }, {
+          status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': '60' }
+        }));
+      }
+      if (!await authorizeWebRequest(control, request)) {
+        return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401, headers: { 'Cache-Control': 'no-store' } }));
+      }
+      return securityHeaders(await proxyAmapServiceRequest(control, request, fetch, process.env.ALLOWED_ORIGIN));
+    }
+    if (url.pathname.startsWith('/web-api/v1/auth/') || url.pathname === '/web-api/v1/config/maps') {
+      return securityHeaders(await accessApi.fetch(request, requestBindings));
+    }
     if (url.pathname === '/sync-control' || url.pathname.startsWith('/sync-control/')) {
       if (!syncControlPublic) return securityHeaders(new Response('Not Found', { status: 404 }));
       const target = new URL(`${url.pathname.slice('/sync-control'.length) || '/'}${url.search}`, syncControlUrl);

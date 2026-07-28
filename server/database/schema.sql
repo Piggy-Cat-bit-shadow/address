@@ -286,6 +286,32 @@ CREATE TABLE IF NOT EXISTS cn_sync_checkpoints (
   PRIMARY KEY (provider, city)
 );
 
+CREATE TABLE IF NOT EXISTS cn_sync_area_targets (
+  adcode TEXT PRIMARY KEY,
+  province TEXT NOT NULL,
+  city TEXT NOT NULL,
+  district TEXT NOT NULL,
+  query TEXT NOT NULL,
+  target_count INTEGER NOT NULL DEFAULT 10 CHECK (target_count >= 1),
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS admin_coverage_stats (
+  node_key TEXT PRIMARY KEY,
+  parent_key TEXT NOT NULL DEFAULT '',
+  country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  level INTEGER NOT NULL CHECK (level BETWEEN 0 AND 4),
+  region_code TEXT NOT NULL DEFAULT '',
+  region_name TEXT NOT NULL,
+  ordinary_count INTEGER NOT NULL DEFAULT 0 CHECK (ordinary_count >= 0),
+  residential_count INTEGER NOT NULL DEFAULT 0 CHECK (residential_count >= 0),
+  total_count INTEGER NOT NULL DEFAULT 0 CHECK (total_count >= 0),
+  child_count INTEGER NOT NULL DEFAULT 0 CHECK (child_count >= 0),
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id TEXT PRIMARY KEY,
   country_code TEXT NOT NULL REFERENCES sync_country_state(country_code) ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -335,6 +361,8 @@ CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,l
 CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(latitude,longitude);
 CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
+CREATE INDEX IF NOT EXISTS idx_cn_sync_area_priority ON cn_sync_area_targets(enabled,priority,adcode);
+CREATE INDEX IF NOT EXISTS idx_admin_coverage_parent ON admin_coverage_stats(parent_key,country_code,region_name);
 
 CREATE VIEW IF NOT EXISTS address_pool_runtime AS
 SELECT
@@ -377,3 +405,4 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
   AND address_sources.redistribution_allowed = 1;
 
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

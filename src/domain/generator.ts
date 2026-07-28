@@ -157,53 +157,6 @@ const emailFor = (name: string, countryCode: CountryCode, suffix: string): strin
   return `${local || countryCode.toLowerCase()}${suffix}@outlook.com`;
 };
 
-const generatedUnitFor = (
-  address: VerifiedAddress,
-  random: () => number
-): GeneratedBundle['generatedUnit'] => {
-  if (address.components.unit || ['official', 'source_tagged'].includes(address.unitProvenance || '')) return undefined;
-  const shouldGenerate = address.countryCode === 'CN' || address.propertyType === 'apartment';
-  if (!shouldGenerate) return undefined;
-  const china = address.countryCode === 'CN';
-  const building = 1 + Math.floor(random() * (china ? 3 : 35));
-  const entrance = 1 + Math.floor(random() * (china ? 3 : 4));
-  const floor = 2 + Math.floor(random() * (china ? 5 : 28));
-  const room = 1 + Math.floor(random() * (china ? 4 : 8));
-  const roomNumber = `${floor}${String(room).padStart(2, '0')}`;
-  const nativeUnits: Partial<Record<CountryCode, string>> = {
-    CN: `${building}栋${entrance}单元${roomNumber}室`,
-    HK: `${floor}樓${String.fromCharCode(65 + room - 1)}室`,
-    SG: `#${String(floor).padStart(2, '0')}-${String(room).padStart(2, '0')}`,
-    JP: `${roomNumber}号室`,
-    KR: `${building}동 ${roomNumber}호`,
-    TW: `${floor}樓之${room}`,
-    GB: `Flat ${room}`,
-    US: `Apt ${roomNumber}`,
-    CA: `Unit ${roomNumber}`
-  };
-  const englishUnits: Partial<Record<CountryCode, string>> = {
-    HK: `Flat ${String.fromCharCode(65 + room - 1)}, ${floor}/F`,
-    SG: `#${String(floor).padStart(2, '0')}-${String(room).padStart(2, '0')}`,
-    JP: `Rm ${roomNumber}`,
-    KR: `Bldg ${building}, Unit ${roomNumber}`,
-    TW: `${floor}F.-${room}`,
-    GB: `Flat ${room}`,
-    US: `Apt ${roomNumber}`,
-    CA: `Unit ${roomNumber}`
-  };
-  const variants = {
-    native: nativeUnits[address.countryCode] || `Apt ${roomNumber}`,
-    en: englishUnits[address.countryCode] || `Room ${roomNumber}, Unit ${entrance}, Building ${building}`,
-    'zh-CN': `${building}栋${entrance}单元${roomNumber}室`
-  };
-  return {
-    components: { building: String(building), unit: String(entrance), room: roomNumber },
-    variants,
-    provenance: 'synthetic',
-    unitProvenance: 'synthetic'
-  };
-};
-
 export const generateBundle = (
   address: VerifiedAddress,
   residential: boolean,
@@ -224,7 +177,7 @@ export const generateBundle = (
   const fullName = fullNameFor(address.countryCode, gender, faker);
   const birthDate = generateBirthDate(random, now);
   const suffix = String(hashSeed(normalizedSeed) % 10000).padStart(4, '0');
-  const generatedUnit = generatedUnitFor(presentedAddress, random);
+  const generatedUnit: GeneratedBundle['generatedUnit'] = undefined;
   const extensions = generateExtensions(
     address.countryCode, gender, fullName, birthDate, suffix, faker, random, now
   );

@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   name TEXT NOT NULL,
   token_prefix TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
+  token_ciphertext TEXT,
+  token_iv TEXT,
+  token_tag TEXT,
   scopes_json TEXT NOT NULL CHECK (json_valid(scopes_json)),
   rate_limit_per_minute INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_per_minute BETWEEN 1 AND 100000),
   expires_at TEXT,
@@ -45,7 +48,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 
 CREATE TABLE IF NOT EXISTS provider_credentials (
   id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent')),
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap')),
   label TEXT NOT NULL,
   secret_ciphertext TEXT NOT NULL,
   secret_iv TEXT NOT NULL,
@@ -71,6 +74,21 @@ CREATE TABLE IF NOT EXISTS provider_usage_daily (
   accepted_count INTEGER NOT NULL DEFAULT 0,
   rejected_count INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (credential_id, usage_date)
+);
+
+CREATE TABLE IF NOT EXISTS browser_map_credentials (
+  provider TEXT PRIMARY KEY CHECK (provider = 'amap'),
+  label TEXT NOT NULL,
+  api_key_ciphertext TEXT NOT NULL,
+  api_key_iv TEXT NOT NULL,
+  api_key_tag TEXT NOT NULL,
+  security_code_ciphertext TEXT NOT NULL,
+  security_code_iv TEXT NOT NULL,
+  security_code_tag TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  last_used_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_runs (
@@ -108,3 +126,5 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_created ON sync_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 
 INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (1,datetime('now'));
+INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (3,datetime('now'));
+INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (4,datetime('now'));

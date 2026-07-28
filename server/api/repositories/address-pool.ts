@@ -94,17 +94,6 @@ const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefin
       observedAt: sourceUpdatedAt
     }
   ];
-  if (propertyType === 'residential' || propertyType === 'apartment') {
-    evidence.push({
-      sourceId: row.source_id,
-      sourceName: row.source_name,
-      sourceUrl: row.source_url,
-      sourceFamily: row.source_id,
-      type: 'residential_use',
-      value: `property_type=${propertyType}`,
-      observedAt: sourceUpdatedAt
-    });
-  }
   return {
     id: `pool-${row.id}`,
     countryCode: row.country_code,
@@ -139,7 +128,10 @@ export const pickAddressPoolAddress = async (
   seed: string,
   now = new Date()
 ): Promise<VerifiedAddress | undefined> => {
-  if (!db) return undefined;
+  // The legacy pool has no independent residential evidence table. It remains
+  // available for ordinary address compatibility, but it never satisfies a
+  // strict residential request.
+  if (!db || residential) return undefined;
   const clauses = ['country_code = ?'];
   const bindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`);

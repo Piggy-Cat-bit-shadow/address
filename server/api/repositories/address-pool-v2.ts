@@ -54,6 +54,20 @@ interface AddressPoolV2Row {
 
 const propertyTypes = new Set<PropertyType>(['residential', 'apartment', 'commercial', 'mixed', 'unknown']);
 const evidenceTypes = new Set<AddressEvidence['type']>(['address_existence', 'residential_use', 'coordinate', 'building_status']);
+const residentialEvidenceSource = (row: AddressPoolV2Row): Pick<AddressEvidence, 'sourceId' | 'sourceName' | 'sourceUrl' | 'sourceFamily'> =>
+  row.source_id === 'overture-addresses'
+    ? {
+        sourceId: 'overture-buildings',
+        sourceName: 'Overture Maps buildings',
+        sourceUrl: 'https://docs.overturemaps.org/guides/buildings',
+        sourceFamily: 'overture-buildings'
+      }
+    : {
+        sourceId: row.source_id || '',
+        sourceName: row.source_name || '',
+        sourceUrl: row.record_url || row.source_url || '',
+        sourceFamily: row.source_id || ''
+      };
 
 const normalize = (value: string | undefined): string => (value || '')
   .normalize('NFKC')
@@ -223,11 +237,9 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     });
   }
   if (row.residential_evidence && !evidence.some(({ type: evidenceType }) => evidenceType === 'residential_use')) {
+    const residentialSource = residentialEvidenceSource(row);
     evidence.push({
-      sourceId: row.source_id,
-      sourceName: row.source_name,
-      sourceUrl: row.record_url || row.source_url,
-      sourceFamily: row.source_id,
+      ...residentialSource,
       type: 'residential_use',
       value: propertyType,
       observedAt: sourceUpdatedAt
@@ -268,7 +280,6 @@ interface RegionNameRow { code: string; name: string; native_name: string; zh_na
 const regionNameCaches = new WeakMap<object, Map<string, RegionNameRow | null>>();
 const cityZhCaches = new WeakMap<object, Map<string, string | null>>();
 const regionPresenceCaches = new WeakMap<object, Map<string, boolean>>();
-const postcodeCaches = new WeakMap<object, Map<string, string | null>>();
 const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: SqliteDatabase): Map<string, T> => {
   let cache = store.get(db as object);
   if (!cache) {
@@ -342,78 +353,6 @@ const lookupCityZhName = async (db: SqliteDatabase, country: CountryCode, locali
   return zhName;
 };
 
-const lookupNearestPostcode = async (
-  db: SqliteDatabase,
-  country: CountryCode,
-  coordinates: { latitude: number; longitude: number },
-  cityNames: string[] = [],
-  regionNames: string[] = []
-): Promise<string | null> => {
-  const cache = cacheFor(postcodeCaches, db);
-  const key = `${country}:${Math.round(coordinates.latitude * 20)}:${Math.round(coordinates.longitude * 20)}`;
-  if (cache.has(key)) return cache.get(key) || null;
-  let code: string | null = null;
-  try {
-    const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
-    const row = await db.prepare(`SELECT code, latitude, longitude FROM catalog_postcodes
-      WHERE country_code = ? AND latitude IS NOT NULL AND longitude IS NOT NULL AND code <> ''
-        AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-      ORDER BY ((latitude - ?) * (latitude - ?)) + ((longitude - ?) * (longitude - ?) * ? * ?), code
-      LIMIT 1`)
-      .bind(
-        country,
-        coordinates.latitude - 0.5, coordinates.latitude + 0.5,
-        coordinates.longitude - 0.5 / longitudeScale, coordinates.longitude + 0.5 / longitudeScale,
-        coordinates.latitude, coordinates.latitude,
-        coordinates.longitude, coordinates.longitude,
-        longitudeScale, longitudeScale
-      ).first<{ code: string; latitude: number; longitude: number }>();
-    code = typeof row?.code === 'string' && row.code.trim() !== ''
-      && geographicDistanceKm(coordinates, { latitude: row.latitude, longitude: row.longitude }) <= 50
-      ? row.code.trim()
-      : null;
-    if (!code) {
-      for (const city of cityNames) {
-        const needle = (city || '').trim();
-        if (!needle) continue;
-        const named = await db.prepare(`SELECT code FROM catalog_postcodes
-          WHERE country_code = ? AND code <> ''
-            AND (LOWER(locality_name) = LOWER(?) OR LOWER(locality_name) LIKE LOWER(?))
-          ORDER BY CASE WHEN LOWER(locality_name) = LOWER(?) THEN 0 ELSE 1 END,
-            CASE WHEN city_id IS NULL THEN 1 ELSE 0 END, code LIMIT 1`)
-          .bind(country, needle, `%${needle}%`, needle).first<{ code: string }>();
-        if (typeof named?.code === 'string' && named.code.trim() !== '') {
-          code = named.code.trim();
-          break;
-        }
-      }
-    }
-    if (!code) {
-      for (const name of regionNames) {
-        const needle = (name || '').trim();
-        if (!needle) continue;
-        const bridged = await db.prepare(`SELECT postcode.code AS code FROM catalog_regions region
-          JOIN catalog_postcodes postcode ON postcode.country_code = region.country_code
-            AND postcode.region_id = region.id AND postcode.code <> ''
-          WHERE region.country_code = ?
-            AND (LOWER(region.name) = LOWER(?) OR LOWER(region.native_name) = LOWER(?) OR LOWER(region.code) = LOWER(?)
-              OR LOWER(?) LIKE '%' || LOWER(region.name) || '%' OR LOWER(?) LIKE '%' || LOWER(region.native_name) || '%')
-          ORDER BY CASE WHEN LOWER(region.name) = LOWER(?) THEN 0 ELSE 1 END,
-            CASE WHEN postcode.city_id IS NULL THEN 1 ELSE 0 END, postcode.code LIMIT 1`)
-          .bind(country, needle, needle, needle, needle, needle, needle).first<{ code: string }>();
-        if (typeof bridged?.code === 'string' && bridged.code.trim() !== '') {
-          code = bridged.code.trim();
-          break;
-        }
-      }
-    }
-  } catch {
-    code = null;
-  }
-  cache.set(key, code);
-  return code;
-};
-
 export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedAddress): Promise<VerifiedAddress> => {
   const variants = address.componentVariants;
   const updated: Record<'native' | 'en' | 'zh-CN', AddressComponents> = {
@@ -480,9 +419,8 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
     }
   }
 
-  // A source postcode that does not match the country's format (phone numbers,
-  // city names, partial digits from OSM) is scrubbed so the catalog backfill
-  // below replaces it with a plausible one.
+  // A source postcode that does not match the country's format is removed. A
+  // postcode from a nearby record is never substituted for an address.
   if (address.countryCode !== 'HK') {
     const sourcePostcode = (native.postcode || '').trim();
     if (sourcePostcode && !isValidPostcode(address.countryCode, sourcePostcode)) {
@@ -491,16 +429,8 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
     }
   }
 
-  if (address.countryCode !== 'HK' && !(updated.native.postcode || '').trim()) {
-    const postcode = await lookupNearestPostcode(db, address.countryCode, address.coordinates, [
-      native.locality || '', updated.en.locality || '', native.postalLocality || '',
-      native.district || '', native.admin1 || '', updated.en.admin1 || ''
-    ], [native.admin1 || '', updated.en.admin1 || '', native.admin1Code || '']);
-    if (postcode) {
-      for (const language of languages) updated[language].postcode = postcode;
-      changed = true;
-    }
-  }
+  // Missing postcode stays missing until the same source or an exact joined
+  // postal record supplies it.
 
   if (address.countryCode === 'HK' && !(native.locality || '').trim()) {
     const hongKong = { native: '香港', en: 'Hong Kong', 'zh-CN': '香港' } as const;

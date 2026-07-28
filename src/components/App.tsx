@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import AmapPreview from './AmapPreview';
 import { countries, countryByCode, isCountryCode } from '../domain/countries';
-import { countryCodeFrom, resolveInitialSelection, type ClientContext, type GenerationMode } from '../domain/client-context';
+import { countryCodeFrom, type ClientContext, type GenerationMode } from '../domain/client-context';
 import { messages } from '../domain/i18n';
 import { isChineseNativeCountry, nativeProfileLabel } from '../domain/profile-native-labels';
 import type { AddressComponents, AddressFilterField, AddressLanguage, AddressResultField, CountryCode, CountryGroup, GeneratedBundle, Locale, LocationOption, LocationShortcut } from '../domain/types';
@@ -38,6 +39,14 @@ interface GenerateResponseData {
   ipMatchLevel?: IpRegionResult['matchLevel'];
   ipRegion?: Omit<IpRegionResult, 'matchLevel'>;
   result: GeneratedBundle;
+}
+interface MapDisplayConfig {
+  countryCode: CountryCode;
+  googleEnabled: boolean;
+  amapEnabled: boolean;
+  amapConfigured: boolean;
+  amapApiKey?: string;
+  serviceHost?: string;
 }
 interface GenerationRequestSpec {
   country: CountryCode;
@@ -129,6 +138,11 @@ const locationSearchForms = (value: string): string[] => {
   return simplified && simplified !== normalized ? [normalized, simplified] : [normalized];
 };
 export const LOCATION_OPTION_RENDER_LIMIT = 200;
+export const selectAvailableCountry = (requested: CountryCode | undefined, available: ReadonlySet<CountryCode>): CountryCode | undefined => {
+  if (requested && available.has(requested)) return requested;
+  if (available.has('US')) return 'US';
+  return countries.find(({ code }) => available.has(code))?.code;
+};
 export const filterLocationOptions = (options: LocationOption[], query: string): LocationOption[] => {
   const searches = locationSearchForms(query);
   if (!searches.length) return options;
@@ -239,7 +253,7 @@ const streetValue = (countryCode: CountryCode, components: AddressComponents): s
 export default function App({ locale, apiBaseUrl }: AppProps) {
   const t = messages[locale];
   const endpoint = apiBaseUrl.replace(/\/$/, '');
-  const [mode, setMode] = useState<Mode>('address');
+  const [mode, setMode] = useState<Mode>('residential');
   const [countryCode, setCountryCode] = useState<CountryCode>('US');
   const [region, setRegion] = useState('');
   const [regionId, setRegionId] = useState('');
@@ -268,9 +282,11 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [copied, setCopied] = useState('');
   const [fallbackNotice, setFallbackNotice] = useState('');
   const [copyToast, setCopyToast] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
-  const [residentialCountries, setResidentialCountries] = useState<Set<CountryCode>>(new Set(countries.filter((country) => country.residentialCapability).map((country) => country.code)));
+  const [residentialCountries, setResidentialCountries] = useState<Set<CountryCode>>(new Set());
+  const [countriesReady, setCountriesReady] = useState(false);
+  const [mapDisplay, setMapDisplay] = useState<MapDisplayConfig | null>(null);
   const activeRequest = useRef<{ requestId: string; country: CountryCode; mode: Mode } | null>(null);
-  const selectionRef = useRef<{ country: CountryCode; mode: Mode }>({ country: 'US', mode: 'address' });
+  const selectionRef = useRef<{ country: CountryCode; mode: Mode }>({ country: 'US', mode: 'residential' });
   const generationController = useRef<AbortController | null>(null);
   const locationControllers = useRef<Partial<Record<'region' | 'city' | 'postcode', AbortController>>>({});
   const locationQueries = useRef<Record<'region' | 'city' | 'postcode', string>>({ region: '', city: '', postcode: '' });
@@ -279,12 +295,13 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const prefetchController = useRef<AbortController | null>(null);
   const prefetchingKey = useRef('');
   const userNavigated = useRef(false);
+  const residentialCountriesRef = useRef<Set<CountryCode>>(new Set());
 
   const residential = mode === 'residential';
   const selectedCountry = countryByCode.get(countryCode) || countries[0];
   const addressSchema = selectedCountry.addressSchema;
   const filterFields: AddressFilterField[] = addressSchema.filters;
-  const visibleCountries = useMemo(() => countries.filter((country) => mode === 'address' || residentialCountries.has(country.code)), [mode, residentialCountries]);
+  const visibleCountries = useMemo(() => countries.filter((country) => residentialCountries.has(country.code)), [residentialCountries]);
   const countryGroups = useMemo(() => groupOrder.map((group) => ({ group, countries: visibleCountries.filter((country) => country.group === group) })).filter((item) => item.countries.length), [visibleCountries]);
 
   const updateUrl = (nextCountry: CountryCode, nextMode: Mode, action: 'push' | 'replace') => {
@@ -450,30 +467,44 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     }), 0);
   };
 
+  const loadResidentialCountries = async (): Promise<Set<CountryCode>> => {
+    const response = await fetch(`${endpoint}/v1/countries`, { cache: 'no-store', headers: { Accept: 'application/json' } });
+    if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
+    const payload = await response.json() as { data?: Array<{ code: CountryCode; residentialAvailable?: boolean }> };
+    const available = new Set((payload.data || []).filter((country) => country.residentialAvailable).map((country) => country.code));
+    residentialCountriesRef.current = available;
+    setResidentialCountries(available);
+    setCountriesReady(true);
+    return available;
+  };
+
   useEffect(() => {
     let disposed = false;
     const bootstrap = async () => {
       const params = new URLSearchParams(window.location.search);
       const urlCountry = countryCodeFrom(params.get('country'));
-      const initialMode: Mode = params.get('mode') === 'residential' ? 'residential' : 'address';
-      try {
-        const detected = await loadClientContext();
-        if (!disposed) setIpContext(detected);
-      } catch {}
-      if (disposed || userNavigated.current) return;
-      const selection = resolveInitialSelection({ urlCountry, mode: initialMode });
-      const initialCountry = selection.mode === 'residential' && !countryByCode.get(selection.country)?.residentialCapability ? 'US' : selection.country;
-      resetFor(initialCountry, selection.mode, 'replace');
+      const [availableResult, contextResult] = await Promise.allSettled([loadResidentialCountries(), loadClientContext()]);
+      if (disposed) return;
+      if (contextResult.status === 'fulfilled') setIpContext(contextResult.value);
+      const available = availableResult.status === 'fulfilled' ? availableResult.value : new Set<CountryCode>();
+      if (availableResult.status === 'rejected') {
+        residentialCountriesRef.current = available;
+        setResidentialCountries(available);
+        setCountriesReady(true);
+      }
+      if (userNavigated.current) return;
+      const nextCountry = selectAvailableCountry(urlCountry, available);
+      if (nextCountry) resetFor(nextCountry, 'residential', 'replace');
     };
     const restoreHistory = () => {
       userNavigated.current = true;
       const params = new URLSearchParams(window.location.search);
       const code = params.get('country')?.toUpperCase();
-      const nextMode: Mode = params.get('mode') === 'residential' ? 'residential' : 'address';
-      let nextCountry = code && isCountryCode(code) ? code : 'US';
-      if (nextMode === 'residential' && !countryByCode.get(nextCountry)?.residentialCapability) nextCountry = 'US';
+      const requested = code && isCountryCode(code) ? code : undefined;
+      const nextCountry = selectAvailableCountry(requested, residentialCountriesRef.current);
+      if (!nextCountry) return;
       window.sessionStorage.setItem(countrySessionKey, nextCountry);
-      resetFor(nextCountry, nextMode, 'replace');
+      resetFor(nextCountry, 'residential', 'replace');
     };
     window.addEventListener('popstate', restoreHistory);
     void bootstrap();
@@ -482,18 +513,6 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       window.removeEventListener('popstate', restoreHistory);
     };
   }, []);
-
-  const loadResidentialCountries = async () => {
-    try {
-      const response = await fetch(`${endpoint}/v1/countries`);
-      if (!response.ok) return;
-      const payload = await response.json() as { data?: Array<{ code: CountryCode; residentialAvailable?: boolean }> };
-      const available = new Set((payload.data || []).filter((country) => country.residentialAvailable).map((country) => country.code));
-      if (available.size) setResidentialCountries(available);
-    } catch {}
-  };
-
-  useEffect(() => { void loadResidentialCountries(); }, []);
   useEffect(() => () => {
     window.clearTimeout(copyToastTimer.current);
     prefetchController.current?.abort();
@@ -504,25 +523,32 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   }, [countryCode, locale]);
 
   useEffect(() => {
+    const country = result?.address.countryCode;
+    if (!country) { setMapDisplay(null); return; }
+    const controller = new AbortController();
+    setMapDisplay(null);
+    void fetch(`${endpoint}/v1/config/maps?country=${encodeURIComponent(country)}`, {
+      cache: 'no-store', signal: controller.signal, headers: { Accept: 'application/json' }
+    }).then(async (response) => {
+      if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
+      const payload = await response.json() as { data?: MapDisplayConfig };
+      if (payload.data?.countryCode === country) setMapDisplay(payload.data);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [endpoint, result?.address.countryCode]);
+
+  useEffect(() => {
+    if (!countriesReady || !residentialCountries.has(countryCode)) return;
     void loadOptions('region');
     void loadOptions('city');
     return () => Object.values(locationControllers.current).forEach((controller) => controller?.abort());
-  }, [countryCode, mode]);
+  }, [countryCode, mode, countriesReady, residentialCountries]);
 
   const changeCountry = (nextCountry: CountryCode) => {
     if (nextCountry === countryCode) return;
     userNavigated.current = true;
     window.sessionStorage.setItem(countrySessionKey, nextCountry);
-    resetFor(nextCountry, mode, 'push');
-  };
-  const changeMode = (nextMode: Mode) => {
-    if (nextMode === mode) return;
-    const nextCountry = nextMode === 'residential' && !residentialCountries.has(countryCode)
-      ? [...residentialCountries][0] || 'US'
-      : countryCode;
-    userNavigated.current = true;
-    window.sessionStorage.setItem(countrySessionKey, nextCountry);
-    resetFor(nextCountry, nextMode, 'push');
+    resetFor(nextCountry, 'residential', 'push');
   };
 
   const generate = async (overrides: GenerationOptions = {}) => {
@@ -675,7 +701,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     void generate(overrides);
   };
 
-  const localeUrl = `/${locale === 'en' ? 'zh-CN' : 'en'}/?country=${countryCode.toLowerCase()}&mode=${mode}`;
+  const localeUrl = `/${locale === 'en' ? 'zh-CN' : 'en'}/?country=${countryCode.toLowerCase()}&mode=residential`;
   const presentation = result?.addressFormats[addressLanguage];
   const components = result?.address.componentVariants[addressLanguage];
   const source = result?.address.evidence[0];
@@ -701,6 +727,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     : ipRegionResult?.matchLevel === 'city' ? t.cityMatch
       : ipRegionResult?.matchLevel === 'region' ? t.regionMatch
         : ipRegionResult?.matchLevel === 'country' ? t.countryMatch : '';
+  const googleMapEnabled = Boolean(mapDisplay?.googleEnabled);
+  const amapMapEnabled = Boolean(mapDisplay?.amapEnabled && mapDisplay.amapConfigured && mapDisplay.amapApiKey && mapDisplay.serviceHost);
+  const mapPreviewEnabled = googleMapEnabled || amapMapEnabled;
   const currency = (amount: number, code: string) => new Intl.NumberFormat(locale, { style: 'currency', currency: code, maximumFractionDigits: 0 }).format(amount);
 
   return <div className="site-shell">
@@ -716,11 +745,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     </header>
 
     <main className="container">
-      <div className="mode-tabs" role="tablist">
-        <button type="button" className={mode === 'address' ? 'active' : ''} onClick={() => changeMode('address')}><b>{t.normalMode}</b><span>{t.modeHintNormal}</span></button>
-        <button type="button" className={mode === 'residential' ? 'active' : ''} onClick={() => changeMode('residential')}><b>{t.residentialMode}</b><span>{t.modeHintResidential}</span></button>
-      </div>
-
+      {!countriesReady ? <section className="panel availability-state">{t.loading}</section>
+        : !visibleCountries.length ? <section className="panel availability-state">{t.noCountriesAvailable}</section> : <>
       <section className="country-browser" aria-label={t.countryRegion}>
         {countryGroups.map(({ group, countries: items }) => <div className="country-group" key={group}>
           <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`https://flagcdn.com/24x18/${country.code.toLowerCase()}.png`} width="24" height="18" alt=""/>{country.name[locale]}</button>)}</div>
@@ -739,7 +765,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
             {ipRegionResult && <div className="ip-region-result"><span><b>{t.matchLevel}</b>{ipMatchLabel}</span><span>{[ipRegionResult.targetRegion, ipRegionResult.targetCity].filter(Boolean).join(' · ')}</span>{ipRegionResult.distanceKm !== undefined && <span>{ipRegionResult.distanceKm.toFixed(1)} km</span>}</div>}
           </section>
           <section className="generator-card panel">
-            <header className="generator-heading"><div><span>{mode === 'residential' ? t.residentialMode : t.normalMode}</span><h1>{locale === 'zh-CN' ? `${selectedCountry.name[locale]}地址生成器` : `${selectedCountry.name[locale]} Address Generator`}</h1></div></header>
+            <header className="generator-heading"><div><span>{t.residentialMode}</span><h1>{locale === 'zh-CN' ? `${selectedCountry.name[locale]}地址生成器` : `${selectedCountry.name[locale]} Address Generator`}</h1></div></header>
             <form className={`filter-grid filters-${filterFields.length}`} onSubmit={submit}>
               {filterFields.includes('region') && <Combobox label={selectedCountry.searchLabels.region[locale]} value={region} options={locations.regions} placeholder={t.allRegions} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
                 clearPrefetchQueue();
@@ -804,7 +830,20 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
               <section className="extension-section panel extension-wide"><header className="section-heading"><h2>{t.internetProfile}</h2><SectionLanguageTabs value={sectionLanguages.internet} onChange={(language) => setSectionLanguage('internet', language)} labels={[t.originalAddress, t.englishAddress, t.chineseAddress]}/></header><div className="extension-columns"><div><ResultRow id="username" label={t.username} value={extensions.internet.username} {...rowProps}/><ResultRow id="password" label={t.testPassword} value={extensions.internet.testPassword} {...rowProps}/><ResultRow id="os" label={t.operatingSystem} value={extensions.internet.os} {...rowProps}/><ResultRow id="user-agent" label={t.userAgent} value={extensions.internet.userAgent} {...rowProps}/></div><div><ResultRow id="ip" label={t.ipAddress} value={extensions.internet.ipAddress} {...rowProps}/><ResultRow id="mac" label={t.macAddress} value={extensions.internet.macAddress} {...rowProps}/><ResultRow id="uuid" label={t.uuid} value={extensions.internet.uuid} {...rowProps}/><ResultRow id="profile-url" label={t.personalUrl} value={extensions.internet.url} {...rowProps}/><ResultRow id="security-question" label={t.securityQuestion} value={profileValue(extensions.internet.securityQuestion, sectionLanguages.internet, countryCode)} {...rowProps}/><ResultRow id="security-answer" label={t.securityAnswer} value={extensions.internet.securityAnswer} {...rowProps}/></div></div></section>
             </div>}
 
-            <section className="map-section panel"><header className="section-heading"><h2>{t.mapPreview}</h2><span className="map-links"><a href={result.googleMaps.openUrl} target="_blank" rel="noreferrer">{t.openGoogle}</a>{result.googleMaps.searchUrl && <a href={result.googleMaps.searchUrl} target="_blank" rel="noreferrer">{t.searchGoogle}</a>}{result.googleMaps.amapUrl && <a href={result.googleMaps.amapUrl} target="_blank" rel="noreferrer">{t.openAmap}</a>}</span></header><p className="map-hint">{t.mapHint}</p><div className="map-frame"><iframe title={t.mapPreview} src={result.googleMaps.embedUrl} loading="lazy" allowFullScreen referrerPolicy="no-referrer-when-downgrade"/></div></section>
+            {mapPreviewEnabled && <section className="map-section panel">
+              <header className="section-heading"><h2>{t.mapPreview}</h2><span className="map-links">
+                {googleMapEnabled && <><a href={result.googleMaps.openUrl} target="_blank" rel="noreferrer">{t.openGoogle}</a>{result.googleMaps.searchUrl && <a href={result.googleMaps.searchUrl} target="_blank" rel="noreferrer">{t.searchGoogle}</a>}</>}
+                {amapMapEnabled && result.googleMaps.amapUrl && <a href={result.googleMaps.amapUrl} target="_blank" rel="noreferrer">{t.openAmap}</a>}
+              </span></header>
+              <p className="map-hint">{t.mapHint}</p>
+              <div className={`map-grid ${googleMapEnabled && amapMapEnabled ? 'map-grid-double' : ''}`}>
+                {googleMapEnabled && <article className="map-provider-card"><h3>{t.googleMap}</h3><div className="map-frame" data-map-provider="google"><iframe title={t.googleMap} src={result.googleMaps.embedUrl} loading="lazy" allowFullScreen referrerPolicy="no-referrer-when-downgrade"/></div></article>}
+                {amapMapEnabled && mapDisplay?.amapApiKey && mapDisplay.serviceHost && <article className="map-provider-card"><h3>{t.amapMap}</h3><AmapPreview
+                  apiKey={mapDisplay.amapApiKey} serviceHost={mapDisplay.serviceHost} countryCode={result.address.countryCode}
+                  latitude={result.address.coordinates.latitude} longitude={result.address.coordinates.longitude}
+                  label={presentation.singleLine} locale={locale} errorText={t.mapLoadFailed}/></article>}
+              </div>
+            </section>}
           </>}
         </div>
 
@@ -813,6 +852,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
           <ShortcutSection title={t.adminShortcuts} items={residential ? selectedCountry.adminShortcuts.filter((item) => locations.regions.some((regionOption) => sameLocation(regionOption.value, item.value))) : selectedCountry.adminShortcuts} locale={locale} apply={applyShortcut}/>
         </aside>
       </div>
+      </>}
     </main>
     {copyToast && <div className={`copy-toast ${copyToast.kind}`} role={copyToast.kind === 'error' ? 'alert' : 'status'} aria-live={copyToast.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true"><span aria-hidden="true">{copyToast.kind === 'success' ? '✓' : '!'}</span>{copyToast.message}</div>}
     <footer>{t.attribution} · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">ODbL</a></footer>

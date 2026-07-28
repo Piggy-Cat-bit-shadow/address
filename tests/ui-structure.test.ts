@@ -1,32 +1,47 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import App, {
   createRequestId,
   fetchWithTimeout,
   generationErrorMessageKey,
   IP_GENERATION_REQUEST_TIMEOUT_MS,
-  LOCATION_OPTION_RENDER_LIMIT
+  LOCATION_OPTION_RENDER_LIMIT,
+  selectAvailableCountry
 } from '../src/components/App';
+import { resolveAmapServiceHost } from '../src/components/AmapPreview';
 import { countries } from '../src/domain/countries';
 import { messages } from '../src/domain/i18n';
 
 const appSource = App.toString();
+const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
 
-describe('dual-mode generator page structure', () => {
+describe('strict residential generator page structure', () => {
+  it('resolves the AMap proxy to an absolute same-origin service host', () => {
+    expect(resolveAmapServiceHost('/_AMapService', 'https://address.example')).toBe('https://address.example/_AMapService');
+    expect(resolveAmapServiceHost('/_AMapService/', 'http://localhost:4321')).toBe('http://localhost:4321/_AMapService');
+    expect(() => resolveAmapServiceHost('https://other.example/_AMapService', 'https://address.example')).toThrow('INVALID_AMAP_SERVICE_HOST');
+    expect(() => resolveAmapServiceHost('/_AMapService', 'http://address.example')).toThrow('INVALID_AMAP_SERVICE_HOST');
+    expect(() => resolveAmapServiceHost('/other', 'https://address.example')).toThrow('INVALID_AMAP_SERVICE_HOST');
+  });
+
   it('defaults to the United States and exposes 27 countries in nine ordered groups', () => {
     expect(countries[0].code).toBe('US');
     expect(new Set(countries.map((country) => country.group)).size).toBe(9);
     expect(countries).toHaveLength(27);
     expect(appSource).toContain('useState)("US")');
     expect(appSource).toContain('country-browser');
-    expect(appSource).toContain('resolveInitialSelection');
+    expect(appSource).toContain('selectAvailableCountry');
     expect(appSource).not.toContain('ipCountry');
     expect(appSource).not.toContain('sessionCountry');
+    expect(selectAvailableCountry(undefined, new Set(['JP', 'US']))).toBe('US');
+    expect(selectAvailableCountry('JP', new Set(['JP', 'US']))).toBe('JP');
+    expect(selectAvailableCountry('CN', new Set(['JP']))).toBe('JP');
   });
 
-  it('uses separate ordinary and residential modes with three address languages', () => {
-    expect(messages['zh-CN'].normalMode).toBe('普通地址');
+  it('uses strict residential mode with three address languages', () => {
     expect(messages['zh-CN'].residentialMode).toBe('真实住宅地址');
-    expect(appSource).toContain('mode-tabs');
+    expect(appSource).not.toContain('mode-tabs');
+    expect(appSource).toContain('useState)("residential")');
     expect(appSource).not.toContain('residential-toggle');
     expect(appSource).toContain('language-tabs');
     expect(appSource).toContain('googleMaps.embedUrl');
@@ -49,6 +64,18 @@ describe('dual-mode generator page structure', () => {
     expect(appSource).not.toContain('test-card');
     expect(countries.find(({ code }) => code === 'HK')?.name['zh-CN']).toBe('香港');
     expect(countries.find(({ code }) => code === 'TW')?.name['zh-CN']).toBe('台湾');
+  });
+
+  it('loads only administrator-enabled map renderers and keeps server secrets out of frontend code', () => {
+    expect(appSource).toContain('/v1/config/maps?country=');
+    expect(appSource).toContain('googleMapEnabled &&');
+    expect(appSource).toContain('amapMapEnabled &&');
+    expect(appSource).toContain('mapPreviewEnabled &&');
+    expect(amapSource).toContain("countryCode === 'CN'");
+    expect(amapSource).toContain("serviceHost");
+    expect(amapSource).not.toContain('AMAP_JS_SECURITY_CODE');
+    expect(amapSource).not.toContain('AMAP_API_KEY');
+    expect(amapSource).not.toContain('securityCode');
   });
 
   it('uses searchable filter inputs and working sidebar shortcuts', () => {

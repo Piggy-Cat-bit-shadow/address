@@ -26,11 +26,34 @@ export class ProviderRequestError extends Error {
 const clean = (value: unknown): string => String(value ?? '').replace(/\s+/gu, ' ').trim();
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const finite = (value: unknown): number | null => Number.isFinite(Number(value)) ? Number(value) : null;
-const presentCandidate = <T extends CommunityCandidate>(value: T | null): value is T => Boolean(value?.providerPoiId && value.name);
+const redactSecrets = (value: unknown, secrets: string[]): string => {
+  let message = clean(value);
+  for (const secret of secrets.filter(Boolean)) {
+    const form = new URLSearchParams([['value', secret]]).toString().slice('value='.length);
+    for (const candidate of new Set([secret, encodeURIComponent(secret), encodeURI(secret), form])) {
+      if (candidate) message = message.split(candidate).join('[REDACTED]');
+    }
+  }
+  return message.slice(0, 500);
+};
+const requestErrorMessage = (error: unknown, url: URL): string => {
+  const secrets = [...url.searchParams.getAll('key'), ...url.searchParams.getAll('ak')].filter(Boolean);
+  const redactedUrl = new URL(url);
+  for (const name of ['key', 'ak']) {
+    if (redactedUrl.searchParams.has(name)) redactedUrl.searchParams.set(name, '[REDACTED]');
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw.split(url.toString()).join(redactedUrl.toString());
+  return redactSecrets(message, secrets) || 'NETWORK_ERROR';
+};
+const presentCandidate = <T extends CommunityCandidate>(value: T | null): value is T => Boolean(
+  value?.providerPoiId && value.name && value.address && value.province && value.city && value.district
+  && Number.isFinite(value.latitude) && Number.isFinite(value.longitude)
+);
 const requestJson = async (url: URL, fetcher: typeof fetch): Promise<unknown> => {
   let response: Response;
   try { response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) }); }
-  catch (error) { throw new ProviderRequestError('network', error instanceof Error ? error.message : String(error)); }
+  catch (error) { throw new ProviderRequestError('network', requestErrorMessage(error, url)); }
   if (response.status === 429) throw new ProviderRequestError('qps', 'RATE_LIMITED');
   if (!response.ok) throw new ProviderRequestError(response.status === 401 || response.status === 403 ? 'auth' : 'network', `HTTP_${response.status}`);
   try { return await response.json(); } catch { throw new ProviderRequestError('invalid', 'INVALID_JSON'); }
@@ -43,7 +66,7 @@ export const fetchAmapCommunities = async (city: string, page: number, key: stri
   const body = await requestJson(url, fetcher) as { status?: string; infocode?: string; info?: string; pois?: Array<Record<string, unknown>> };
   if (body.status !== '1') {
     const outcome = body.infocode === '10003' ? 'quota' : /^1000[1-9]$/u.test(body.infocode || '') ? 'auth' : 'invalid';
-    throw new ProviderRequestError(outcome, clean(body.info || body.infocode));
+    throw new ProviderRequestError(outcome, redactSecrets(body.info || body.infocode, [key]));
   }
   return (body.pois || []).map((item) => {
     const [rawLongitude, rawLatitude] = clean(item.location).split(',').map(Number);
@@ -63,8 +86,8 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
     .forEach(([name, value]) => url.searchParams.set(name, value));
   const body = await requestJson(url, fetcher) as { status?: number; message?: string; data?: Array<Record<string, unknown>> };
   if (body.status !== 0) {
-    const outcome = body.status === 120 ? 'quota' : body.status === 121 ? 'qps' : [110, 111, 112].includes(Number(body.status)) ? 'auth' : 'invalid';
-    throw new ProviderRequestError(outcome, clean(body.message || body.status));
+    const outcome = body.status === 120 ? 'qps' : body.status === 121 ? 'quota' : [110, 111, 112].includes(Number(body.status)) ? 'auth' : 'invalid';
+    throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]));
   }
   return (body.data || []).map((item) => {
     const location = item.location as Record<string, unknown> | undefined;
@@ -87,7 +110,7 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
   const body = await requestJson(url, fetcher) as { status?: number; message?: string; results?: Array<Record<string, unknown>> };
   if (body.status !== 0) {
     const outcome = body.status === 302 ? 'quota' : body.status === 301 ? 'qps' : [101, 102, 200, 201].includes(Number(body.status)) ? 'auth' : 'invalid';
-    throw new ProviderRequestError(outcome, clean(body.message || body.status));
+    throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]));
   }
   return (body.results || []).map((item) => {
     const location = item.location as Record<string, unknown> | undefined;
