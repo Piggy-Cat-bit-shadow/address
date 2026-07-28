@@ -1,4 +1,5 @@
 import { applyHierarchicalQuota } from './address-policy.mjs';
+import { validateAddressQuality } from '../../src/domain/address-quality.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
@@ -168,7 +169,27 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
   }
   return true;
 };
-const IMPORT_REVISION = 'geo-anchor-v13';
+const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
+  const quality = validateAddressQuality({ countryCode, components: record.components });
+  if (!quality.valid) return quality;
+  record.components = quality.components;
+  for (const field of ['admin1', 'admin1Code', 'locality', 'postalLocality', 'district', 'postcode', 'street', 'houseNumber', 'buildingName', 'unit']) {
+    record[field] = quality.components[field] || '';
+  }
+  if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(record.components, countryCode);
+  return quality;
+};
+export const ADDRESS_IMPORT_REVISION = 'strict-quality-v14';
+
+export class SourceQualityError extends Error {
+  constructor(shardId, retrySignature, rejectionReasons) {
+    super(`Shard ${shardId} produced no valid addresses`);
+    this.name = 'SourceQualityError';
+    this.code = 'SOURCE_QUALITY_FAILED';
+    this.failureSignature = retrySignature;
+    this.rejectionReasons = rejectionReasons;
+  }
+}
 
 export class SnapshotQualityError extends Error {
   constructor(shardId, failures, metrics) {
@@ -218,7 +239,7 @@ const datasetStatement = (database, { datasetId, shard, discovery, materialized,
   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending')
   ON CONFLICT(id) DO UPDATE SET retrieved_at=excluded.retrieved_at,imported_at=excluded.imported_at,status='pending'
 `).bind(
-  datasetId, shard.source.id, shard.countryCode, `${String(discovery.version)}-${IMPORT_REVISION}`, discovery.publishedAt || null,
+  datasetId, shard.source.id, shard.countryCode, `${String(discovery.version)}-${ADDRESS_IMPORT_REVISION}`, discovery.publishedAt || null,
   observedAt, observedAt, materialized.checksum, materialized.format,
   shard.source.licenseCode, shard.source.licenseName, shard.source.licenseUrl,
   shard.source.attributionText, shard.source.attributionUrl, shard.source.termsUrl,
@@ -307,7 +328,7 @@ export class SqliteAddressImporter {
       levelLimits: activePolicy.levelLimits,
       overrides: [...activePolicy.overrides].sort(([left], [right]) => left.localeCompare(right))
     })).slice(0, 8);
-    const datasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${IMPORT_REVISION}-${policyHash}`;
+    const datasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${ADDRESS_IMPORT_REVISION}-${policyHash}`;
     const existing = await this.database.prepare("SELECT status,active_count FROM address_datasets WHERE id=?").bind(datasetId).first();
     if (existing?.status === 'active') {
       return { datasetId, acceptedCount: Number(existing.active_count), rejectedCount: 0, skipped: true };
@@ -316,15 +337,25 @@ export class SqliteAddressImporter {
     const seen = new Set();
     const candidates = [];
     let rejectedCount = 0;
+    const rejectionReasons = new Map();
+    const reject = (reasons) => {
+      rejectedCount += 1;
+      for (const reason of reasons) rejectionReasons.set(reason, (rejectionReasons.get(reason) || 0) + 1);
+    };
     const geocoder = this.reverseGeocoder ? await this.reverseGeocoder(shard.countryCode) : null;
     for await (const value of readJsonLines(materialized.file)) {
       const record = this.normalizeRecord(value, shard, materialized.format);
       if (!record || seen.has(record.canonicalHash)) {
-        rejectedCount += 1;
+        reject([record ? 'duplicate' : 'invalid_source_record']);
         continue;
       }
       if (!enrichAndValidate(record, geocoder, shard.countryCode, this.rebuildFormattedAddress)) {
-        rejectedCount += 1;
+        reject(['invalid_administrative_hierarchy']);
+        continue;
+      }
+      const quality = applyQualityGate(record, shard.countryCode, this.rebuildFormattedAddress);
+      if (!quality.valid) {
+        reject(quality.reasons);
         continue;
       }
       seen.add(record.canonicalHash);
@@ -335,7 +366,9 @@ export class SqliteAddressImporter {
       || Number(right.qualityScore || 0) - Number(left.qualityScore || 0)
       || left.canonicalHash.localeCompare(right.canonicalHash));
     const records = applyHierarchicalQuota(candidates, activePolicy);
-    if (!records.length) throw new Error(`Shard ${shard.id} produced no valid addresses`);
+    if (!records.length) {
+      throw new SourceQualityError(shard.id, discovery.failureSignature || '', Object.fromEntries(rejectionReasons));
+    }
 
     const localityCounts = new Map();
     for (const record of records) {
@@ -377,7 +410,8 @@ export class SqliteAddressImporter {
       minimumRecords,
       minimumAdmin1,
       minimumCountRatio,
-      minimumAdmin1Ratio
+      minimumAdmin1Ratio,
+      rejectionReasons: Object.fromEntries([...rejectionReasons].sort(([left], [right]) => left.localeCompare(right)))
     };
     const failures = [];
     if (metrics.candidateCount < minimumRecords) failures.push(`count ${metrics.candidateCount} < ${minimumRecords}`);
@@ -485,7 +519,9 @@ export class SqliteAddressImporter {
     const residentialCount = localized.filter((record) => record.propertyType === 'residential' || record.propertyType === 'apartment').length;
     return {
       datasetId, acceptedCount: localized.length, rejectedCount, localityCount: localityCounts.size,
-      admin1Count: candidateAdmin1Count, residentialCount, skipped: false
+      admin1Count: candidateAdmin1Count, residentialCount,
+      rejectionReasons: Object.fromEntries([...rejectionReasons].sort(([left], [right]) => left.localeCompare(right))),
+      skipped: false
     };
   }
 

@@ -15,6 +15,10 @@ const overtureExporter = resolve(syncRoot, 'overture-export.py');
 const geofabrikExporter = resolve(syncRoot, 'geofabrik-export.py');
 const overtureResidentialRevision = 'residential-buildings-v3';
 const geofabrikExportRevision = 'g65';
+export const sourceAdapterRevisions = Object.freeze({
+  overture: overtureResidentialRevision,
+  geofabrik: geofabrikExportRevision
+});
 // geoBoundaries gbOpen has no entries for these territories; use the exact OSM admin relations instead.
 const osmBoundaryRelations = { HKG: 913110, MAC: 1867188 };
 

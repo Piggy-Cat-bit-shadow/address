@@ -44,6 +44,8 @@ Choose a country and location → generate a verified residential address and te
 
 The active pool uses the following source family for each country. Every public result must pass address-existence and residential-use gates. Live providers are optional inputs and their candidates pass the same gates before publication.
 
+**Quality over quantity:** if any country-required component in [Address formats](docs/address-formats.md) is missing, the entire record is rejected. “Remains empty” below applies only to explicitly optional fields such as a building name or source-tagged unit. Nearby postcodes, neighboring records, and random values never fill factual fields.
+
 | Country / region | Default source | Real/source-backed address fields | Generated address fields |
 |---|---|---|---|
 | United States (US) | [Overture Maps](https://overturemaps.org/) | House number, street, city, state, ZIP, source geometry | None; missing values remain empty |
@@ -74,15 +76,15 @@ The active pool uses the following source family for each country. Every public 
 | Nigeria (NG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None; missing values remain empty |
 | South Africa (ZA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, suburb, postcode, source geometry | None; missing values remain empty |
 
-`None` means the generator does not synthesize address components. A missing house number, building, apartment, unit, floor, room, postcode, or community value stays empty.
+`None` means the generator does not synthesize address components. A record missing a required address field never enters the random pool; an absent optional building name or source-tagged unit remains empty.
 
 ### Address provenance and synthetic profile fields
 
 | Field | Provenance |
 |---|---|
 | Country, region, city, district, and street | Source-backed and normalized from the same address record or an exact administrative relation; conflicts fail validation. |
-| House number | Keeps only the source/provider registration value; absence remains empty. |
-| Postcode | Keeps a valid source value or an exact authoritative relation; invalid or missing values remain empty. |
+| House number | Keeps only a source/provider registration value; a missing value rejects the record. |
+| Postcode | Required outside China POI and Hong Kong; keeps a valid source value or exact authoritative relation, otherwise rejects the record. |
 | Coordinates | Copied from the source geometry. Depending on the source, this may be an address point, building point, or the centroid of an OSM way. |
 | Building or community | Uses only a source value tied to the address object. China publishes communities only after at least two independent map providers agree. |
 | Apartment, building, unit, floor, and room | Keeps only official or source-tagged values; missing indoor details remain empty in every country. |

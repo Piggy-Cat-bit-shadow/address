@@ -15,10 +15,10 @@ import {
   type CatalogTarget,
   type AddressFilters
 } from './repositories/address-repository';
-import { pickAddressPoolAddress } from './repositories/address-pool';
 import { completenessClause, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
 import { queryLocationCatalog } from './repositories/location-catalog';
 import { countChinaCommunities, pickChinaCommunityAddress } from './repositories/china-community';
+import { normalizeAddressFacts, validateAddressQuality } from '../../src/domain/address-quality.mjs';
 import { localizeAddress } from './services/address-localizer';
 import { clientContextFromRequest } from './services/client-context';
 import { lookupManualIpContext, ManualIpLookupError } from './services/ip-geolocation';
@@ -51,6 +51,20 @@ interface Bindings {
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
+
+const qualityCandidates = (candidates: VerifiedAddress[]): VerifiedAddress[] => candidates.flatMap((candidate) => {
+  const quality = validateAddressQuality({ countryCode: candidate.countryCode, components: candidate.components });
+  if (!quality.valid) return [];
+  return [{
+    ...candidate,
+    components: quality.components,
+    componentVariants: {
+      native: normalizeAddressFacts(candidate.countryCode, candidate.componentVariants.native),
+      en: normalizeAddressFacts(candidate.countryCode, candidate.componentVariants.en),
+      'zh-CN': normalizeAddressFacts(candidate.countryCode, candidate.componentVariants['zh-CN'])
+    }
+  }];
+});
 
 const requestContext = (request: Request, env: Bindings): ClientContext => clientContextFromRequest(request, {
   socketIp: env.incoming?.socket?.remoteAddress,
@@ -580,11 +594,11 @@ app.get('/api/v1/generate', async (context) => {
         IP_LIVE_LOOKUP_TIMEOUT_MS,
         false
       ));
-      candidates = dynamic.candidates;
+      candidates = qualityCandidates(dynamic.candidates);
       sourcesTried.push(...dynamic.sources);
       if (!candidates.length && ipCoordinates) {
         sourcesTried.push('osm-overpass');
-        candidates = await measureStage(timings, 'provider', () => fetchOverpassCandidates(
+        candidates = (await measureStage(timings, 'provider', () => fetchOverpassCandidates(
           country,
           residential,
           resolvedFilters,
@@ -595,7 +609,8 @@ app.get('/api/v1/generate', async (context) => {
           undefined,
           liveTarget,
           IP_LIVE_LOOKUP_TIMEOUT_MS
-        ));
+        )));
+        candidates = qualityCandidates(candidates);
       }
       if (candidates.length) {
         ipMatchLevel = 'coordinate';
@@ -615,7 +630,7 @@ app.get('/api/v1/generate', async (context) => {
         context.env,
         target
       ));
-      candidates = dynamic.candidates;
+      candidates = qualityCandidates(dynamic.candidates);
       sourcesTried.push(...dynamic.sources);
     } catch {
       candidates = [];
@@ -681,11 +696,9 @@ app.get('/api/v1/generate', async (context) => {
       if (cityFilters.city) {
         const cityAddress = await toleratePoolFailure(() => pickAddressPoolV2Address(
           context.env.ADDRESS_DB, country.code, residential, cityFilters, target, seed
-        )) || await toleratePoolFailure(() => pickAddressPoolAddress(
-          context.env.LOCATION_DB, country.code, residential, cityFilters, target, seed
         ));
         if (cityAddress) {
-          pooledSource = cityAddress.id.startsWith('pool-v2-') ? 'address-pool-v2' : 'address-pool-v1';
+          pooledSource = 'address-pool-v2';
           ipMatchLevel = 'city';
           resolvedFilters = cityFilters;
           return cityAddress;
@@ -706,25 +719,15 @@ app.get('/api/v1/generate', async (context) => {
       filterMatchLevel = 'exact';
       return current;
     }
-    const legacyExact = await toleratePoolFailure(() =>
-      pickAddressPoolAddress(context.env.LOCATION_DB, country.code, residential, filters, target, seed)
-    );
-    if (legacyExact) {
-      pooledSource = 'address-pool-v1';
-      filterMatchLevel = 'exact';
-      return legacyExact;
-    }
     // A location-filtered request is exact-or-empty. Nearby, region-only and
     // nationwide substitutions can silently return an address from the wrong
     // place, so they are deliberately excluded from the publication path.
     if (hasLocationFilter) return undefined;
     const nationwide = await toleratePoolFailure(() =>
       pickAddressPoolV2Address(context.env.ADDRESS_DB, country.code, residential, { q: filters.q }, undefined, seed)
-    ) || await toleratePoolFailure(() =>
-      pickAddressPoolAddress(context.env.LOCATION_DB, country.code, residential, { q: filters.q }, undefined, seed)
     );
     if (nationwide) {
-      pooledSource = nationwide.id.startsWith('pool-v2-') ? 'address-pool-v2' : 'address-pool-v1';
+      pooledSource = 'address-pool-v2';
       filterMatchLevel = hasLocationFilter ? 'country' : 'exact';
       resolvedFilters = { q: filters.q };
       resolvedTarget = undefined;

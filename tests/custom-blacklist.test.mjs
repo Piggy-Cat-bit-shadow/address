@@ -1,16 +1,17 @@
-import { mkdtempSync, writeFileSync, utimesSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { customBlacklistKeywords, matchesCustomBlacklist } from '../server/lib/custom-blacklist.mjs';
+import { customBlacklistKeywords, matchesCustomBlacklist, replaceCustomBlacklist } from '../server/lib/custom-blacklist.mjs';
 
-const directory = mkdtempSync(join(tmpdir(), 'blacklist-'));
-const file = join(directory, 'blacklist.txt');
+const directory = resolve('data', 'test-fixtures');
+const file = resolve(directory, `blacklist-${process.pid}.txt`);
+mkdirSync(directory, { recursive: true });
 const originalPath = process.env.ADDRESS_BLACKLIST_FILE;
 
 afterEach(() => {
   if (originalPath === undefined) delete process.env.ADDRESS_BLACKLIST_FILE;
   else process.env.ADDRESS_BLACKLIST_FILE = originalPath;
+  rmSync(file, { force: true });
 });
 
 describe('custom blacklist keyword file', () => {
@@ -29,8 +30,16 @@ describe('custom blacklist keyword file', () => {
   });
 
   it('returns no keywords when the file is missing', () => {
-    process.env.ADDRESS_BLACKLIST_FILE = join(directory, 'missing.txt');
+    process.env.ADDRESS_BLACKLIST_FILE = resolve(directory, `missing-${process.pid}.txt`);
     expect(customBlacklistKeywords(Date.now() + 240_000)).toEqual([]);
     expect(matchesCustomBlacklist(['任意地址'])).toBeNull();
+  });
+
+  it('atomically replaces and normalizes administrator keywords', () => {
+    process.env.ADDRESS_BLACKLIST_FILE = file;
+    expect(replaceCustomBlacklist([' 宠物医院 ', 'PET SHOP', '宠物医院'])).toEqual(['宠物医院', 'pet shop']);
+    expect(customBlacklistKeywords(Date.now() + 60_000)).toEqual(['宠物医院', 'pet shop']);
+    expect(matchesCustomBlacklist(['幸福宠物医院'])).toBe('宠物医院');
+    expect(() => replaceCustomBlacklist(['x'.repeat(81)])).toThrow('INVALID_BLACKLIST_KEYWORDS');
   });
 });

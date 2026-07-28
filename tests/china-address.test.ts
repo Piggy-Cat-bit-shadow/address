@@ -61,6 +61,7 @@ describe('China address domain rules', () => {
     const schema = countryByCode.get('CN')!.addressSchema;
     expect(schema.filters).toEqual(['region', 'city']);
     expect(schema.resultFields.map(({ field }) => field)).toContain('postcode');
+    expect(schema.resultFields.map(({ field }) => field).slice(0, 2)).toEqual(['buildingName', 'street']);
   });
 
   it('formats the complete verified hierarchy without inventing indoor components', () => {

@@ -3,7 +3,11 @@ import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import type { SqliteDatabase } from '../../database/sqlite.mjs';
 import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
-import { isValidPostcode } from '../../../src/domain/postcode-patterns.mjs';
+import {
+  addressQualitySqlClause,
+  normalizeAddressFacts,
+  validateAddressQuality
+} from '../../../src/domain/address-quality.mjs';
 import {
   normalizeAddressComponents,
   validateAdministrativeHierarchy
@@ -98,31 +102,7 @@ const aliases = (values: Array<string | undefined>): string[] => [...new Set(val
   }).filter(Boolean);
 }))];
 
-// Read-layer completeness gate, mirroring the importer's per-country standard
-// format requirements (docs/address-formats.md). A record missing a field its
-// country's standard mandates is skipped so it never reaches the UI. Postcode is
-// backfilled at read time and therefore never gates here.
-const cityOnlyCountries = ['DE', 'FR', 'IT', 'ES', 'NL', 'GB', 'SA', 'ZA'];
-const noGateCountries = ['SG'];
-export const completenessClause = (prefix = ''): string => {
-  const region = `${prefix}admin1 <> ''`;
-  // postal_locality counts as city evidence only when it is a real place name,
-  // not a copy of the street (rural OSM records duplicate the village into both).
-  const city = `(${prefix}locality <> ''
-    OR (${prefix}postal_locality <> '' AND ${prefix}postal_locality <> ${prefix}street)
-    OR ${prefix}district <> '')`;
-  const district = `${prefix}district <> ''`;
-  const inList = (codes: string[]): string => codes.map((code) => `'${code}'`).join(',');
-  return `(
-    CASE
-      WHEN ${prefix}country_code = 'CN' THEN (${region} AND ${city} AND ${district})
-      WHEN ${prefix}country_code = 'HK' THEN ${city}
-      WHEN ${prefix}country_code IN (${inList(noGateCountries)}) THEN 1
-      WHEN ${prefix}country_code IN (${inList(cityOnlyCountries)}) THEN ${city}
-      ELSE (${region} AND ${city})
-    END
-  )`;
-};
+export const completenessClause = (prefix = ''): string => addressQualitySqlClause(prefix);
 
 const residentialEvidenceClause = `EXISTS (
   SELECT 1 FROM address_pool_evidence residential_evidence
@@ -144,7 +124,7 @@ const aliasClause = (columns: string[], values: string[], bindings: unknown[]): 
   }).join(' OR ')})`;
 };
 
-const fallbackComponents = (row: AddressPoolV2Row): AddressComponents => normalizeAddressComponents(row.country_code, {
+const fallbackComponents = (row: AddressPoolV2Row): AddressComponents => normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, {
   houseNumber: row.house_number,
   street: row.street,
   ...(row.building_name ? { buildingName: row.building_name } : {}),
@@ -154,7 +134,7 @@ const fallbackComponents = (row: AddressPoolV2Row): AddressComponents => normali
   ...(row.admin1 ? { admin1: row.admin1 } : {}),
   ...(row.admin1_code ? { admin1Code: row.admin1_code } : {}),
   postcode: row.postcode
-});
+}));
 
 const parseVariants = <T>(value: string, fallback: T): Record<'native' | 'en' | 'zh-CN', T> => {
   try {
@@ -169,6 +149,16 @@ const parseVariants = <T>(value: string, fallback: T): Record<'native' | 'en' | 
   }
 };
 
+const storedAddress = (components: AddressComponents, country: CountryCode): string => [
+  [components.houseNumber, components.street].filter(Boolean).join(' '),
+  components.buildingName,
+  components.unit,
+  components.district || components.dependentLocality,
+  components.postalLocality || components.locality,
+  components.admin1Code || components.admin1,
+  country === 'CN' || country === 'HK' ? '' : components.postcode
+].filter(Boolean).join(', ');
+
 const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undefined => {
   if (!row.source_id || !row.source_name || !row.source_url) return undefined;
   if (!validateAdministrativeHierarchy({
@@ -179,18 +169,22 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     .filter(Boolean).join(', ');
   const parsedComponents = parseVariants(row.component_variants_json, fallback);
   for (const language of ['native', 'en', 'zh-CN'] as const) {
-    const components = parsedComponents[language];
-    if (components !== fallback && !(components.admin1 || '').trim() && row.admin1) {
-      components.admin1 = row.admin1;
-      if (!(components.admin1Code || '').trim() && row.admin1_code) components.admin1Code = row.admin1_code;
-    }
+    parsedComponents[language] = { ...fallback, ...parsedComponents[language] };
   }
   const componentVariants = {
-    native: normalizeAddressComponents(row.country_code, parsedComponents.native),
-    en: normalizeAddressComponents(row.country_code, parsedComponents.en),
-    'zh-CN': normalizeAddressComponents(row.country_code, parsedComponents['zh-CN'])
+    native: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.native)),
+    en: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.en)),
+    'zh-CN': normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents['zh-CN']))
   };
-  const addressVariants = parseVariants(row.address_variants_json, fallbackAddress);
+  if (!validateAddressQuality({ countryCode: row.country_code, components: componentVariants.native }).valid) return undefined;
+  const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
+  const addressVariants = /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
+    ? {
+        native: storedAddress(componentVariants.native, row.country_code),
+        en: storedAddress(componentVariants.en, row.country_code),
+        'zh-CN': storedAddress(componentVariants['zh-CN'], row.country_code)
+      }
+    : parsedAddresses;
   const propertyType = propertyTypes.has(row.property_type as PropertyType)
     ? row.property_type as PropertyType
     : 'unknown';
@@ -257,9 +251,9 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     coordinates: { latitude: row.latitude, longitude: row.longitude },
     addressStatus: 'verified',
     propertyType,
-    unitStatus: 'building_only',
-    unitProvenance: 'none',
-    matchLevel: 'premise',
+    unitStatus: componentVariants.native.unit ? 'verified' : componentVariants.native.buildingName ? 'building_only' : 'not_present',
+    unitProvenance: componentVariants.native.unit ? 'source_tagged' : 'none',
+    matchLevel: componentVariants.native.unit ? 'subpremise' : 'premise',
     verificationLevel: 'L2',
     sourceVersion: `${row.dataset_id || row.source_id}:${row.dataset_version || row.generation}`,
     sourceUpdatedAt,
@@ -290,7 +284,6 @@ const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: SqliteDatabase
   return cache;
 };
 const han = /[\p{Script=Han}]/u;
-const placeholderUnit = /^(?:apt|apartment|unit|ste|suite|fl|floor|bldg|building|#|no\.?)$/iu;
 const samePlaceKey = (value: string | undefined): string => (value || '')
   .normalize('NFKC').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
 
@@ -370,9 +363,9 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
       components.houseNumber = houseNumber;
       changed = true;
     }
-    const building = (components.buildingName || '').trim();
-    if (building && placeholderUnit.test(building)) {
-      delete components.buildingName;
+    const normalized = normalizeAddressFacts(address.countryCode, components) as AddressComponents;
+    if (JSON.stringify(normalized) !== JSON.stringify(components)) {
+      updated[language] = normalized;
       changed = true;
     }
   }
@@ -418,19 +411,6 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
       changed = true;
     }
   }
-
-  // A source postcode that does not match the country's format is removed. A
-  // postcode from a nearby record is never substituted for an address.
-  if (address.countryCode !== 'HK') {
-    const sourcePostcode = (native.postcode || '').trim();
-    if (sourcePostcode && !isValidPostcode(address.countryCode, sourcePostcode)) {
-      for (const language of languages) updated[language].postcode = '';
-      changed = true;
-    }
-  }
-
-  // Missing postcode stays missing until the same source or an exact joined
-  // postal record supplies it.
 
   if (address.countryCode === 'HK' && !(native.locality || '').trim()) {
     const hongKong = { native: '香港', en: 'Hong Kong', 'zh-CN': '香港' } as const;

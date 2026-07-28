@@ -15,9 +15,10 @@ describe('China map community providers', () => {
     const baidu = await fetchBaiduCommunities('北京市', 1, 'secret', response({ status: 0, results: [{
       uid: 'b-1', name: '望京花园', address: '阜通东大街6号', location: { lat: 40.001, lng: 116.4765 }, province: '北京市', city: '北京市', area: '朝阳区'
     }] }));
-    expect(amap[0]).toMatchObject({ provider: 'amap', providerPoiId: 'a-1', district: '朝阳区', rawCrs: 'GCJ-02' });
-    expect(tencent[0]).toMatchObject({ provider: 'tencent', providerPoiId: 't-1', rawCrs: 'GCJ-02' });
-    expect(baidu[0]).toMatchObject({ provider: 'baidu', providerPoiId: 'b-1', rawCrs: 'BD-09' });
+    expect(amap.candidates[0]).toMatchObject({ provider: 'amap', providerPoiId: 'a-1', district: '朝阳区', rawCrs: 'GCJ-02' });
+    expect(tencent.candidates[0]).toMatchObject({ provider: 'tencent', providerPoiId: 't-1', rawCrs: 'GCJ-02' });
+    expect(baidu.candidates[0]).toMatchObject({ provider: 'baidu', providerPoiId: 'b-1', rawCrs: 'BD-09' });
+    expect([amap.rawCount, tencent.rawCount, baidu.rawCount]).toEqual([1, 1, 1]);
     expect(JSON.stringify([amap, tencent, baidu])).not.toContain('secret');
   });
 
@@ -31,10 +32,22 @@ describe('China map community providers', () => {
         { id: 'wrong-district', name: '其他小区', address: '东城路1号', location: '116.41,39.91', pname: '北京市', cityname: '北京市', adname: '东城区', typecode: '120302', adcode: '110101' }
       ] }), { headers: { 'content-type': 'application/json' } });
     });
-    expect(values.map((value) => value.providerPoiId)).toEqual(['exact']);
+    expect(values.candidates.map((value) => value.providerPoiId)).toEqual(['exact']);
+    expect(values.rawCount).toBe(3);
     expect(requested).toContain('types=120302');
     expect(requested).toContain('city_limit=true');
     expect(requested).toContain('region=110105');
+    expect(requested).not.toContain('keywords=');
+  });
+
+  it('keeps numbered delivery addresses, trims navigation suffixes, and rejects map directions', async () => {
+    const values = await fetchAmapCommunities('110105', 1, 'secret', response({ status: '1', pois: [
+      { id: 'clean', name: '望京花园', address: '阜通东大街6号(望京地铁站C口步行410米)', location: '116.47,39.995', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105' },
+      { id: 'intersection', name: '方向小区', address: '阜通东大街与望京街交叉口东40米', location: '116.47,39.995', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105' },
+      { id: 'town-only', name: '村镇小区', address: '望京镇', location: '116.47,39.995', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105' }
+    ] }));
+    expect(values.candidates).toHaveLength(1);
+    expect(values.candidates[0]).toMatchObject({ providerPoiId: 'clean', address: '阜通东大街6号' });
   });
 
   it('reports Tencent provider quota headers', async () => {

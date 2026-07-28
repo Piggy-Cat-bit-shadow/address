@@ -19,15 +19,11 @@ describe('admin address coverage', () => {
         VALUES ('110105','110100','district','朝阳区','北京市/北京市/朝阳区','fixture',?)`).bind(now),
       database.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,provider_address,
         longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
-        VALUES ('community','望京花园','望京','北京市','北京市','朝阳区','阜通东大街6号',116.46,39.98,'L2',2,?,?,?)`).bind(now, now, now),
+        VALUES ('community','望京花园','望京','北京市','北京市','朝阳区','阜通东大街6号',116.46,39.98,'L1',1,?,?,?)`).bind(now, now, now),
       database.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
         raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at)
         VALUES ('amap','amap-poi','community','望京花园','阜通东大街6号',116.46,39.98,'GCJ-02',?,?,?)`)
-        .bind('a'.repeat(64), now, now),
-      database.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
-        raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at)
-        VALUES ('baidu','baidu-poi','community','望京花园','阜通东大街6号',116.46,39.98,'BD-09',?,?,?)`)
-        .bind('b'.repeat(64), now, now)
+        .bind('a'.repeat(64), now, now)
     ]);
     await refreshAddressCoverage(database);
     const countries = await listAddressCoverage(database);

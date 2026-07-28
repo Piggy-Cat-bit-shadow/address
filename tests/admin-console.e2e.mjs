@@ -90,6 +90,7 @@ try {
   await page.goto(`${baseUrl}/admin/`);
   await panel(page, '地址数据').waitFor();
   assert.equal(await page.locator('.admin-content > header.admin-topbar').count(), 1);
+  assert.equal(await page.locator('.admin-content > header.admin-topbar h1').count(), 0);
   assert.equal(await page.getByRole('button', { name: '英文', exact: true }).count(), 1);
   assert.equal(await page.getByText('数据与系统管理', { exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '审计日志', exact: true }).count(), 0);
@@ -101,7 +102,7 @@ try {
   await panel(page, '地址数据').waitFor();
 
   const views = [
-    ['仪表盘', '地址数据'], ['同步策略', '地址数量与并发'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
+    ['仪表盘', '地址数据'], ['同步策略', '地址数量与并发'], ['地址黑名单', '地址黑名单'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
     ['中国同步', '自动同步'], ['接口令牌', '接口令牌'], ['任务中心', '任务中心']
   ];
   for (let round = 0; round < 3; round += 1) {
@@ -112,6 +113,7 @@ try {
   }
 
   await page.getByRole('button', { name: '同步策略', exact: true }).click();
+  assert.equal(await page.getByText('内置排除规则', { exact: true }).count(), 0);
   await page.locator('.policy-runtime-form input').nth(0).fill('4');
   await page.locator('.policy-runtime-form input').nth(1).fill('2');
   await page.getByRole('button', { name: '保存并发设置', exact: true }).click();
@@ -125,6 +127,12 @@ try {
   await usPolicyRow.getByRole('button', { name: '管理区域', exact: true }).click();
   await page.locator('.admin-empty').filter({ hasText: '当前层级暂无行政节点' }).waitFor();
   await page.getByRole('button', { name: '返回国家', exact: true }).click();
+
+  await page.getByRole('button', { name: '地址黑名单', exact: true }).click();
+  await page.getByText('内置排除规则', { exact: true }).waitFor();
+  await page.locator('.blacklist-settings textarea').fill('测试机构\n测试园区');
+  await page.getByRole('button', { name: '保存黑名单', exact: true }).click();
+  await page.locator('.admin-notice').filter({ hasText: '地址黑名单已保存' }).waitFor();
 
   await page.getByRole('button', { name: '访问与安全', exact: true }).click();
   await page.locator('input[name=frontendPasswordEnabled]').check();
@@ -283,7 +291,7 @@ try {
   await drill('美国').waitFor();
 
   await page.getByRole('button', { name: '中国同步', exact: true }).click();
-  await page.getByText('系统优先为每个区县补齐 10 个真实小区，完成基础覆盖后自动继续丰富数据。', { exact: true }).waitFor();
+  await page.getByText('系统优先为每个区县补齐 10 个合格住宅小区，完成基础覆盖后自动继续丰富数据。', { exact: true }).waitFor();
   await page.getByRole('button', { name: '开始/继续同步', exact: true }).click();
   await page.locator('.admin-notice').filter({ hasText: '同步任务已提交' }).waitFor();
   await page.waitForFunction(async () => {

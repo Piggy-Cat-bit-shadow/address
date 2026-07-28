@@ -715,6 +715,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const resultFields = addressSchema.resultFields.map(({ field, label }) => ({ field, label: label[locale] }));
   const resultValues: Record<AddressResultField, string | undefined> = {
     country: selectedCountry.name[locale],
+    buildingName: components?.buildingName,
     street: result && components ? streetValue(result.address.countryCode, components) : undefined,
     completeAddress: presentation?.singleLine,
     locality: components?.postalLocality || components?.locality,

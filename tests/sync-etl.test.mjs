@@ -147,6 +147,21 @@ describe('address source shard catalog', () => {
 });
 
 describe('source record normalization', () => {
+  it('keeps source unit semantics separate from building names', () => {
+    const overture = normalizeSourceRecord({
+      id: 'unit-3', admin1: 'California', locality: 'Berkeley', postal_city: 'Berkeley', postcode: '94704',
+      street: 'College Avenue', number: '2704', unit: '3', longitude: -122.25, latitude: 37.86
+    }, { id: 'fixture-us', countryCode: 'US', source }, 'overture-jsonl');
+    const osm = normalizeSourceRecord({
+      id: 'node/3', geometry: { type: 'Point', coordinates: [-0.12, 51.5] }, properties: {
+        '@id': 'node/3', 'addr:housenumber': '21', 'addr:street': 'Baker Street', 'addr:city': 'London',
+        'addr:postcode': 'NW1 6XE', 'addr:unit': '3', name: 'Baker House'
+      }
+    }, { id: 'fixture-gb', countryCode: 'GB', source: { ...source, adapter: 'geofabrik' } }, 'geofabrik-geojsonseq');
+    expect(overture.components).toMatchObject({ unit: '3', buildingName: '' });
+    expect(osm.components).toMatchObject({ unit: '3', buildingName: 'Baker House' });
+  });
+
   it('normalizes Overture fields without inventing translated components', () => {
     const record = normalizeSourceRecord({
       id: 'overture-1', country: 'US', admin1: 'Pennsylvania', locality: 'Philadelphia',
@@ -200,9 +215,9 @@ describe('source record normalization', () => {
       environment: { GOOGLE_TRANSLATION_ENABLED: 'true' },
       fetchImpl: async () => { throw new Error('translation should not duplicate bilingual hints'); }
     });
-    expect(localized.localizations.native.components).toMatchObject({ admin1: '九龍', street: '正德街', buildingName: '龍安樓' });
-    expect(localized.localizations.en.components).toMatchObject({ admin1: 'Kowloon', street: 'Ching Tak Street', buildingName: 'Lung On House' });
-    expect(localized.localizations.en.components.buildingName).not.toMatch(/[\p{Script=Han}]/u);
+    expect(localized.localizations.native.components).toMatchObject({ admin1: '九龍', street: '正德街', unit: '龍安樓' });
+    expect(localized.localizations.en.components).toMatchObject({ admin1: 'Kowloon', street: 'Ching Tak Street', unit: 'Lung On House' });
+    expect(localized.localizations.en.components.unit).not.toMatch(/[\p{Script=Han}]/u);
   });
 
   it('builds verified-ready English and Chinese address variants before database insertion', async () => {
@@ -271,8 +286,8 @@ describe('source record normalization', () => {
     });
     expect(localizedChina.localizations.en.components).toMatchObject({ admin1: 'Hebei Province', locality: 'Tangshan City', street: 'Wenhua Road' });
     expect(localizedChina.localizations['zh-CN'].formattedAddress).toBe('中国河北省唐山市文化路30');
-    expect(localizedHongKong.localizations.en.components).toMatchObject({ admin1: 'Kowloon', street: 'Ching Tak Street', buildingName: 'Lung On House' });
-    expect(localizedHongKong.localizations['zh-CN'].components).toMatchObject({ admin1: '九龙', street: '正德街', buildingName: '龙安楼' });
+    expect(localizedHongKong.localizations.en.components).toMatchObject({ admin1: 'Kowloon', street: 'Ching Tak Street', unit: 'Lung On House' });
+    expect(localizedHongKong.localizations['zh-CN'].components).toMatchObject({ admin1: '九龙', street: '正德街', unit: '龙安楼' });
     expect(localizedTaiwan.localizations.en.components).toMatchObject({ admin1: 'Taibei Municipality', locality: 'Zhongzheng District', street: 'Zhongxiaodong Road' });
   });
 
@@ -428,7 +443,7 @@ describe('built-in ETL planning and publishing', () => {
       ['1', 'Pennsylvania', 'Philadelphia'], ['2', 'Pennsylvania', 'Pittsburgh'],
       ['3', 'New York', 'New York'], ['4', 'New York', 'Buffalo']
     ].map(([id, admin1, locality]) => ({
-      id, admin1, locality, postal_city: locality, street: 'Main Street', number: id,
+      id, admin1, locality, postal_city: locality, postcode: `1000${id}`, street: 'Main Street', number: id,
       longitude: -75 + Number(id) / 100, latitude: 40 + Number(id) / 100
     }));
     await writeFile(file, `${rows.map(JSON.stringify).join('\n')}\n`, 'utf8');

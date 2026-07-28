@@ -115,6 +115,43 @@ describe('country sync planning', () => {
     expect(manifest.shards['fixture-ca']).toMatchObject({ status: 'imported', lastSuccessfulAt: expect.any(String) });
   });
 
+  it('skips repeated source-quality failures until the source or adapter revision changes', async () => {
+    const cacheDir = resolve('.data-cache', 'country-plan-tests', randomUUID());
+    directories.push(cacheDir);
+    let persisted = { schemaVersion: 1, shards: {} };
+    let materializations = 0;
+    const stateStore = {
+      load: async () => structuredClone(persisted),
+      save: async (value) => { persisted = structuredClone(value); }
+    };
+    const catalog = { schemaVersion: 1, shards: [{ ...shards[0], source: { id: 'fixture' } }] };
+    const adapters = {
+      discover: async () => ({ adapter: 'overture', version: 'fixture-v1', sourceBytes: 0 }),
+      materialize: async () => {
+        materializations += 1;
+        return { file: resolve(cacheDir, 'fixture.jsonl'), format: 'overture-jsonl', checksum: 'a'.repeat(64), cacheBytes: 0 };
+      }
+    };
+    const importer = {
+      importShard: async ({ shard, discovery }) => {
+        throw Object.assign(new Error(`Shard ${shard.id} produced no valid addresses`), {
+          code: 'SOURCE_QUALITY_FAILED', failureSignature: discovery.failureSignature
+        });
+      }
+    };
+
+    await expect(runAddressEtl({ cacheDir, dataRoot: cacheDir, catalog, adapters, importer, stateStore,
+      syncMode: 'manual', measureStorage: async () => 0 })).rejects.toThrow('Address sync failed for 1 country shard');
+    expect(persisted.shards['fixture-us']).toMatchObject({
+      errorCode: 'SOURCE_QUALITY_FAILED', failureSignature: expect.stringContaining('fixture-v1')
+    });
+
+    const repeated = await runAddressEtl({ cacheDir, dataRoot: cacheDir, catalog, adapters, importer, stateStore,
+      syncMode: 'manual', measureStorage: async () => 0 });
+    expect(materializations).toBe(1);
+    expect(repeated.reports).toContainEqual(expect.objectContaining({ status: 'source-quality-failed', skipped: true }));
+  });
+
   it('persists 30-day country state in SQLite without double-counting repeated failures', async () => {
     const database = openDatabase(':memory:');
     const store = new SqliteCountryStateStore({ database, shards });
@@ -123,7 +160,8 @@ describe('country sync planning', () => {
       shards: {
         'fixture-us': {
           shardId: 'fixture-us', countryCode: 'US', intervalDays: 30, status: 'failed',
-          lastSuccessfulAt: '2026-07-01T00:00:00.000Z', lastChecked: '2026-07-16T00:00:00.000Z', error: 'fixture'
+          lastSuccessfulAt: '2026-07-01T00:00:00.000Z', lastChecked: '2026-07-16T00:00:00.000Z',
+          sourceVersion: 'fixture-v1', errorCode: 'SOURCE_QUALITY_FAILED', failureSignature: 'fixture-signature', error: 'fixture'
         }
       }
     };
@@ -131,7 +169,31 @@ describe('country sync planning', () => {
     await store.save(failed);
     const row = await database.prepare('SELECT * FROM sync_country_state WHERE country_code=?').bind('US').first();
     expect(row).toMatchObject({ status: 'failed', failure_count: 1, next_sync_at: '2026-07-31T00:00:00.000Z' });
-    expect((await store.load()).shards['fixture-us']).toMatchObject({ status: 'failed', lastSuccessfulAt: '2026-07-01T00:00:00.000Z' });
+    expect((await store.load()).shards['fixture-us']).toMatchObject({
+      status: 'failed', lastSuccessfulAt: '2026-07-01T00:00:00.000Z', sourceVersion: 'fixture-v1',
+      errorCode: 'SOURCE_QUALITY_FAILED', failureSignature: 'fixture-signature'
+    });
+    database.close();
+  });
+
+  it('adds source-quality state columns to an existing database', async () => {
+    const database = openDatabase(':memory:', { migrate: false });
+    await database.exec(`CREATE TABLE sync_country_state (
+      country_code TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      last_success_at TEXT,
+      next_sync_at TEXT,
+      active_dataset_id TEXT,
+      address_count INTEGER NOT NULL DEFAULT 0,
+      residential_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    )`);
+    const store = new SqliteCountryStateStore({ database, shards });
+    await expect(store.load()).resolves.toMatchObject({ shards: { 'fixture-us': { status: 'pending' } } });
+    const columns = (await database.prepare('PRAGMA table_info(sync_country_state)').all()).results.map(({ name }) => name);
+    expect(columns).toEqual(expect.arrayContaining(['source_version', 'failure_code', 'failure_signature']));
     database.close();
   });
 });

@@ -25,6 +25,7 @@
     "data:address-pool:sync": "node --env-file-if-exists=.env server/sync/run-address-sync.mjs",
     "data:address-pool:sync:dry-run": "node --env-file-if-exists=.env server/sync/address-etl.mjs --dry-run",
     "data:address-pool:estimate": "node --env-file-if-exists=.env server/sync/address-etl.mjs --estimate",
+    "data:address-pool:audit": "node --env-file-if-exists=.env scripts/audit-address-quality.mjs",
     "data:address-pool:bootstrap": "node --env-file-if-exists=.env server/sync/address-etl.mjs --initial --all",
     "sync:serve": "node --env-file-if-exists=.env server/sync/index.mjs",
     "db:migrate": "tsx --env-file-if-exists=.env server/database/migrate.ts",

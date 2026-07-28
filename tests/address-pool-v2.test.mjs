@@ -181,6 +181,40 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?,?)');
   });
 
+  it('blocks missing ZIP rows and reclassifies legacy numeric building names as units', async () => {
+    const components = {
+      houseNumber: '2704', street: 'College Avenue', locality: 'Berkeley', postalLocality: 'Berkeley',
+      admin1: 'California', admin1Code: 'CA', postcode: '94704', buildingName: '3'
+    };
+    const valid = {
+      ...row, id: 'legacy-unit', country_code: 'US', admin1: 'California', admin1_code: 'CA',
+      locality: 'Berkeley', postal_locality: 'Berkeley', district: '', postcode: '94704',
+      street: 'College Avenue', house_number: '2704', building_name: '3', native_language: 'en',
+      component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+      address_variants_json: JSON.stringify({ native: '3, 2704 College Avenue, Berkeley, CA 94704', en: '3, 2704 College Avenue, Berkeley, CA 94704', 'zh-CN': '3, 2704 College Avenue' })
+    };
+    const missingZip = { ...valid, id: 'missing-zip', postcode: '', component_variants_json: JSON.stringify({
+      native: { ...components, postcode: '' }, en: { ...components, postcode: '' }, 'zh-CN': { ...components, postcode: '' }
+    }) };
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            if (sql.startsWith('SELECT id FROM address_pool')) return { results: [{ id: missingZip.id }, { id: valid.id }] };
+            return { results: [missingZip, valid] };
+          }
+        };
+        return statement;
+      }
+    };
+    const address = await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'unit-seed');
+    expect(address).toMatchObject({ id: 'pool-v2-legacy-unit', unitStatus: 'verified', unitProvenance: 'source_tagged' });
+    expect(address?.components).toMatchObject({ unit: '3' });
+    expect(address?.components).not.toHaveProperty('buildingName');
+    expect(address?.nativeAddress).not.toMatch(/^3,/u);
+  });
+
   it('preserves indexed candidate order after batch materialization', async () => {
     const first = { ...row, id: 'first' };
     const second = { ...row, id: 'second' };

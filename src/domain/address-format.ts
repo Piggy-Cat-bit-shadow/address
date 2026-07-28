@@ -17,16 +17,32 @@ const chinaHouseNumberSuffix = (houseNumber: string): string =>
 const hongKongHouseNumberSuffix = (houseNumber: string): string =>
   /^[0-9][0-9-]*$/.test(houseNumber) ? '號' : '';
 
+const sourceUnit = (countryCode: CountryCode, value: string | undefined, language: AddressLanguage): string => {
+  const unit = (value || '').trim();
+  if (!/^\d+[A-Za-z]?$/u.test(unit)) return unit;
+  if (language === 'zh-CN') return `${unit}室`;
+  if (countryCode === 'JP' && language === 'native') return `${unit}号室`;
+  if (countryCode === 'KR' && language === 'native') return `${unit}호`;
+  if (['HK', 'TW'].includes(countryCode) && language === 'native') return `${unit}室`;
+  const prefixes: Partial<Record<CountryCode, string>> = {
+    US: 'Apt', GB: 'Flat', IN: 'Flat', CA: 'Unit', AU: 'Unit', SG: 'Unit', MY: 'Unit',
+    PH: 'Unit', ZA: 'Unit', DE: 'Wohnung', FR: 'Appartement', IT: 'Interno', ES: 'Piso',
+    NL: 'Appartement', MX: 'Depto.', BR: 'Apto.', TR: 'Daire', RU: 'кв.'
+  };
+  return `${prefixes[countryCode] || 'Unit'} ${unit}`;
+};
+
 const addressLine = (countryCode: CountryCode, components: AddressComponents, language: AddressLanguage): string => {
-  const unit = components.unit ? ` ${components.unit}` : '';
+  const renderedUnit = sourceUnit(countryCode, components.unit, language);
+  const unit = renderedUnit ? ` ${renderedUnit}` : '';
   if (countryCode === 'CN' && language !== 'en') {
-    return `${components.street}${components.houseNumber}${chinaHouseNumberSuffix(components.houseNumber)}${components.unit || ''}`;
+    return `${components.street}${components.houseNumber}${chinaHouseNumberSuffix(components.houseNumber)}${renderedUnit}`;
   }
   if (countryCode === 'HK' && language !== 'en') {
-    return `${components.street}${components.houseNumber}${hongKongHouseNumberSuffix(components.houseNumber)}${components.unit || ''}`;
+    return `${components.street}${components.houseNumber}${hongKongHouseNumberSuffix(components.houseNumber)}${renderedUnit}`;
   }
-  if (countryCode === 'KR' && language !== 'en') return `${components.street} ${components.houseNumber}${components.unit ? ` ${components.unit}` : ''}`;
-  if (eastAsian.has(countryCode) && language !== 'en') return `${components.street}${components.houseNumber}${components.unit || ''}`;
+  if (countryCode === 'KR' && language !== 'en') return `${components.street} ${components.houseNumber}${unit}`;
+  if (eastAsian.has(countryCode) && language !== 'en') return `${components.street}${components.houseNumber}${renderedUnit}`;
   if (countryCode === 'HK' && language === 'en') return `${components.houseNumber} ${components.street}${unit}`;
   if (countryCode === 'TR') {
     const house = /^no[:.]?\s*/iu.test(components.houseNumber) ? components.houseNumber : `No:${components.houseNumber}`;

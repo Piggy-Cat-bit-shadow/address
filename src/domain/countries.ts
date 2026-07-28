@@ -118,6 +118,7 @@ const detailFields: Record<CountryCode, Array<'locality' | 'district' | 'admin1'
 const addressSchema = (definition: Definition): CountryAddressSchema => {
   const labelFor = (field: AddressResultField): LocalizedText => {
     if (field === 'country') return text('Country / region', '国家/地区');
+    if (field === 'buildingName') return text('Residential community', '小区名称');
     if (field === 'street') return text('Street address', '街道地址');
     if (field === 'completeAddress') return text('Complete address', '完整地址');
     if (field === 'locality') return localityLabels[definition.code] || text('City / locality', '城市/地区');
@@ -132,7 +133,10 @@ const addressSchema = (definition: Definition): CountryAddressSchema => {
     if (!configuredDetails.has(field as 'locality' | 'district' | 'admin1' | 'postcode')) return [];
     return field === 'admin1' ? [field, 'admin1Code'] : [field];
   });
-  const fields: AddressResultField[] = ['street', ...details, 'completeAddress'];
+  const fields: AddressResultField[] = [
+    ...(definition.code === 'CN' ? ['buildingName' as const] : []),
+    'street', ...details, 'completeAddress'
+  ];
   const resultFields: AddressResultFieldDefinition[] = fields.map((field) => ({ field, label: labelFor(field) }));
   return {
     filters: ['CN', 'HK'].includes(definition.code)

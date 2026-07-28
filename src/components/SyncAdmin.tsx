@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
 import { countryByCode, isCountryCode } from '../domain/countries';
 
-type View = 'dashboard' | 'policies' | 'access' | 'providers' | 'china' | 'tokens' | 'runs';
+type View = 'dashboard' | 'policies' | 'blacklist' | 'access' | 'providers' | 'china' | 'tokens' | 'runs';
 type AdminLocale = 'zh-CN' | 'en';
 interface Credential {
   id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
@@ -19,36 +19,39 @@ type RequestData = <T = unknown>(path: string, init?: RequestInit) => Promise<T>
 interface CountryPolicy { countryCode: string; enabled: boolean; targetCount: number; level1Limit: number; level2Limit: number; level3Limit: number; level4Limit: number; currentCount: number; deficit: number; excess: number; state: string; sourceVersion: string | null; labels: string[] }
 interface PolicyNode { key: string; parentKey: string; countryCode: string; level: number; regionName: string; currentCount: number; childCount: number; inheritedTarget: number; overrideTarget: number | null; targetCount: number; deficit: number; excess: number }
 interface PolicyViewData { runtime: { prepareConcurrency: number; cpuConcurrency: number }; countries: CountryPolicy[] }
+interface BlacklistViewData { keywords: string[]; builtIn: Array<{ category: string; terms: string[] }> }
 
 const adminText = {
   'zh-CN': {
-    labels: { dashboard: '仪表盘', policies: '同步策略', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌', runs: '任务中心' },
+    labels: { dashboard: '仪表盘', policies: '同步策略', blacklist: '地址黑名单', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌', runs: '任务中心' },
     providers: { amap: '高德', baidu: '百度', tencent: '腾讯', onemap: '新加坡地图' },
     brandName: '地址', brand: '管理系统', loginTitle: '管理员登录', password: '管理员密码', login: '登录', loggingIn: '登录中…', backGenerator: '返回生成器',
-    bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', logout: '退出登录', language: '英文',
+    bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', retry: '重新加载', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据', dashboardDescription: '按国家和行政层级查看已收录地址。', allCountries: '全部国家', region: '区域', level: '行政层级', available: '可用地址', residential: '真实住宅', ordinary: '普通地址', children: '下级区域', updated: '更新时间', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
     policiesTitle: '地址数量与并发', policiesDescription: '按国家和行政节点控制最新真实地址快照的数量。', prepareConcurrency: '并行准备国家数', cpuConcurrency: '重型解析并发数', countryTarget: '国家目标', actualCount: '当前数量', difference: '差额', sourceVersion: '数据版本', hierarchyLimits: '层级上限', editPolicy: '修改策略', browseNodes: '管理区域', saveRuntime: '保存并发设置', runtimeSaved: '并发设置已保存', policySaved: '同步策略已保存', nodeOverride: '区域目标', inheritedTarget: '默认上限', customTarget: '自定义目标', useInherited: '恢复默认', noPolicyNodes: '当前层级暂无行政节点。', policyHint: '目标只裁剪地址记录；行政区划和邮编目录保持完整。候选不足时显示缺口，不生成地址。', deficit: '缺少', excess: '超出', ready: '已达目标', backCountries: '返回国家', enabled: '参与自动同步', unlimitedLevel: '0 表示该层级不单独限制', manage: '管理',
+    blacklistTitle: '地址黑名单', blacklistDescription: '内置机构规则固定启用；可在下方追加全局排除关键词。', builtinRules: '内置排除规则', customKeywords: '自定义关键词', customKeywordHint: '一行一个关键词，匹配小区名、建筑名、街道或完整地址；最多 500 条。', blacklistSaved: '地址黑名单已保存', saveBlacklist: '保存黑名单', noCustomKeywords: '当前没有自定义关键词',
     accessTitle: '访问策略', accessDescription: '先设置访问方式，再保存密码和接口保护规则。', frontendPasswordEnabled: '启用前端访问密码', apiAuthEnabled: '外部接口强制使用访问令牌', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
     providersTitle: '地图密钥', providersDescription: '管理地图平台凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: '平台', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaProvider: '平台实时', quotaLocal: '本地统计', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
     amapBrowserTitle: '高德地图浏览器密钥', configureAmapBrowser: '配置密钥', editAmapBrowser: '修改密钥', amapBrowserDialog: '配置高德地图浏览器密钥', amapBrowserLabel: '密钥名称', amapBrowserPlaceholder: '高德浏览器地图', amapApiKey: '浏览器接口密钥', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德地图浏览器密钥已保存', amapBrowserRemoved: '高德地图浏览器密钥已删除', amapBrowserEmpty: '尚未配置高德地图浏览器密钥', amapBrowserSecurity: '浏览器只会收到受域名白名单约束的专用接口密钥；安全密钥和服务端同步密钥始终保留在服务端。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德地图浏览器密钥吗？',
-    chinaTitle: '中国同步', chinaDescription: '配置真实小区同步，查看平台配额和覆盖进度。', chinaTotal: '真实小区', cities: '覆盖城市', districts: '已覆盖区县', focusCities: '已覆盖重点城市', crossVerified: '跨平台验证', availableKeys: '可用密钥', estimate: '基础覆盖预计', waitingKeys: '等待可用密钥', minutes: '约 {value} 分钟', autoSync: '自动同步', syncNow: '开始/继续同步', syncing: '同步中', areaFallback: '行政区划数据待导入，当前先覆盖重点城市；导入后自动切换全国区县。', areaReady: '系统优先为每个区县补齐 10 个真实小区，完成基础覆盖后自动继续丰富数据。', pendingCommunities: '{value} 个基础小区待补齐', focusCoverage: '重点城市覆盖', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '行政区划数据待初始化', platformData: '平台数据量', syncSubmitted: '同步任务已提交',
+    chinaTitle: '中国同步', chinaDescription: '配置合格住宅小区同步，查看平台配额和覆盖进度。', chinaTotal: '合格住宅小区', cities: '覆盖城市', districts: '已覆盖区县', focusCities: '已覆盖重点城市', crossVerified: '增强验证', availableKeys: '可用密钥', estimate: '基础覆盖预计', waitingKeys: '等待可用密钥', minutes: '约 {value} 分钟', autoSync: '自动同步', syncNow: '开始/继续同步', syncing: '同步中', areaFallback: '行政区划数据待导入，当前先覆盖重点城市；导入后自动切换全国区县。', areaReady: '系统优先为每个区县补齐 10 个合格住宅小区，完成基础覆盖后自动继续丰富数据。', pendingCommunities: '{value} 个基础小区待补齐', focusCoverage: '重点城市覆盖', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '行政区划数据待初始化', platformData: '平台数据量', syncSubmitted: '同步任务已提交',
     tokensTitle: '接口令牌', tokensDescription: '创建、查看、修改和撤销外部接口访问令牌。', addToken: '添加令牌', tokenDialog: '添加接口令牌', editTokenDialog: '修改接口令牌', tokenCreatedTitle: '令牌已创建', tokenCreatedHint: '令牌内容只在管理员会话内显示；请使用复制按钮保存。', name: '名称', tokenValue: '令牌内容', tokenValueHint: '留空时由服务端安全生成', generateToken: '生成令牌', perMinute: '每分钟请求数', prefix: '前缀', scopes: '权限范围', scopeRead: '读取', scopeGenerate: '生成', scopeAll: '全部', scopeHint: '当前接口支持读取和生成；选择全部可同时使用两项能力。', expires: '到期时间', neverExpires: '无限', lastUsed: '最近使用', create: '创建', update: '保存修改', tokenCreated: '令牌已创建', tokenUpdated: '令牌设置已更新', noTokens: '尚未创建接口令牌', revoked: '已撤销', valid: '有效', revoke: '撤销', edit: '编辑', tokenUnavailable: '仅可鉴权', confirmRevokeToken: '确定撤销这个令牌吗？',
     taskCenter: '任务中心', taskDescription: '查看同步任务、结果和失败原因。', statusLabel: '状态', actions: '操作', noRecords: '暂无记录', close: '关闭', showSecret: '显示', hideSecret: '隐藏', copySecret: '复制', copied: '已复制', revealFailed: '密钥读取失败，请重试。',
     status: { healthy: '正常', expired: '已过期', needs_review: '需检查', cooldown: '冷却中', quota_exhausted: '额度用尽', disabled: '已停用', succeeded: '已完成', failed: '失败' }
   },
   en: {
-    labels: { dashboard: 'Dashboard', policies: 'Sync Policy', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens', runs: 'Task Center' },
+    labels: { dashboard: 'Dashboard', policies: 'Sync Policy', blacklist: 'Address Blacklist', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens', runs: 'Task Center' },
     providers: { amap: 'Amap', baidu: 'Baidu', tencent: 'Tencent', onemap: 'OneMap' },
     brandName: 'ADDRESS', brand: 'Admin Console', loginTitle: 'Administrator sign in', password: 'Administrator password', login: 'Sign in', loggingIn: 'Signing in…', backGenerator: 'Back to generator',
-    bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', logout: 'Sign out', language: 'Chinese',
+    bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', retry: 'Reload', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address data', dashboardDescription: 'Review imported addresses by country and administrative level.', allCountries: 'All countries', region: 'Region', level: 'Administrative level', available: 'Available addresses', residential: 'Verified residential', ordinary: 'Other addresses', children: 'Child regions', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
     policiesTitle: 'Address volume and concurrency', policiesDescription: 'Control the latest verified snapshot by country and administrative node.', prepareConcurrency: 'Countries prepared in parallel', cpuConcurrency: 'Heavy parser concurrency', countryTarget: 'Country target', actualCount: 'Current count', difference: 'Difference', sourceVersion: 'Data version', hierarchyLimits: 'Level limits', editPolicy: 'Edit policy', browseNodes: 'Manage regions', saveRuntime: 'Save concurrency', runtimeSaved: 'Concurrency settings saved', policySaved: 'Sync policy saved', nodeOverride: 'Region target', inheritedTarget: 'Default limit', customTarget: 'Custom target', useInherited: 'Restore default', noPolicyNodes: 'No administrative nodes at this level.', policyHint: 'Targets trim address rows only. Administrative and postcode catalogs remain complete. Missing candidates are reported, never generated.', deficit: 'Missing', excess: 'Excess', ready: 'On target', backCountries: 'Back to countries', enabled: 'Include in automatic sync', unlimitedLevel: '0 disables a separate cap for that level', manage: 'Manage',
+    blacklistTitle: 'Address blacklist', blacklistDescription: 'Built-in institution rules remain enabled. Add global exclusion keywords below.', builtinRules: 'Built-in exclusion rules', customKeywords: 'Custom keywords', customKeywordHint: 'One keyword per line. Matches community, building, street, or complete address. Maximum 500.', blacklistSaved: 'Address blacklist saved', saveBlacklist: 'Save blacklist', noCustomKeywords: 'No custom keywords configured',
     accessTitle: 'Access policy', accessDescription: 'Choose the access path first, then save password and API protection rules.', frontendPasswordEnabled: 'Require a frontend password', apiAuthEnabled: 'Require a Bearer token for external API', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
     providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaProvider: 'Provider live', quotaLocal: 'Local count', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
     amapBrowserTitle: 'AMap browser credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap browser credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap JavaScript API', amapApiKey: 'Browser API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap browser credential saved', amapBrowserRemoved: 'AMap browser credential deleted', amapBrowserEmpty: 'No AMap browser credential configured', amapBrowserSecurity: 'The browser receives only the dedicated domain-restricted API key. The security code and server-side sync key remain on the server.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap browser credential?',
-    chinaTitle: 'China sync', chinaDescription: 'Configure verified community sync and review quota and coverage progress.', chinaTotal: 'Verified communities', cities: 'Cities covered', districts: 'Districts covered', focusCities: 'Priority cities covered', crossVerified: 'Cross-provider matches', availableKeys: 'Available keys', estimate: 'Base coverage estimate', waitingKeys: 'Waiting for an available key', minutes: 'About {value} minutes', autoSync: 'Automatic sync', syncNow: 'Start / resume sync', syncing: 'Syncing', areaFallback: 'AreaCity data is not imported; priority cities are covered first, then the full district list is enabled.', areaReady: 'The system targets 10 verified communities per district, then continues enrichment automatically.', pendingCommunities: '{value} base communities remaining', focusCoverage: 'Priority city coverage', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'Administrative data is not initialized', platformData: 'Provider totals', syncSubmitted: 'Sync task submitted',
+    chinaTitle: 'China sync', chinaDescription: 'Configure qualified residential community sync and review quota and coverage progress.', chinaTotal: 'Qualified residential communities', cities: 'Cities covered', districts: 'Districts covered', focusCities: 'Priority cities covered', crossVerified: 'Enhanced verification', availableKeys: 'Available keys', estimate: 'Base coverage estimate', waitingKeys: 'Waiting for an available key', minutes: 'About {value} minutes', autoSync: 'Automatic sync', syncNow: 'Start / resume sync', syncing: 'Syncing', areaFallback: 'AreaCity data is not imported; priority cities are covered first, then the full district list is enabled.', areaReady: 'The system targets 10 qualified residential communities per district, then continues enrichment automatically.', pendingCommunities: '{value} base communities remaining', focusCoverage: 'Priority city coverage', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'Administrative data is not initialized', platformData: 'Provider totals', syncSubmitted: 'Sync task submitted',
     tokensTitle: 'API tokens', tokensDescription: 'Create, view, edit, and revoke external API access tokens.', addToken: 'Add token', tokenDialog: 'Add API token', editTokenDialog: 'Edit API token', tokenCreatedTitle: 'Token created', tokenCreatedHint: 'The token stays inside this administrator session. Use Copy to save it.', name: 'Name', tokenValue: 'Token value', tokenValueHint: 'Leave blank to let the server generate one', generateToken: 'Generate token', perMinute: 'Requests per minute', prefix: 'Prefix', scopes: 'Scopes', scopeRead: 'Read', scopeGenerate: 'Generate', scopeAll: 'All', scopeHint: 'This API currently supports Read and Generate. Select All to enable both.', expires: 'Expires', neverExpires: 'Never', lastUsed: 'Last used', create: 'Create', update: 'Save changes', tokenCreated: 'Token created', tokenUpdated: 'Token settings updated', noTokens: 'No API tokens created', revoked: 'Revoked', valid: 'Active', revoke: 'Revoke', edit: 'Edit', tokenUnavailable: 'Authentication only', confirmRevokeToken: 'Revoke this token?',
     taskCenter: 'Task center', taskDescription: 'Review sync jobs, outcomes, and failure details.', statusLabel: 'Status', actions: 'Actions', noRecords: 'No records', close: 'Close', showSecret: 'Show', hideSecret: 'Hide', copySecret: 'Copy', copied: 'Copied', revealFailed: 'The credential could not be revealed. Try again.',
     status: { healthy: 'Healthy', expired: 'Expired', needs_review: 'Needs review', cooldown: 'Cooling down', quota_exhausted: 'Quota exhausted', disabled: 'Disabled', succeeded: 'Completed', failed: 'Failed' }
@@ -56,15 +59,6 @@ const adminText = {
 } as const;
 
 const labelsFor = (locale: AdminLocale): Record<View, string> => adminText[locale].labels;
-const descriptionsFor = (locale: AdminLocale): Record<View, string> => ({
-  dashboard: adminText[locale].dashboardDescription,
-  policies: adminText[locale].policiesDescription,
-  providers: adminText[locale].providersDescription,
-  china: adminText[locale].chinaDescription,
-  access: adminText[locale].accessDescription,
-  tokens: adminText[locale].tokensDescription,
-  runs: adminText[locale].taskDescription
-});
 const providerLabel = (locale: AdminLocale, provider: string): string => adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
 const policyLevelLabels: Record<string, string[]> = {
   US: ['州', '县/城市', '地区'], CA: ['省/地区', '城市', '区域'], MX: ['州', '市镇', '地区'],
@@ -143,7 +137,7 @@ export default function SyncAdmin() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [coverageTrail, setCoverageTrail] = useState<CoverageNode[]>([]);
-  const loadIds = useRef<Record<View, number>>({ dashboard: 0, policies: 0, access: 0, providers: 0, china: 0, tokens: 0, runs: 0 });
+  const loadIds = useRef<Record<View, number>>({ dashboard: 0, policies: 0, blacklist: 0, access: 0, providers: 0, china: 0, tokens: 0, runs: 0 });
   const viewRef = useRef<View>('dashboard');
   const coverageParent = useRef('');
 
@@ -183,7 +177,7 @@ export default function SyncAdmin() {
     try {
       const paths: Record<View, string> = {
         dashboard: `/dashboard/coverage${coverageParent.current ? `?parent=${encodeURIComponent(coverageParent.current)}` : ''}`,
-        policies: '/sync/policies', access: '/settings/access', providers: '/providers', china: '/china/status', tokens: '/tokens', runs: '/runs'
+        policies: '/sync/policies', blacklist: '/settings/blacklist', access: '/settings/access', providers: '/providers', china: '/china/status', tokens: '/tokens', runs: '/runs'
       };
       const result = selected === 'providers'
         ? { credentials: await request('/providers'), maps: await request('/settings/maps') }
@@ -278,10 +272,9 @@ export default function SyncAdmin() {
     </aside>
     <main className="admin-content">
       <header className="admin-topbar">
-        <div className="admin-topbar-copy"><p className="admin-eyebrow">{t.brandName}{locale === 'zh-CN' ? '' : ' '}{t.brand}</p><h1>{labelsFor(locale)[view]}</h1><p>{descriptionsFor(locale)[view]}</p></div>
         <div className="admin-topbar-actions"><button className="topbar-control" onClick={() => changeLocale(locale === 'zh-CN' ? 'en' : 'zh-CN')}>{t.language}</button><a className="topbar-control" href={locale === 'zh-CN' ? '/zh-CN/' : '/en/'}>{t.backGenerator}</a><button className="topbar-control danger-control" onClick={() => void logout()}>{t.logout}</button></div>
       </header>
-      {error && <div className="admin-error" role="alert">{error}</div>}
+      {error && <div className="admin-error admin-error-action" role="alert"><span>{error}</span>{data === undefined && <button onClick={() => void load(view)}>{t.retry}</button>}</div>}
       {notice && <div className="admin-notice">{notice}</div>}
       {data === undefined ? <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div> : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal} request={request}
         coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
@@ -311,7 +304,12 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
     const value = data as { frontendPasswordEnabled?: boolean; apiAuthEnabled?: boolean } | undefined;
     return <Panel title={t.accessTitle}><AccessSettingsForm value={value} locale={locale} busy={busy} mutate={mutate} /></Panel>;
   }
-  if (view === 'policies') return <PolicySettings value={data as PolicyViewData} locale={locale} busy={busy} mutate={mutate} request={request} />;
+  if (view === 'policies') {
+    return <PolicySettings value={data as PolicyViewData} locale={locale} busy={busy} mutate={mutate} request={request} />;
+  }
+  if (view === 'blacklist') {
+    return <BlacklistSettings value={data as BlacklistViewData} locale={locale} busy={busy} mutate={mutate} />;
+  }
   if (view === 'providers') {
     const value = data as ProviderViewData;
     const credentials = value.credentials || [];
@@ -384,6 +382,41 @@ function PolicySettings({ value, locale, busy, mutate, request }: { value: Polic
     <td>{country.currentCount.toLocaleString()}</td><td>{country.targetCount.toLocaleString()}</td><td><PolicyDifference value={country} locale={locale} /></td><td>{country.sourceVersion || '-'}</td><td>{[country.level1Limit, country.level2Limit, country.level3Limit, country.level4Limit].join(' / ')}</td>
     <td className="row-actions"><button onClick={() => setCountryEditor(country)}>{t.editPolicy}</button><button onClick={() => void loadNodes(country.countryCode, [{ key: country.countryCode, name: isCountryCode(country.countryCode) ? countryByCode.get(country.countryCode)?.name[locale] || country.countryCode : country.countryCode }])}>{t.browseNodes}</button></td>
   </tr>)}</tbody></table></div></Panel>{countryEditor && <CountryPolicyDialog value={countryEditor} locale={locale} busy={busy} mutate={mutate} close={() => setCountryEditor(null)} />}</>;
+}
+
+const blacklistCategoryLabels: Record<AdminLocale, Record<string, string>> = {
+  'zh-CN': {
+    government: '政府机构', military_law_justice: '军事与司法', education_research: '教育与科研',
+    healthcare_care: '医疗与照护', finance: '金融机构', fire_utilities: '消防与公共设施',
+    transport_logistics: '交通与物流', religious_funeral_public: '宗教与公共场馆',
+    hospitality_commercial_industrial: '住宿、商业与工业'
+  },
+  en: {
+    government: 'Government', military_law_justice: 'Military and justice', education_research: 'Education and research',
+    healthcare_care: 'Healthcare and care', finance: 'Finance', fire_utilities: 'Fire and utilities',
+    transport_logistics: 'Transport and logistics', religious_funeral_public: 'Religious and public venues',
+    hospitality_commercial_industrial: 'Hospitality, commercial, and industrial'
+  }
+};
+
+function BlacklistSettings({ value, locale, busy, mutate }: { value: BlacklistViewData; locale: AdminLocale; busy: boolean; mutate: Mutate }) {
+  const t = adminText[locale];
+  const [keywords, setKeywords] = useState(value.keywords.join('\n'));
+  useEffect(() => setKeywords(value.keywords.join('\n')), [value.keywords.join('\n')]);
+  return <Panel title={t.blacklistTitle}>
+    <div className="blacklist-settings">
+      <p>{t.blacklistDescription}</p>
+      <section><h3>{t.builtinRules}</h3><div className="blacklist-rule-list">{value.builtIn.map((rule) => <details key={rule.category}>
+        <summary>{blacklistCategoryLabels[locale][rule.category] || rule.category}<span>{rule.terms.length}</span></summary>
+        <p>{rule.terms.join(' · ')}</p>
+      </details>)}</div></section>
+      <form onSubmit={async (event) => {
+        event.preventDefault();
+        const values = keywords.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+        await mutate('/settings/blacklist', 'PUT', { keywords: values }, t.blacklistSaved);
+      }}><label><span>{t.customKeywords}</span><textarea value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder={t.noCustomKeywords} /></label><small>{t.customKeywordHint}</small><button className="primary-action" disabled={busy}>{t.saveBlacklist}</button></form>
+    </div>
+  </Panel>;
 }
 
 const PolicyDifference = ({ value, locale }: { value: { deficit: number; excess: number }; locale: AdminLocale }) => {

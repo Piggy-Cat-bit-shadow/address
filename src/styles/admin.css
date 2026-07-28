@@ -30,6 +30,8 @@ button:disabled { cursor: default; opacity: .55; }
 .locale-toggle { width: auto; height: 30px; margin: 0; padding: 0 10px; border: 1px solid #b8c2cf; border-radius: 7px; color: #344054; background: #fff; font-size: 11px; font-weight: 700; }
 
 .admin-error, .admin-warning, .admin-notice { margin: 0 0 14px; padding: 11px 13px; border-left: 3px solid #b42318; border-radius: 6px; background: #fff1f0; color: #912018; font-size: 12px; line-height: 1.55; }
+.admin-error-action { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.admin-error-action button { min-height: 30px; padding: 0 10px; flex: 0 0 auto; border: 1px solid #e7a39d; border-radius: 6px; color: #912018; background: #fff; font-size: 10px; font-weight: 800; }
 .admin-warning { border-color: #dc6803; background: #fff8e8; color: #92400e; }
 .admin-notice { border-color: #18864b; background: #eefaf2; color: #146c3d; overflow-wrap: anywhere; }
 
@@ -45,11 +47,7 @@ button:disabled { cursor: default; opacity: .55; }
 .admin-sidebar nav button.active { box-shadow: inset 3px 0 #5da2ff; }
 
 .admin-content { width: min(1500px, calc(100% - 56px)); margin: 0 auto; padding: 24px 0 64px; }
-.admin-topbar { min-height: 76px; margin-bottom: 22px; display: flex; align-items: flex-start; justify-content: space-between; gap: 26px; }
-.admin-topbar-copy { min-width: 0; }
-.admin-eyebrow { margin: 0 0 7px; color: #667085; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
-.admin-topbar h1 { margin: 0; color: #101828; font-size: 25px; line-height: 1.2; letter-spacing: -.02em; }
-.admin-topbar-copy > p:last-child { max-width: 720px; margin: 8px 0 0; color: #667085; font-size: 12px; line-height: 1.55; }
+.admin-topbar { min-height: 32px; margin-bottom: 18px; display: flex; align-items: center; justify-content: flex-end; }
 .admin-topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .topbar-control { min-height: 32px; padding: 0 11px; display: inline-flex; align-items: center; border: 1px solid #c4ceda; border-radius: 7px; color: #344054; background: #fff; text-decoration: none; font-size: 11px; font-weight: 750; }
 .topbar-control:hover { border-color: #1769e0; color: #1769e0; }
@@ -136,6 +134,19 @@ tbody tr:last-child td { border-bottom: 0; }
 .policy-runtime-form input { min-height: 38px; padding: 0 11px; border: 1px solid #cfd7e3; border-radius: 7px; color: #182230; background: #fff; }
 .policy-runtime-form button { justify-self: end; }
 .policy-hint { margin: 0; padding: 0 20px 20px; color: #667085; font-size: 11px; line-height: 1.6; }
+.blacklist-settings { padding: 20px; display: grid; gap: 20px; }
+.blacklist-settings > p, .blacklist-settings small { margin: 0; color: #667085; font-size: 11px; line-height: 1.6; }
+.blacklist-settings h3 { margin: 0 0 10px; color: #344054; font-size: 12px; }
+.blacklist-rule-list { border: 1px solid #e1e7ef; border-radius: 8px; overflow: hidden; }
+.blacklist-rule-list details { border-bottom: 1px solid #edf0f4; }
+.blacklist-rule-list details:last-child { border-bottom: 0; }
+.blacklist-rule-list summary { min-height: 42px; padding: 0 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #344054; background: #f8fafc; cursor: pointer; font-size: 11px; font-weight: 800; }
+.blacklist-rule-list summary span { color: #667085; font-variant-numeric: tabular-nums; }
+.blacklist-rule-list details p { margin: 0; padding: 12px 13px; color: #667085; font-size: 10px; line-height: 1.7; }
+.blacklist-settings form { display: grid; gap: 10px; }
+.blacklist-settings form label { display: grid; gap: 7px; color: #475467; font-size: 12px; font-weight: 700; }
+.blacklist-settings textarea { min-height: 130px; padding: 11px 12px; resize: vertical; border: 1px solid #b8c2cf; border-radius: 8px; outline: 0; }
+.blacklist-settings form button { justify-self: end; }
 .table-subtitle { margin-top: 3px; display: block; color: #98a2b3; font-size: 9px; }
 
 .credential-summary { padding: 20px; display: grid; grid-template-columns: minmax(130px, 1.2fr) minmax(180px, 1.7fr) minmax(180px, 1.7fr) minmax(120px, 1fr) minmax(120px, 1fr) auto; align-items: start; gap: 18px; }
@@ -193,6 +204,5 @@ tbody tr:last-child td { border-bottom: 0; }
   body { min-width: 760px; }
   .admin-shell { grid-template-columns: 200px minmax(0, 1fr); }
   .admin-content { width: calc(100% - 28px); padding-top: 18px; }
-  .admin-topbar { display: block; }
-  .admin-topbar-actions { margin-top: 14px; justify-content: flex-start; }
+  .admin-topbar-actions { justify-content: flex-end; }
 }

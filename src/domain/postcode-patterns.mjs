@@ -22,7 +22,7 @@ export const postcodePatterns = {
   VN: /^\d{5,6}$/,
   TR: /^\d{5}$/,
   SA: /^\d{5}(?:\s*-\s*\d{4})?$/,
-  IN: /^\d{3}\s?\d{3}$/,
+  IN: /^[1-9]\d{5}$/,
   NG: /^\d{6}$/,
   ZA: /^\d{4}$/,
   BR: /^\d{5}-?\d{3}$/,

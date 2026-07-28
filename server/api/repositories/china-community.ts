@@ -3,10 +3,12 @@ import { pinyin } from 'pinyin-pro';
 import type { SqliteDatabase } from '../../database/sqlite.mjs';
 import type { AddressComponents, AddressEvidence, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters } from './address-repository';
+import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
+import { chinaDeliveryAddressClause } from '../../china/quality';
 
 interface CommunityRow {
   id: string; canonical_name: string; province: string; city: string; district: string; township: string;
-  provider_address: string; latitude: number; longitude: number; verification_level: 'L2' | 'L3';
+  provider_address: string; latitude: number; longitude: number; verification_level: 'L1' | 'L2' | 'L3';
   source_count: number; last_seen_at: string; providers: string;
 }
 
@@ -19,9 +21,10 @@ export const chinaFreshSourceCountClause = (communityAlias = 'community', source
 )`;
 export const chinaCommunityPublicationClause = (alias = 'community'): string => [
   `${alias}.active=1`,
-  `${alias}.verification_level IN ('L2','L3')`,
   chinaFreshTimestampClause(`${alias}.last_seen_at`),
-  `${chinaFreshSourceCountClause(alias)}>=2`
+  chinaDeliveryAddressClause(alias),
+  `EXISTS (SELECT 1 FROM cn_community_sources amap_source WHERE amap_source.community_id=${alias}.id
+    AND amap_source.provider='amap' AND ${chinaFreshTimestampClause('amap_source.last_seen_at')})`
 ].join(' AND ');
 
 const seedIndex = (seed: string, length: number): number => Number.parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 8), 16) % length;
@@ -106,8 +109,6 @@ export const pickChinaCommunityAddress = async (
   coordinates?: { latitude: number; longitude: number }
 ): Promise<VerifiedAddress | undefined> => {
   if (!database) return undefined;
-  // A single provider POI is only a lead. Publish a community after at least
-  // two independent map providers agree and the sync service assigns L2/L3.
   const clauses = [chinaCommunityPublicationClause('community')];
   const bindings: unknown[] = [];
   if (filters.region) { clauses.push('(community.province=? OR REPLACE(community.province,\'省\',\'\')=REPLACE(?,\'省\',\'\'))'); bindings.push(filters.region, filters.region); }
@@ -125,12 +126,15 @@ export const pickChinaCommunityAddress = async (
       .bind(...bindings).all<CommunityRow>()).results;
   } catch { return undefined; }
   if (!rows.length) return undefined;
+  const allowedRows = rows.filter((row) => !matchesCustomBlacklist([
+    row.canonical_name, row.provider_address, row.province, row.city, row.district
+  ]));
   const coordinateRows = coordinates
-    ? rows.map((row) => ({ row, distanceKm: communityDistanceKm(coordinates, row) }))
+    ? allowedRows.map((row) => ({ row, distanceKm: communityDistanceKm(coordinates, row) }))
       .filter((candidate) => candidate.distanceKm <= MAX_COMMUNITY_DISTANCE_KM)
       .sort((left, right) => left.distanceKm - right.distanceKm)
       .map(({ row }) => row)
-    : rows;
+    : allowedRows;
   if (!coordinateRows.length) return undefined;
   const selected = coordinates ? coordinateRows[0] : coordinateRows[seedIndex(seed, coordinateRows.length)];
   return rowToAddress(selected);

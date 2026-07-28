@@ -15,13 +15,19 @@ export class SqliteCountryStateStore {
   }
 
   async load() {
+    const columns = (await this.database.prepare('PRAGMA table_info(sync_country_state)').all()).results;
+    const names = new Set(columns.map(({ name }) => name));
+    for (const [name, type] of [['source_version', 'TEXT'], ['failure_code', 'TEXT'], ['failure_signature', 'TEXT']]) {
+      if (!names.has(name)) await this.database.exec(`ALTER TABLE sync_country_state ADD COLUMN ${name} ${type}`);
+    }
     await this.database.batch(this.shards.map((shard) => this.database.prepare(`
       INSERT OR IGNORE INTO sync_country_state(country_code, status, failure_count, updated_at)
       VALUES (?, 'pending', 0, ?)
     `).bind(shard.countryCode, this.now().toISOString())));
     const result = await this.database.prepare(`
       SELECT country_code, status, last_success_at, next_sync_at, active_dataset_id,
-        address_count, residential_count, failure_count, last_error, updated_at
+        address_count, residential_count, failure_count, last_error, source_version,
+        failure_code, failure_signature, updated_at
       FROM sync_country_state
     `).all();
     const shards = {};
@@ -39,6 +45,9 @@ export class SqliteCountryStateStore {
         residentialCount: Number(row.residential_count || 0),
         failureCount: Number(row.failure_count || 0),
         error: row.last_error,
+        sourceVersion: row.source_version,
+        errorCode: row.failure_code,
+        failureSignature: row.failure_signature,
         lastChecked: row.updated_at
       };
     }
@@ -56,8 +65,9 @@ export class SqliteCountryStateStore {
       statements.push(this.database.prepare(`
         INSERT INTO sync_country_state(
           country_code, status, last_success_at, next_sync_at, active_dataset_id,
-          address_count, residential_count, failure_count, last_error, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          address_count, residential_count, failure_count, last_error, source_version,
+          failure_code, failure_signature, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(country_code) DO UPDATE SET
           status=excluded.status,
           last_success_at=coalesce(excluded.last_success_at, sync_country_state.last_success_at),
@@ -71,6 +81,9 @@ export class SqliteCountryStateStore {
             ELSE sync_country_state.failure_count
           END,
           last_error=excluded.last_error,
+          source_version=coalesce(excluded.source_version, sync_country_state.source_version),
+          failure_code=excluded.failure_code,
+          failure_signature=excluded.failure_signature,
           updated_at=excluded.updated_at
       `).bind(
         shard.countryCode,
@@ -82,6 +95,9 @@ export class SqliteCountryStateStore {
         Number(entry.residentialCount || 0),
         success ? 0 : 1,
         success ? null : String(entry.error || 'Address sync failed').slice(0, 1000),
+        entry.sourceVersion || null,
+        success ? null : entry.errorCode || null,
+        success ? null : entry.failureSignature || null,
         updatedAt
       ));
     }

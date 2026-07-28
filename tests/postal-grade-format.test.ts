@@ -40,6 +40,14 @@ const syntheticUnit = (variants: GeneratedUnit['variants']): GeneratedUnit => ({
 });
 
 describe('postal-grade formats per docs/address-formats.md', () => {
+  it('renders source-tagged numeric units with the country convention', () => {
+    const us = addressFor('US', {
+      admin1: 'California', admin1Code: 'CA', locality: 'Berkeley', street: 'College Avenue',
+      houseNumber: '2704', unit: '3', postcode: '94704'
+    });
+    expect(formatAddressPresentation(us, 'en', '').singleLine).toContain('2704 College Avenue Apt 3');
+  });
+
   it('renders Canada with the province abbreviation', () => {
     const address = addressFor('CA', {
       admin1: 'Ontario', admin1Code: 'ON', locality: 'Toronto',

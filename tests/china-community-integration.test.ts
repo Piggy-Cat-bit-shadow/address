@@ -112,13 +112,13 @@ describe('China community storage integration', () => {
     expect(new Set(address?.evidence.map((item) => item.sourceId))).toEqual(new Set(['amap', 'tencent']));
   });
 
-  it('does not publish duplicate POIs from a single provider as cross-verified', async () => {
+  it('publishes one strict Amap record without treating duplicate POIs as cross-provider evidence', async () => {
     const now = new Date().toISOString();
     await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
       provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       'community-single-provider', '望京花园', '望京', '北京市', '北京市', '朝阳区', '望京街道',
-      '阜通东大街6号', 116.463, 39.989, 'L2', 2, now, now, now
+      '阜通东大街6号', 116.463, 39.989, 'L1', 1, now, now, now
     ).run();
     for (const id of ['poi-1', 'poi-2']) {
       await addressDb.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
@@ -127,24 +127,28 @@ describe('China community storage integration', () => {
         'GCJ-02', `hash-${id}`, now, now
       ).run();
     }
-    expect(await pickChinaCommunityAddress(addressDb, { city: '北京市' }, 'seed')).toBeUndefined();
+    const address = await pickChinaCommunityAddress(addressDb, { city: '北京市' }, 'seed');
+    expect(address).toMatchObject({ verificationLevel: 'L1', components: { buildingName: '望京花园' } });
+    expect(new Set(address?.evidence.map((item) => item.sourceId))).toEqual(new Set(['amap']));
   });
 
   it.each([
-    ['a conflicting house number', '文化路18号', '文化路88号'],
-    ['a source without a house number', '文化路18号', '文化路'],
-    ['a conflicting lane premise', '虹桥路18弄1号', '虹桥路88弄1号']
-  ])('does not merge or cross-verify %s', async (_label, firstAddress, secondAddress) => {
+    ['a conflicting house number', '文化路18号', '文化路88号', 1, 2],
+    ['a source without a house number', '文化路18号', '文化路', 0, 1],
+    ['a conflicting lane premise', '虹桥路18弄1号', '虹桥路88弄1号', 1, 2]
+  ])('does not merge or cross-verify %s', async (_label, firstAddress, secondAddress, secondAccepted, rowCount) => {
     const service = new ChinaDataService(addressDb, control);
     expect(await upsertCandidate(service, candidate('amap', 'amap-18', firstAddress))).toBe(1);
-    expect(await upsertCandidate(service, candidate('baidu', 'baidu-other', secondAddress))).toBe(1);
+    expect(await upsertCandidate(service, candidate('baidu', 'baidu-other', secondAddress))).toBe(secondAccepted);
 
     const rows = (await addressDb.prepare(`SELECT provider_address,verification_level,source_count
       FROM cn_communities_v2 ORDER BY provider_address`).all<Record<string, unknown>>()).results;
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(rowCount);
     expect(rows.every((row) => row.verification_level === 'L1' && row.source_count === 1)).toBe(true);
-    expect(await countChinaCommunities(addressDb)).toBe(0);
-    expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'conflict')).toBeUndefined();
+    expect(await countChinaCommunities(addressDb)).toBe(1);
+    expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'conflict')).toMatchObject({
+      verificationLevel: 'L1', components: { street: firstAddress }
+    });
   });
 
   it('merges independent providers only when the road and house number agree', async () => {
@@ -171,15 +175,15 @@ describe('China community storage integration', () => {
       FROM cn_communities_v2 ORDER BY provider_address`).all<Record<string, unknown>>()).results;
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.verification_level === 'L1' && row.source_count === 1)).toBe(true);
-    expect(await countChinaCommunities(addressDb)).toBe(0);
+    expect(await countChinaCommunities(addressDb)).toBe(1);
   });
 
   it.each([
-    ['an expired community', daysAgo(181), daysAgo(1), daysAgo(1), 'L2'],
-    ['an invalid community date', 'not-a-date', daysAgo(1), daysAgo(1), 'L2'],
-    ['one expired source', daysAgo(1), daysAgo(1), daysAgo(181), 'L1'],
-    ['one invalid source date', daysAgo(1), daysAgo(1), 'not-a-date', 'L1']
-  ])('excludes %s from publication, counts, and status', async (_label, communitySeen, firstSeen, secondSeen, expectedLevel) => {
+    ['an expired community', daysAgo(181), daysAgo(1), daysAgo(1), 'L2', 0],
+    ['an invalid community date', 'not-a-date', daysAgo(1), daysAgo(1), 'L2', 0],
+    ['one expired secondary source', daysAgo(1), daysAgo(1), daysAgo(181), 'L1', 1],
+    ['one invalid secondary source date', daysAgo(1), daysAgo(1), 'not-a-date', 'L1', 1]
+  ])('applies source freshness correctly for %s', async (_label, communitySeen, firstSeen, secondSeen, expectedLevel, published) => {
     await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
       provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
@@ -198,10 +202,11 @@ describe('China community storage integration', () => {
     await service.initializeTargets();
     expect(await addressDb.prepare('SELECT verification_level FROM cn_communities_v2 WHERE id=?')
       .bind('freshness-community').first('verification_level')).toBe(expectedLevel);
-    expect(await countChinaCommunities(addressDb)).toBe(0);
-    expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toBeUndefined();
-    expect(await targetCount(service)).toBe(0);
-    expect(await service.status()).toMatchObject({ total: 0, cross_verified: 0, cities: 0 });
+    expect(await countChinaCommunities(addressDb)).toBe(published);
+    if (published) expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toMatchObject({ verificationLevel: 'L1' });
+    else expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toBeUndefined();
+    expect(await targetCount(service)).toBe(published);
+    expect(await service.status()).toMatchObject({ total: published, cross_verified: 0, cities: published });
   });
 
   it('publishes and counts a community backed by two fresh independent providers', async () => {
@@ -226,14 +231,14 @@ describe('China community storage integration', () => {
       addressDb.prepare(`INSERT INTO cn_admin_areas(adcode,parent_adcode,level,name,full_path,source_version,updated_at)
         VALUES (?,?,?,?,?,?,?)`).bind('110105', '110100', 'district', '朝阳区', '北京市/北京市/朝阳区', 'test', now)
     ]);
-    await control.addCredential({ provider: 'tencent', label: 'test', secret: 'test-key', qpsLimit: 5 });
+    await control.addCredential({ provider: 'amap', label: 'test', secret: 'test-key', qpsLimit: 5 });
     let requests = 0;
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
       requests += 1;
-      const page = Number(new URL(String(input)).searchParams.get('page_index'));
-      return new Response(JSON.stringify({ status: 0, data: page === 1 ? [{
-        id: 'poi-1', title: '望京花园', address: '阜通东大街6号', location: { lat: 39.995, lng: 116.47 },
-        ad_info: { province: '北京市', city: '北京市', district: '朝阳区' }
+      const page = Number(new URL(String(input)).searchParams.get('page_num'));
+      return new Response(JSON.stringify({ status: '1', pois: page === 1 ? [{
+        id: 'poi-1', name: '望京花园', address: '阜通东大街6号', location: '116.47,39.995',
+        pname: '北京市', cityname: '北京市', adname: '朝阳区', adcode: '110105', typecode: '120302'
       }] : [] }), { status: 200 });
     });
     const service = new ChinaDataService(addressDb, control);

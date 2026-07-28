@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { SqliteDatabase } from '../database/sqlite.mjs';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
+import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import type { ControlStore, ProviderName, ProviderQuotaObservation } from '../control/store';
 import { refreshAddressCoverage } from '../control/coverage';
 import {
@@ -11,7 +12,8 @@ import {
   chinaFreshTimestampClause
 } from '../api/repositories/china-community';
 import { distanceMeters } from './coordinates';
-import { providerFetcher, ProviderRequestError, type CommunityCandidate } from './providers';
+import { providerFetcher, ProviderRequestError, type CommunityCandidate, type ProviderPage } from './providers';
+import { isChinaDeliveryAddress, normalizeChinaDeliveryAddress } from './quality';
 import { getCountryPolicy } from '../sync/address-policy.mjs';
 
 export const initialChinaCities = [
@@ -50,10 +52,10 @@ const addressesAgree = (left: string, right: string): boolean => {
   return roadsAgree(addressRoads(normalizedLeft), addressRoads(normalizedRight));
 };
 const nowIso = (): string => new Date().toISOString();
-const providerNames = ['amap', 'baidu', 'tencent'] as const;
 const maxPagesPerTarget = 8;
 const maxAreaCityBytes = 128 * 1024 * 1024;
 const credentialRetryDelayMs = 400;
+const checkpointStrategyVersion = 'community-poi-v3';
 
 interface AreaNode {
   id?: string | number;
@@ -119,6 +121,10 @@ export class ChinaDataService {
   ) {}
 
   async initializeTargets(): Promise<void> {
+    const checkpointColumns = (await this.addressDb.prepare('PRAGMA table_info(cn_sync_checkpoints)').all<{ name: string }>()).results;
+    if (!checkpointColumns.some(({ name }) => name === 'strategy_version')) {
+      await this.addressDb.exec("ALTER TABLE cn_sync_checkpoints ADD COLUMN strategy_version TEXT NOT NULL DEFAULT ''");
+    }
     const now = nowIso();
     await this.addressDb.batch(initialChinaCities.map((city, index) => this.addressDb.prepare(`INSERT OR IGNORE INTO cn_sync_targets(
       city,province,priority,enabled,target_count,updated_at) VALUES (?,?,?,1,?,?)`).bind(city, '', index + 1, index < 31 ? 800 : 500, now)));
@@ -184,9 +190,9 @@ export class ChinaDataService {
         communities_needed: areas.reduce((total, area) => total + Math.max(10 - Number(area.current_count || 0), 0), 0)
       };
     }
-    const credentials = (await this.control.listCredentials()).filter((item) => item.enabled && item.status === 'healthy');
+    const credentials = (await this.control.listCredentials()).filter((item) => item.provider === 'amap' && item.enabled && item.status === 'healthy');
     const remaining = Number(coverage?.communities_needed || 0);
-    const estimatedRequests = Math.ceil(remaining / 20);
+    const estimatedRequests = Math.ceil(remaining / 25);
     const activeKeys = credentials.length;
     const estimatedMinutes = activeKeys ? Math.max(1, Math.ceil(estimatedRequests / activeKeys / 60)) : null;
     return { ...counts, sources, coverage, areas, usingFallback, running: this.running,
@@ -208,7 +214,7 @@ export class ChinaDataService {
     if (!targets.length) {
       targets.push(...initialChinaCities.map((city) => ({ id: city, province: '', city, district: '', query: city, targetCount: 10 })));
     }
-    const providers = (await this.control.availableProviders()).filter((provider) => providerNames.includes(provider));
+    const providers = (await this.control.availableProviders()).filter((provider) => provider === 'amap');
     if (!providers.length) throw new Error('NO_AVAILABLE_KEY');
     const runId = await this.control.createRun('china-communities', { mode: 'automatic', targets: targets.length, providers });
     this.running = true;
@@ -219,6 +225,7 @@ export class ChinaDataService {
   private async execute(runId: string, targets: SyncTarget[], providers: ProviderName[]): Promise<void> {
     let accepted = 0;
     let requests = 0;
+    let adapterRejectedPages = 0;
     const unavailable = new Set<ProviderName>();
     try {
       const policy = await getCountryPolicy(this.addressDb, 'CN');
@@ -236,16 +243,21 @@ export class ChinaDataService {
           if (unavailable.has(provider)) continue;
           const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
           for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
-            const candidates = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
-            if (!candidates) {
+            const result = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
+            if (!result) {
               unavailable.add(provider);
               break;
             }
-            if (!candidates.length) {
+            if (result.rawCount === 0) {
               await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted);
               break;
             }
-            for (const candidate of candidates) {
+            if (!result.candidates.length) {
+              adapterRejectedPages += 1;
+              await this.writeCheckpoint(provider, target.id, page, 'adapter_rejected_all', accepted, `raw_count=${result.rawCount}`);
+              break;
+            }
+            for (const candidate of result.candidates) {
               if (await this.hierarchyValid(candidate, target)) accepted += await this.upsertCandidate(candidate);
             }
             await this.writeCheckpoint(provider, target.id, page + 1, 'baseline', accepted);
@@ -268,10 +280,15 @@ export class ChinaDataService {
           if (unavailable.has(provider)) continue;
           const firstPage = await this.resumePage(provider, target.id, maxPagesPerTarget);
           for (let page = firstPage; page <= maxPagesPerTarget; page += 1) {
-            const candidates = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
-            if (!candidates) { unavailable.add(provider); break; }
-            if (!candidates.length) { await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted); break; }
-            for (const candidate of candidates) {
+            const result = await this.fetchPage(provider, target, page, accepted, async () => { requests += 1; });
+            if (!result) { unavailable.add(provider); break; }
+            if (result.rawCount === 0) { await this.writeCheckpoint(provider, target.id, page, 'exhausted', accepted); break; }
+            if (!result.candidates.length) {
+              adapterRejectedPages += 1;
+              await this.writeCheckpoint(provider, target.id, page, 'adapter_rejected_all', accepted, `raw_count=${result.rawCount}`);
+              break;
+            }
+            for (const candidate of result.candidates) {
               if (await this.hierarchyValid(candidate, target)) accepted += await this.upsertCandidate(candidate);
             }
             await this.writeCheckpoint(provider, target.id, page + 1, 'enrichment', accepted);
@@ -284,7 +301,9 @@ export class ChinaDataService {
           return;
         }
       }
-      await this.control.updateRun(runId, 'succeeded', { phase: 'complete', accepted, requests, targets: targets.length, providers: providers.length });
+      await this.control.updateRun(runId, adapterRejectedPages ? 'needs_review' : 'succeeded', {
+        phase: 'complete', accepted, requests, targets: targets.length, providers: providers.length, adapterRejectedPages
+      });
     } catch (error) {
       await this.control.updateRun(runId, 'failed', { accepted, requests }, {
         code: error instanceof Error ? error.name : 'SYNC_ERROR', message: error instanceof Error ? error.message : String(error)
@@ -326,9 +345,10 @@ export class ChinaDataService {
   }
 
   private async resumePage(provider: ProviderName, city: string, maxPages: number): Promise<number> {
-    const checkpoint = await this.addressDb.prepare(`SELECT page,status FROM cn_sync_checkpoints
-      WHERE provider=? AND city=?`).bind(provider, city).first<{ page: number; status: string }>();
+    const checkpoint = await this.addressDb.prepare(`SELECT page,status,strategy_version FROM cn_sync_checkpoints
+      WHERE provider=? AND city=?`).bind(provider, city).first<{ page: number; status: string; strategy_version: string }>();
     if (!checkpoint) return 1;
+    if (checkpoint.strategy_version !== checkpointStrategyVersion) return 1;
     if (checkpoint.status === 'exhausted') return maxPages + 1;
     return Math.max(1, Math.min(maxPages + 1, Math.trunc(checkpoint.page || 1)));
   }
@@ -339,7 +359,7 @@ export class ChinaDataService {
     page: number,
     accepted: number,
     requested: () => Promise<void>
-  ): Promise<CommunityCandidate[] | null> {
+  ): Promise<ProviderPage | null> {
     let lastError = '';
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const credential = await this.control.acquireCredential(provider);
@@ -354,10 +374,10 @@ export class ChinaDataService {
       try {
         let quotaObservation: ProviderQuotaObservation | undefined;
         const region = provider === 'amap' && /^\d{6}$/u.test(target.id) ? target.id : target.query;
-        const candidates = await providerFetcher[provider](region, page, credential.secret, fetch, (value) => { quotaObservation = value; });
+        const result = await providerFetcher[provider](region, page, credential.secret, fetch, (value) => { quotaObservation = value; });
         await requested();
         await this.control.reportCredential(credential.id, 'success', quotaObservation);
-        return candidates;
+        return result;
       } catch (error) {
         await requested();
         const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
@@ -370,10 +390,11 @@ export class ChinaDataService {
   }
 
   private async writeCheckpoint(provider: string, city: string, page: number, status: string, accepted: number, error = ''): Promise<void> {
-    await this.addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,last_error,updated_at)
-      VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider,city) DO UPDATE SET page=excluded.page,status=excluded.status,
-      accepted_count=excluded.accepted_count,last_error=excluded.last_error,updated_at=excluded.updated_at`)
-      .bind(provider, city, page, status, accepted, error.slice(0, 500) || null, nowIso()).run();
+    await this.addressDb.prepare(`INSERT INTO cn_sync_checkpoints(provider,city,page,status,accepted_count,last_error,updated_at,strategy_version)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(provider,city) DO UPDATE SET page=excluded.page,status=excluded.status,
+      accepted_count=excluded.accepted_count,last_error=excluded.last_error,updated_at=excluded.updated_at,
+      strategy_version=excluded.strategy_version`)
+      .bind(provider, city, page, status, accepted, error.slice(0, 500) || null, nowIso(), checkpointStrategyVersion).run();
   }
 
   private async hierarchyValid(candidate: CommunityCandidate, target?: SyncTarget): Promise<boolean> {
@@ -405,9 +426,12 @@ export class ChinaDataService {
   }
 
   private async upsertCandidate(candidate: CommunityCandidate): Promise<number> {
-    if (!candidate.name || !candidate.address || !candidate.province || !candidate.city || !candidate.district
+    const address = normalizeChinaDeliveryAddress(candidate.address);
+    if (!candidate.name || !isChinaDeliveryAddress(address) || !candidate.province || !candidate.city || !candidate.district
       || !Number.isFinite(candidate.latitude) || !Number.isFinite(candidate.longitude)
-      || findNonResidentialMatch({ countryCode: 'CN', buildingName: candidate.name }).excluded) return 0;
+      || findNonResidentialMatch({ countryCode: 'CN', buildingName: candidate.name, formattedAddress: address }).excluded
+      || matchesCustomBlacklist([candidate.name, address, candidate.province, candidate.city, candidate.district])) return 0;
+    candidate = { ...candidate, address };
     if (!await this.hierarchyValid(candidate)) return 0;
     const existingSource = await this.addressDb.prepare(`SELECT source.community_id,community.provider_address
       FROM cn_community_sources source JOIN cn_communities_v2 community ON community.id=source.community_id

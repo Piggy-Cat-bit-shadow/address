@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import { Worker } from 'node:worker_threads';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { SqliteDatabase } from '../database/sqlite.mjs';
@@ -6,7 +7,9 @@ import type { ChinaDataService } from '../china/service';
 import { providerFetcher, ProviderRequestError } from '../china/providers';
 import { safeEqual } from './security';
 import type { BrowserMapCredentialInput, BrowserMapCredentialUpdate, ControlStore, CredentialInput, CredentialProviderName, MapDisplayConfig, ProviderName, ProviderQuotaObservation } from './store';
-import { listAddressCoverage, refreshAddressCoverage } from './coverage';
+import { listAddressCoverage } from './coverage';
+import { nonResidentialRules } from '../../src/domain/non-residential-rules.mjs';
+import { customBlacklistKeywords, replaceCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import {
   deleteNodePolicy, getRuntimePolicy, listCountryPolicies, listNodePolicies,
   updateCountryPolicy, updateRuntimePolicy, upsertNodePolicy
@@ -167,14 +170,42 @@ export const createAdminApi = ({
 }) => {
   const app = new Hono<{ Bindings: RequestBindings }>();
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
-  let coverageRefreshedAt = 0;
+  const coverageMaxAgeMs = 5 * 60_000;
   let coverageRefresh: Promise<void> | undefined;
+  const startCoverageRefresh = (): Promise<void> => {
+    coverageRefresh ||= new Promise<void>((resolveRefresh, rejectRefresh) => {
+      const worker = new Worker(new URL('./coverage-worker.ts', import.meta.url), {
+        execArgv: ['--import', 'tsx'], workerData: { databasePath: addressDatabasePath }
+      });
+      let settled = false;
+      const settle = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (error) rejectRefresh(error);
+        else resolveRefresh();
+      };
+      worker.once('message', () => settle());
+      worker.once('error', (error) => settle(error instanceof Error ? error : new Error(String(error))));
+      worker.once('exit', (code) => {
+        if (code !== 0) settle(new Error(`COVERAGE_REFRESH_WORKER_EXIT_${code}`));
+      });
+    }).finally(() => { coverageRefresh = undefined; });
+    return coverageRefresh;
+  };
   const ensureCoverage = async (force = false): Promise<void> => {
-    const total = await addressDb.prepare('SELECT COUNT(*) AS total FROM admin_coverage_stats').first<number>('total');
-    if (!force && total && Date.now() - coverageRefreshedAt < 5 * 60_000) return;
-    coverageRefresh ||= refreshAddressCoverage(addressDb).finally(() => { coverageRefresh = undefined; });
-    await coverageRefresh;
-    coverageRefreshedAt = Date.now();
+    const snapshot = await addressDb.prepare(`SELECT COUNT(*) AS total,MAX(updated_at) AS updated_at
+      FROM admin_coverage_stats`).first<{ total: number; updated_at: string | null }>();
+    if (!Number(snapshot?.total || 0)) {
+      await startCoverageRefresh();
+      return;
+    }
+    if (force) await startCoverageRefresh();
+    else {
+      const updatedAt = Date.parse(snapshot?.updated_at || '');
+      if (!Number.isFinite(updatedAt) || Date.now() - updatedAt >= coverageMaxAgeMs) {
+        void startCoverageRefresh().catch(() => undefined);
+      }
+    }
   };
 
   app.onError((error, context) => {
@@ -288,6 +319,19 @@ export const createAdminApi = ({
   });
 
   app.get('/admin/api/settings/access', async (context) => context.json({ data: await control.status() }));
+  app.get('/admin/api/settings/blacklist', (context) => context.json({ data: {
+    keywords: customBlacklistKeywords(),
+    builtIn: Object.entries(nonResidentialRules).map(([category, rule]) => ({
+      category,
+      terms: [...new Set([...(rule.terms.zh || []), ...(rule.terms.en || [])])]
+    }))
+  } }));
+  app.put('/admin/api/settings/blacklist', async (context) => {
+    const input = await context.req.json<{ keywords?: unknown[] }>();
+    const keywords = replaceCustomBlacklist(input.keywords ?? []);
+    await control.audit('admin', 'settings.blacklist.update', 'address-filter', { keywordCount: keywords.length });
+    return context.json({ data: { keywords } });
+  });
   app.put('/admin/api/settings/access', async (context) => {
     const input = await context.req.json<{
       frontendPasswordEnabled?: boolean; frontendPassword?: string; frontendPasswordConfirmation?: string;
@@ -391,8 +435,8 @@ export const createAdminApi = ({
       if (credential.provider === 'onemap') resolved = await testOneMapCredential(credential.secret);
       else if (isMapProvider(credential.provider)) {
         let quota: ProviderQuotaObservation | undefined;
-        const items = await providerFetcher[credential.provider]('北京市', 1, credential.secret, fetch, (value) => { quota = value; });
-        resolved = { success: true, resultCount: items.length, quota };
+        const result = await providerFetcher[credential.provider]('北京市', 1, credential.secret, fetch, (value) => { quota = value; });
+        resolved = { success: true, resultCount: result.candidates.length, quota };
       } else resolved = { success: false, resultCount: 0 };
       await control.reportCredential(credential.id, 'success', 'quota' in resolved ? resolved.quota : undefined);
       return context.json({ data: resolved });

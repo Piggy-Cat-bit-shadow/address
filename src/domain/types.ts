@@ -60,6 +60,7 @@ export interface LocationOption {
 export type AddressFilterField = 'region' | 'city' | 'postcode';
 export type AddressResultField =
   | 'country'
+  | 'buildingName'
   | 'street'
   | 'completeAddress'
   | 'locality'
@@ -160,16 +161,13 @@ export interface VerifiedAddress {
   unitStatus: UnitStatus;
   unitProvenance?: 'official' | 'source_tagged' | 'synthetic' | 'none';
   matchLevel: 'premise' | 'subpremise';
-  verificationLevel: 'L2' | 'L3';
+  verificationLevel: 'L1' | 'L2' | 'L3';
   sourceVersion: string;
   sourceUpdatedAt: string;
   verifiedAt: string;
   expiresAt: string;
   evidence: AddressEvidence[];
   exclusionFlags: string[];
-  // Real residential communities near the point (CN only, attached at read time);
-  // the generator picks one deterministically for the synthetic community name.
-  nearbyCommunities?: Array<{ zh: string; en: string }>;
 }
 
 export interface AddressPresentation {

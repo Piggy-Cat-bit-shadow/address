@@ -21,7 +21,7 @@
 - 银行卡:废弃 Stripe fixture,改 Luhn 合规多网络随机卡(Visa/MC/Amex/Discover/JCB/UnionPay)
 - 实时 API 全局开关:LIVE_API_MODES 环境变量 + 前端勾选框(?live=true)
 - 资料三语切换:基本/工作/财务/网络资料值可切 原文/English/中文,标签跟随页面语言
-- 自定义黑名单:config/blacklist.txt 热加载
+- 自定义黑名单：`data/blacklist.txt` 热加载
 - 翻译回填 worker:空闲时补街道级翻译(TRANSLATION_BACKFILL_ENABLED)
 
 ## 最终数据(2026-07-18)

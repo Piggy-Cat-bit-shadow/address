@@ -1,3 +1,4 @@
-export declare const customBlacklistPath: () => string;
-export declare const customBlacklistKeywords: (now?: number) => string[];
-export declare const matchesCustomBlacklist: (values: Array<string | undefined | null>) => string | null;
+export function customBlacklistPath(): string;
+export function customBlacklistKeywords(now?: number): string[];
+export function matchesCustomBlacklist(values: unknown[]): string | null;
+export function replaceCustomBlacklist(values: unknown[]): string[];

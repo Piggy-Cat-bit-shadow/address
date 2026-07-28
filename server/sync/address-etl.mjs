@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../database/sqlite.mjs';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { pinyin } from 'pinyin-pro';
-import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
+import { createSourceAdapters, loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
-import { SqliteAddressImporter } from './sqlite-address-importer.mjs';
+import { ADDRESS_IMPORT_REVISION, SqliteAddressImporter } from './sqlite-address-importer.mjs';
 import { SqliteCountryStateStore } from './sqlite-country-state.mjs';
 import {
   assertStorageBudget,
@@ -19,6 +19,7 @@ import {
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import { ADDRESS_POLICY_DEFAULTS, getRuntimePolicy, loadImportPolicy } from './address-policy.mjs';
+import { normalizeAddressFacts } from '../../src/domain/address-quality.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const defaultCacheDir = resolve(syncRoot, '../../.data-cache/address-sync');
@@ -38,6 +39,13 @@ const integer = (value, fallback, minimum = 1) => {
   return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : fallback;
 };
 const boolean = (value, fallback = false) => value === undefined ? fallback : /^(1|true|yes)$/iu.test(String(value));
+const sourceQualityFailureSignature = (shard, discovery) => [
+  shard.id,
+  discovery.adapter,
+  sourceAdapterRevisions[discovery.adapter] || 'external',
+  discovery.version,
+  ADDRESS_IMPORT_REVISION
+].join(':');
 
 export const mapConcurrent = async (values, concurrency, worker) => {
   const output = new Array(values.length);
@@ -55,6 +63,8 @@ export const mapConcurrent = async (values, concurrency, worker) => {
 
 export const formattedAddress = (components, countryCode) => [
   [components.houseNumber, components.street].filter(Boolean).join(' '),
+  components.buildingName,
+  components.unit,
   components.district,
   components.locality,
   components.admin1,
@@ -66,7 +76,7 @@ const displayNames = {
   en: new Intl.DisplayNames(['en'], { type: 'region' }),
   zh: new Intl.DisplayNames(['zh-CN'], { type: 'region' })
 };
-export const localizedFields = ['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName'];
+export const localizedFields = ['admin1', 'locality', 'postalLocality', 'district', 'street', 'buildingName', 'unit'];
 const nonLatinScript = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Thai}\p{Script=Cyrillic}]/u;
 const han = /\p{Script=Han}/u;
 const letters = /\p{L}/u;
@@ -91,8 +101,10 @@ export const localizedFormattedAddress = (components, countryCode, language) => 
   const values = language === 'zh-CN'
     ? [displayNames.zh.of(countryCode), components.admin1, components.locality, components.postalLocality,
       components.district, components.street, components.houseNumber, components.buildingName,
+      components.unit,
       countryCode === 'CN' ? '' : components.postcode]
     : [[components.houseNumber, components.street].filter(Boolean).join(' '), components.buildingName,
+      components.unit,
       components.district, components.postalLocality || components.locality, components.admin1,
       countryCode === 'CN' ? '' : components.postcode, displayNames.en.of(countryCode)];
   return values.filter(Boolean).filter((value, index, all) => index === 0 || value !== all[index - 1])
@@ -319,6 +331,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
   let street;
   let houseNumber;
   let buildingName = '';
+  let unit = '';
   let longitude;
   let latitude;
   let propertyType = 'unknown';
@@ -334,8 +347,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
     postcode = shard.countryCode === 'CN' ? '' : clean(value.postcode);
     street = clean(value.street);
     houseNumber = clean(value.number).normalize('NFKC');
-    buildingName = clean(value.unit);
-    if (/^(?:apt|apartment|unit|ste|suite|fl|floor|bldg|building|#|no\.?)$/iu.test(buildingName)) buildingName = '';
+    unit = clean(value.unit);
     longitude = Number(value.longitude);
     latitude = Number(value.latitude);
     const overturePropertyType = clean(value.property_type).toLowerCase();
@@ -358,7 +370,8 @@ export const normalizeSourceRecord = (value, shard, format) => {
     postcode = shard.countryCode === 'CN' ? '' : clean(properties['addr:postcode']);
     street = clean(properties['addr:street'] || properties['addr:place']);
     houseNumber = clean(properties['addr:housenumber']).normalize('NFKC');
-    buildingName = clean(properties['addr:unit'] || properties['addr:flats'] || properties.name);
+    unit = clean(properties['addr:unit'] || properties['addr:flats']);
+    buildingName = clean(properties.name);
     longitude = Number(point?.[0]);
     latitude = Number(point?.[1]);
     const building = clean(properties.building).toLowerCase();
@@ -371,7 +384,9 @@ export const normalizeSourceRecord = (value, shard, format) => {
     throw new Error(`Unsupported normalized source format: ${format}`);
   }
   if (!sourceRecordId || !street || !houseNumber || !finiteCoordinate(longitude, -180, 180) || !finiteCoordinate(latitude, -90, 90)) return null;
-  const components = { houseNumber, street, buildingName, district, locality, postalLocality, admin1, postcode };
+  const components = normalizeAddressFacts(shard.countryCode, {
+    houseNumber, street, buildingName, unit, district, locality, postalLocality, admin1, postcode
+  });
   const englishComponentHints = {};
   if (shard.countryCode === 'HK') {
     for (const field of localizedFields) {
@@ -380,7 +395,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
       components[field] = split.native;
       englishComponentHints[field] = split.en;
     }
-    ({ admin1, locality, postalLocality, district, street, buildingName } = components);
+    ({ admin1, locality, postalLocality, district, street, buildingName, unit } = components);
   }
   if (findNonResidentialMatch({
     countryCode: shard.countryCode,
@@ -390,7 +405,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
   }).excluded) return null;
   if (matchesCustomBlacklist([buildingName, formattedAddress(components, shard.countryCode), street])) return null;
   const canonicalHash = sha256([
-    shard.countryCode, admin1, locality, postcode, street, houseNumber,
+    shard.countryCode, admin1, locality, postcode, street, houseNumber, unit,
     longitude.toFixed(6), latitude.toFixed(6)
   ].map((part) => clean(part).toLocaleLowerCase('und')).join('\u001f'));
   return {
@@ -408,6 +423,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
     street,
     houseNumber,
     buildingName,
+    unit,
     propertyType,
     residentialSourceRecordId,
     residentialSourceClass,
@@ -571,22 +587,28 @@ export const runAddressEtl = async ({
   const plannedRawArtifacts = new Set();
   const disabledCountries = new Set();
   const syncErrors = [];
-  const failureReport = (task, error) => ({
-    ...task.previous,
-    shardId: task.shard.id,
-    shardKey: task.shard.id,
-    sourceId: task.shard.source.id,
-    countryCode: task.shard.countryCode,
-    intervalDays: task.shard.intervalDays,
-    lastChecked: checkedAt.toISOString(),
-    sourceVersion: task.discovery?.version || task.previous?.sourceVersion || null,
-    sourceBytes: task.discovery?.sourceBytes ?? task.previous?.sourceBytes ?? null,
-    status: 'failed',
-    error: error instanceof Error ? error.message : String(error),
-    errorCode: error?.code || (estimate ? 'SOURCE_ESTIMATE_FAILED' : 'SYNC_FAILED'),
-    errorUrl: error?.url || null,
-    errorStatus: error?.status ?? null
-  });
+  const failureReport = (task, error) => {
+    const errorCode = error?.code || (estimate ? 'SOURCE_ESTIMATE_FAILED' : 'SYNC_FAILED');
+    return {
+      ...task.previous,
+      shardId: task.shard.id,
+      shardKey: task.shard.id,
+      sourceId: task.shard.source.id,
+      countryCode: task.shard.countryCode,
+      intervalDays: task.shard.intervalDays,
+      lastChecked: checkedAt.toISOString(),
+      sourceVersion: task.discovery?.version || task.previous?.sourceVersion || null,
+      sourceBytes: task.discovery?.sourceBytes ?? task.previous?.sourceBytes ?? null,
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+      errorCode,
+      failureSignature: errorCode === 'SOURCE_QUALITY_FAILED'
+        ? error?.failureSignature || task.discovery?.failureSignature || null
+        : null,
+      errorUrl: error?.url || null,
+      errorStatus: error?.status ?? null
+    };
+  };
   const recordFailure = async (task, error) => {
     console.error(`[address-sync] ${task.shard.countryCode} failed`, error);
     const report = failureReport(task, error);
@@ -623,12 +645,31 @@ export const runAddressEtl = async ({
     const discovered = await mapConcurrent(work, runtimePolicy.prepareConcurrency, async (task) => {
       try {
         console.log(`[address-sync] ${task.shard.countryCode} discover`);
-        return { ...task, discovery: await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir }) };
+        const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir });
+        const discovery = {
+          ...discoveredSource,
+          failureSignature: sourceQualityFailureSignature(task.shard, discoveredSource)
+        };
+        return { ...task, discovery };
       } catch (error) { return { ...task, error }; }
     });
     const planned = [];
     for (const task of discovered) {
       if (task.error) { await recordFailure(task, task.error); continue; }
+      if (task.previous?.errorCode === 'SOURCE_QUALITY_FAILED'
+        && task.previous.failureSignature === task.discovery.failureSignature) {
+        reports.push({
+          ...task.previous,
+          shardId: task.shard.id,
+          shardKey: task.shard.id,
+          sourceId: task.shard.source.id,
+          countryCode: task.shard.countryCode,
+          sourceVersion: task.discovery.version,
+          status: 'source-quality-failed',
+          skipped: true
+        });
+        continue;
+      }
       const estimatedOutputBytes = task.policy.targetCount * 2048;
       const estimatedDatabaseBytes = task.policy.targetCount * 2048;
       const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.version || ''}`;

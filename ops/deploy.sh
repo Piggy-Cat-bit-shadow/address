@@ -87,8 +87,8 @@ echo "==> uploading"
 scp_retry "$TARBALL" "$REMOTE:$RUNTIME/"
 $WITH_DIST && scp_retry /tmp/dist-$REL.tar.gz "$REMOTE:$RUNTIME/"
 
-echo "==> extracting (server blacklist and dist are preserved unless --dist)"
-ssh_retry "cd $APP && tar --exclude=dist --exclude=config/blacklist.txt -xzf $RUNTIME/address-$REL.tar.gz && echo $REL > RELEASE"
+echo "==> extracting (server data and dist are preserved unless --dist)"
+ssh_retry "cd $APP && tar --exclude=dist --exclude=data -xzf $RUNTIME/address-$REL.tar.gz && echo $REL > RELEASE"
 if $WITH_DIST; then
   ssh_retry "cd $APP && rm -rf dist && tar -xzf $RUNTIME/dist-$REL.tar.gz"
 fi

@@ -104,7 +104,8 @@ describe('country postal formats and language variants', () => {
       expect(schema.filters.length, country.code).toBeGreaterThan(0);
       expect(new Set(schema.filters).size, country.code).toBe(schema.filters.length);
       expect(schema.filters.every((field) => ['region', 'city', 'postcode'].includes(field)), country.code).toBe(true);
-      expect(schema.resultFields[0].field, country.code).toBe('street');
+      expect(schema.resultFields[0].field, country.code).toBe(country.code === 'CN' ? 'buildingName' : 'street');
+      if (country.code === 'CN') expect(schema.resultFields[1].field).toBe('street');
       expect(schema.resultFields.at(-1)?.field, country.code).toBe('completeAddress');
       expect(new Set(schema.resultFields.map(({ field }) => field)).size, country.code).toBe(schema.resultFields.length);
       expect(schema.resultFields.map(({ field }) => hierarchy.indexOf(field)), country.code)

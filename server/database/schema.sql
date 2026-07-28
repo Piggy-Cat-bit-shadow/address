@@ -217,6 +217,9 @@ CREATE TABLE IF NOT EXISTS sync_country_state (
   residential_count INTEGER NOT NULL DEFAULT 0 CHECK (residential_count >= 0),
   failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
   last_error TEXT,
+  source_version TEXT,
+  failure_code TEXT,
+  failure_signature TEXT,
   updated_at TEXT NOT NULL
 );
 
@@ -283,6 +286,7 @@ CREATE TABLE IF NOT EXISTS cn_sync_checkpoints (
   accepted_count INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   updated_at TEXT NOT NULL,
+  strategy_version TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (provider, city)
 );
 

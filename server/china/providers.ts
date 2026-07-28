@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { bd09ToWgs84, gcj02ToWgs84 } from './coordinates';
+import { isChinaDeliveryAddress, normalizeChinaDeliveryAddress } from './quality';
 import type { ProviderName, ProviderQuotaObservation } from '../control/store';
 
 export interface CommunityCandidate {
@@ -19,6 +20,11 @@ export interface CommunityCandidate {
   responseHash: string;
   typecode: string;
   adcode: string;
+}
+
+export interface ProviderPage {
+  candidates: CommunityCandidate[];
+  rawCount: number;
 }
 
 export class ProviderRequestError extends Error {
@@ -62,9 +68,9 @@ const requestJson = async (url: URL, fetcher: typeof fetch): Promise<{ body: unk
   try { return { body: await response.json(), headers: response.headers }; } catch { throw new ProviderRequestError('invalid', 'INVALID_JSON'); }
 };
 
-export const fetchAmapCommunities = async (region: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver): Promise<CommunityCandidate[]> => {
+export const fetchAmapCommunities = async (region: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver): Promise<ProviderPage> => {
   const url = new URL('https://restapi.amap.com/v5/place/text');
-  Object.entries({ key, keywords: '住宅小区', region, types: '120302', city_limit: 'true', page_size: '25', page_num: String(page), show_fields: 'business' })
+  Object.entries({ key, region, types: '120302', city_limit: 'true', page_size: '25', page_num: String(page), show_fields: 'business' })
     .forEach(([name, value]) => url.searchParams.set(name, value));
   const { body } = await requestJson(url, fetcher) as { body: { status?: string; infocode?: string; info?: string; pois?: Array<Record<string, unknown>> }; headers: Headers };
   if (body.status !== '1') {
@@ -72,21 +78,25 @@ export const fetchAmapCommunities = async (region: string, page: number, key: st
       : ['10001', '10002', '10007', '10009', '10012', '10013'].includes(body.infocode || '') ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.info || body.infocode, [key]));
   }
-  return (body.pois || []).map((item) => {
+  const pois = body.pois || [];
+  const candidates = pois.map((item) => {
     const [rawLongitude, rawLatitude] = clean(item.location).split(',').map(Number);
     if (!Number.isFinite(rawLatitude) || !Number.isFinite(rawLongitude)) return null;
     const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
     const typecode = clean(item.typecode); const adcode = clean(item.adcode);
     if (typecode !== '120302' || (/^\d{6}$/u.test(region) && adcode !== region)) return null;
+    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    if (!isChinaDeliveryAddress(address)) return null;
     return {
-      provider: 'amap' as const, providerPoiId: clean(item.id), name: clean(item.name), address: clean(item.address),
+      provider: 'amap' as const, providerPoiId: clean(item.id), name: clean(item.name), address,
       province: clean(item.pname), city: clean(item.cityname), district: clean(item.adname), township: '',
       latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'GCJ-02' as const, responseHash: hash(item), typecode, adcode
     };
   }).filter(presentCandidate);
+  return { candidates, rawCount: pois.length };
 };
 
-export const fetchTencentCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, observeQuota?: QuotaObserver): Promise<CommunityCandidate[]> => {
+export const fetchTencentCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, observeQuota?: QuotaObserver): Promise<ProviderPage> => {
   const url = new URL('https://apis.map.qq.com/ws/place/v1/search');
   Object.entries({ key, keyword: '住宅小区', boundary: `region(${city},0)`, page_size: '20', page_index: String(page) })
     .forEach(([name, value]) => url.searchParams.set(name, value));
@@ -101,7 +111,8 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
     const outcome = body.status === 120 ? 'qps' : body.status === 121 ? 'quota' : [110, 111, 112].includes(Number(body.status)) ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]));
   }
-  return (body.data || []).map((item) => {
+  const data = body.data || [];
+  const candidates = data.map((item) => {
     const location = item.location as Record<string, unknown> | undefined;
     const admin = item.ad_info as Record<string, unknown> | undefined;
     const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
@@ -114,9 +125,10 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
       typecode: clean(item.category), adcode: clean(admin?.adcode)
     };
   }).filter(presentCandidate);
+  return { candidates, rawCount: data.length };
 };
 
-export const fetchBaiduCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver): Promise<CommunityCandidate[]> => {
+export const fetchBaiduCommunities = async (city: string, page: number, key: string, fetcher: typeof fetch = fetch, _observeQuota?: QuotaObserver): Promise<ProviderPage> => {
   const url = new URL('https://api.map.baidu.com/place/v2/search');
   Object.entries({ ak: key, query: '住宅小区', region: city, scope: '2', page_size: '20', page_num: String(Math.max(0, page - 1)), output: 'json' })
     .forEach(([name, value]) => url.searchParams.set(name, value));
@@ -125,7 +137,8 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
     const outcome = body.status === 302 ? 'quota' : body.status === 301 ? 'qps' : [101, 102, 200, 201].includes(Number(body.status)) ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]));
   }
-  return (body.results || []).map((item) => {
+  const results = body.results || [];
+  const candidates = results.map((item) => {
     const location = item.location as Record<string, unknown> | undefined;
     const detail = item.detail_info as Record<string, unknown> | undefined;
     const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
@@ -138,6 +151,7 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
       typecode: clean(detail?.tag), adcode: clean(item.adcode)
     };
   }).filter(presentCandidate);
+  return { candidates, rawCount: results.length };
 };
 
 export const providerFetcher = {
