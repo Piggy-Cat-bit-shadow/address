@@ -190,6 +190,9 @@ try {
   await page.locator('.admin-notice').filter({ hasText: '地图密钥已保存' }).waitFor();
   const providerRow = () => page.locator('tbody tr').filter({ hasText: 'e2e-amap' });
   await providerRow().waitFor();
+  await providerRow().getByText('每月', { exact: false }).waitFor();
+  await providerRow().getByText('0 / 5,000', { exact: true }).waitFor();
+  await providerRow().getByText('本地统计', { exact: false }).waitFor();
   assert.equal((await providerRow().textContent()).includes('fake-key-for-e2e'), false);
   const providerSecretCell = providerRow().locator('.secret-cell');
   await providerSecretCell.getByRole('button', { name: '显示', exact: true }).click();

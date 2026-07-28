@@ -18,7 +18,7 @@ Except for `/api/v1/health`, external API requests use an administrator-created 
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-Tokens are created in `/admin/`, stored as hashes, can be scoped/rate-limited/revoked, and are displayed only once. The WebUI uses its own `/web-api/v1` session channel and never embeds this token.
+Tokens are created in `/admin/`. The server stores both an irreversible authentication hash and ciphertext protected by the server master key. An administrator can set scopes, rate limits, and expiry, then reveal, edit, or revoke a token in an authenticated session. The WebUI uses its own `/web-api/v1` session channel and never embeds this token. Authentication failures return `401`; per-token rate-limit exhaustion returns `429` with `Retry-After: 60`.
 
 ## External endpoints
 

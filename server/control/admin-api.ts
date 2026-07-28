@@ -5,7 +5,7 @@ import type { SqliteDatabase } from '../database/sqlite.mjs';
 import type { ChinaDataService } from '../china/service';
 import { providerFetcher, ProviderRequestError } from '../china/providers';
 import { safeEqual } from './security';
-import type { BrowserMapCredentialInput, BrowserMapCredentialUpdate, ControlStore, CredentialProviderName, MapDisplayConfig, ProviderName } from './store';
+import type { BrowserMapCredentialInput, BrowserMapCredentialUpdate, ControlStore, CredentialInput, CredentialProviderName, MapDisplayConfig, ProviderName, ProviderQuotaObservation } from './store';
 import { listAddressCoverage, refreshAddressCoverage } from './coverage';
 
 const adminCookie = 'address_admin_session';
@@ -318,7 +318,7 @@ export const createAdminApi = ({
 
   app.get('/admin/api/providers', async (context) => context.json({ data: await control.listCredentials() }));
   app.post('/admin/api/providers', async (context) => {
-    const input = await context.req.json<{ provider: CredentialProviderName; label: string; secret: string; weight?: number; qpsLimit?: number; dailyLimit?: number; quotaScopeId?: string }>();
+    const input = await context.req.json<CredentialInput>();
     const id = await control.addCredential(input);
     await control.audit('admin', 'provider_key.create', id, { provider: input.provider });
     return context.json({ data: { id } }, 201);
@@ -344,13 +344,15 @@ export const createAdminApi = ({
       : await control.acquireCredentialById(value);
     if (!credential) return context.json({ error: 'NO_AVAILABLE_KEY' }, 409);
     try {
-      const result = credential.provider === 'onemap'
-        ? await testOneMapCredential(credential.secret)
-        : isMapProvider(credential.provider)
-          ? { success: true, resultCount: (await providerFetcher[credential.provider]('北京市', 1, credential.secret)).length }
-          : { success: false, resultCount: 0 };
-      await control.reportCredential(credential.id, 'success');
-      return context.json({ data: result });
+      let resolved: { success: boolean; resultCount: number; quota?: ProviderQuotaObservation };
+      if (credential.provider === 'onemap') resolved = await testOneMapCredential(credential.secret);
+      else if (isMapProvider(credential.provider)) {
+        let quota: ProviderQuotaObservation | undefined;
+        const items = await providerFetcher[credential.provider]('北京市', 1, credential.secret, fetch, (value) => { quota = value; });
+        resolved = { success: true, resultCount: items.length, quota };
+      } else resolved = { success: false, resultCount: 0 };
+      await control.reportCredential(credential.id, 'success', 'quota' in resolved ? resolved.quota : undefined);
+      return context.json({ data: resolved });
     } catch (error) {
       const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
       await control.reportCredential(credential.id, outcome);

@@ -78,8 +78,6 @@ const withRequestNetworkContext = (location: ClientContext, requestContext: Clie
 const CACHE_SECONDS = 7 * 24 * 60 * 60;
 const LOCATION_CACHE_SECONDS = 30 * 24 * 60 * 60;
 const IP_LIVE_LOOKUP_TIMEOUT_MS = 20000;
-// Residential mode stays hidden for a country until its evidence-backed pool clears this floor.
-const RESIDENTIAL_MIN_POOL = 100;
 
 interface CacheEntry<T> { data: T; expiresAt: number }
 
@@ -364,12 +362,23 @@ app.get('/api/v1/countries', async (context) => {
       ...country,
       addressCount: hasPoolDatabase ? addressCount : null,
       residentialCount: hasPoolDatabase ? residentialCount : country.residentialCapability ? null : 0,
-      residentialAvailable: hasPoolDatabase ? residentialCount >= RESIDENTIAL_MIN_POOL : false,
+      residentialAvailable: hasPoolDatabase ? residentialCount > 0 : false,
       generationMode: addressCount > 0 ? 'synchronized-pool' : 'sync-required'
     };
   });
   context.header('Cache-Control', 'no-store');
   return context.json({ data });
+});
+
+app.get('/api/v1/availability', async (context) => {
+  if (!context.env.ADDRESS_DB) return context.json({ data: [] });
+  const rows = (await context.env.ADDRESS_DB.prepare(`SELECT code,MAX(count) AS count FROM (
+      SELECT country_code AS code,residential_count AS count FROM sync_country_state WHERE status='ready'
+      UNION ALL SELECT country_code AS code,SUM(address_count) AS count FROM residential_coverage GROUP BY country_code
+      UNION ALL SELECT country_code AS code,SUM(active_count) AS count FROM address_datasets WHERE status='active' GROUP BY country_code
+    ) GROUP BY code HAVING count>0 ORDER BY code`).all<{ code: string; count: number }>()).results;
+  context.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
+  return context.json({ data: rows.map((row) => ({ code: row.code, residentialAvailable: Number(row.count) > 0 })) });
 });
 
 app.get('/api/v1/client-context', async (context) => {

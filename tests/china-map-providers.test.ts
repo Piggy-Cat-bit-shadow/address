@@ -7,7 +7,7 @@ const response = (value: unknown) => async () => new Response(JSON.stringify(val
 describe('China map community providers', () => {
   it('normalizes Amap, Tencent and Baidu responses without retaining keys', async () => {
     const amap = await fetchAmapCommunities('北京市', 1, 'secret', response({ status: '1', pois: [{
-      id: 'a-1', name: '望京花园', address: '阜通东大街6号', location: '116.470000,39.995000', pname: '北京市', cityname: '北京市', adname: '朝阳区'
+      id: 'a-1', name: '望京花园', address: '阜通东大街6号', location: '116.470000,39.995000', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105'
     }] }));
     const tencent = await fetchTencentCommunities('北京市', 1, 'secret', response({ status: 0, data: [{
       id: 't-1', title: '望京花园', address: '阜通东大街6号', location: { lat: 39.995, lng: 116.47 }, ad_info: { province: '北京市', city: '北京市', district: '朝阳区' }
@@ -19,6 +19,30 @@ describe('China map community providers', () => {
     expect(tencent[0]).toMatchObject({ provider: 'tencent', providerPoiId: 't-1', rawCrs: 'GCJ-02' });
     expect(baidu[0]).toMatchObject({ provider: 'baidu', providerPoiId: 'b-1', rawCrs: 'BD-09' });
     expect(JSON.stringify([amap, tencent, baidu])).not.toContain('secret');
+  });
+
+  it('uses exact Amap residential type and district boundaries', async () => {
+    let requested = '';
+    const values = await fetchAmapCommunities('110105', 1, 'secret', async (input) => {
+      requested = String(input);
+      return new Response(JSON.stringify({ status: '1', pois: [
+        { id: 'exact', name: '望京花园', address: '阜通东大街6号', location: '116.47,39.995', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105' },
+        { id: 'wrong-type', name: '商场', address: '阜通东大街8号', location: '116.47,39.995', pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '060100', adcode: '110105' },
+        { id: 'wrong-district', name: '其他小区', address: '东城路1号', location: '116.41,39.91', pname: '北京市', cityname: '北京市', adname: '东城区', typecode: '120302', adcode: '110101' }
+      ] }), { headers: { 'content-type': 'application/json' } });
+    });
+    expect(values.map((value) => value.providerPoiId)).toEqual(['exact']);
+    expect(requested).toContain('types=120302');
+    expect(requested).toContain('city_limit=true');
+    expect(requested).toContain('region=110105');
+  });
+
+  it('reports Tencent provider quota headers', async () => {
+    let quota;
+    await fetchTencentCommunities('北京市', 1, 'secret', async () => new Response(JSON.stringify({ status: 0, data: [] }), {
+      headers: { 'content-type': 'application/json', 'X-Limit': 'current_qps=1; limit_qps=5; current_pv=17; limit_pv=200' }
+    }), (value) => { quota = value; });
+    expect(quota).toEqual({ used: 17, limit: 200 });
   });
 
   it('classifies provider quota errors for key rotation', async () => {

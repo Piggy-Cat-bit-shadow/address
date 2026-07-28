@@ -108,8 +108,11 @@ const server = serve({
       if (!await authorizeWebRequest(control, request)) return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401 }));
       const target = new URL(request.url);
       target.pathname = target.pathname.replace(/^\/web-api\/v1/u, '/api/v1');
-      const amap = await control.acquireCredential('amap');
-      return securityHeaders(await app.fetch(new Request(target, request), { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node }));
+      const useLiveProvider = target.pathname === '/api/v1/generate' && target.searchParams.get('live') === 'true';
+      const amap = useLiveProvider ? await control.acquireCredential('amap') : null;
+      const response = await app.fetch(new Request(target, request), { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node });
+      if (amap) await control.reportCredential(amap.id, response.ok ? 'success' : 'network');
+      return securityHeaders(response);
     }
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname !== '/api/v1/health') {
@@ -122,17 +125,25 @@ const server = serve({
           }));
         }
       }
-      const amap = await control.acquireCredential('amap');
-      return securityHeaders(await app.fetch(request, { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node }));
+      const useLiveProvider = url.pathname === '/api/v1/generate' && url.searchParams.get('live') === 'true';
+      const amap = useLiveProvider ? await control.acquireCredential('amap') : null;
+      const response = await app.fetch(request, { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node });
+      if (amap) await control.reportCredential(amap.id, response.ok ? 'success' : 'network');
+      return securityHeaders(response);
     }
     const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access')
       || url.pathname.startsWith('/_astro/') || /\.(?:css|js|svg|png|jpg|jpeg|webp|ico|woff2?)$/iu.test(url.pathname);
     if (!publicStatic) {
+      const staticRequest = url.pathname === '/'
+        ? new Request(new URL(`/en/${url.search}`, request.url), request)
+        : request;
       return securityHeaders(await authorizeWebRequest(control, request)
-        ? await staticApp.fetch(request, node)
+        ? await staticApp.fetch(staticRequest, node)
         : Response.redirect(new URL('/access/', request.url), 302));
     }
-    return securityHeaders(await staticApp.fetch(request, node));
+    const response = await staticApp.fetch(request, node);
+    if (url.pathname.startsWith('/_astro/')) response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    return securityHeaders(response);
   },
   hostname,
   port

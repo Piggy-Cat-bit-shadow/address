@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { SqliteDatabase } from '../database/sqlite.mjs';
 import { findNonResidentialMatch } from '../../src/domain/non-residential.mjs';
-import type { ControlStore, ProviderName } from '../control/store';
+import type { ControlStore, ProviderName, ProviderQuotaObservation } from '../control/store';
 import { refreshAddressCoverage } from '../control/coverage';
 import {
   chinaCommunityPublicationClause,
@@ -50,7 +50,7 @@ const addressesAgree = (left: string, right: string): boolean => {
 };
 const nowIso = (): string => new Date().toISOString();
 const providerNames = ['amap', 'baidu', 'tencent'] as const;
-const maxPagesPerTarget = 50;
+const maxPagesPerTarget = 8;
 const maxAreaCityBytes = 128 * 1024 * 1024;
 const credentialRetryDelayMs = 400;
 
@@ -148,7 +148,7 @@ export class ChinaDataService {
 
   async status(): Promise<Record<string, unknown>> {
     const counts = await this.addressDb.prepare(`SELECT COUNT(*) AS total,
-      COUNT(*) AS cross_verified,
+      COALESCE(SUM(CASE WHEN source_count>=2 THEN 1 ELSE 0 END),0) AS cross_verified,
       COUNT(DISTINCT city) AS cities FROM cn_communities_v2 community
       WHERE ${chinaCommunityPublicationClause('community')}`).first<Record<string, unknown>>();
     const sources = (await this.addressDb.prepare(`SELECT source.provider,COUNT(*) AS total FROM cn_community_sources source
@@ -333,9 +333,11 @@ export class ChinaDataService {
         return null;
       }
       try {
-        const candidates = await providerFetcher[provider](target.query, page, credential.secret);
+        let quotaObservation: ProviderQuotaObservation | undefined;
+        const region = provider === 'amap' && /^\d{6}$/u.test(target.id) ? target.id : target.query;
+        const candidates = await providerFetcher[provider](region, page, credential.secret, fetch, (value) => { quotaObservation = value; });
         await requested();
-        await this.control.reportCredential(credential.id, 'success');
+        await this.control.reportCredential(credential.id, 'success', quotaObservation);
         return candidates;
       } catch (error) {
         await requested();

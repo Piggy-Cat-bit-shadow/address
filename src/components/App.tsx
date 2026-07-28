@@ -468,7 +468,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   };
 
   const loadResidentialCountries = async (): Promise<Set<CountryCode>> => {
-    const response = await fetch(`${endpoint}/v1/countries`, { cache: 'no-store', headers: { Accept: 'application/json' } });
+    const response = await fetchWithTimeout(`${endpoint}/v1/availability`, { cache: 'default', headers: { Accept: 'application/json' } }, 8000);
     if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
     const payload = await response.json() as { data?: Array<{ code: CountryCode; residentialAvailable?: boolean }> };
     const available = new Set((payload.data || []).filter((country) => country.residentialAvailable).map((country) => country.code));
@@ -483,10 +483,14 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     const bootstrap = async () => {
       const params = new URLSearchParams(window.location.search);
       const urlCountry = countryCodeFrom(params.get('country'));
-      const [availableResult, contextResult] = await Promise.allSettled([loadResidentialCountries(), loadClientContext()]);
+      const availableResult = await Promise.resolve(loadResidentialCountries()).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        () => ({ status: 'rejected' as const })
+      );
       if (disposed) return;
-      if (contextResult.status === 'fulfilled') setIpContext(contextResult.value);
-      const available = availableResult.status === 'fulfilled' ? availableResult.value : new Set<CountryCode>();
+      const available = availableResult.status === 'fulfilled'
+        ? availableResult.value
+        : new Set(countries.map((country) => country.code));
       if (availableResult.status === 'rejected') {
         residentialCountriesRef.current = available;
         setResidentialCountries(available);
@@ -495,6 +499,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       if (userNavigated.current) return;
       const nextCountry = selectAvailableCountry(urlCountry, available);
       if (nextCountry) resetFor(nextCountry, 'residential', 'replace');
+      void loadClientContext().then((value) => { if (!disposed) setIpContext(value); }).catch(() => undefined);
     };
     const restoreHistory = () => {
       userNavigated.current = true;

@@ -19,7 +19,9 @@ const candidate = (provider: CommunityCandidate['provider'], providerPoiId: stri
   rawLatitude: 39.838,
   rawLongitude: 118.168,
   rawCrs: provider === 'baidu' ? 'BD-09' : 'GCJ-02',
-  responseHash: `${provider}-${providerPoiId}`
+  responseHash: `${provider}-${providerPoiId}`,
+  typecode: provider === 'amap' ? '120302' : '住宅小区',
+  adcode: '110105'
 });
 
 const upsertCandidate = (service: ChinaDataService, value: CommunityCandidate): Promise<number> =>

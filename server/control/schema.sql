@@ -58,7 +58,15 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
   weight INTEGER NOT NULL DEFAULT 100 CHECK (weight BETWEEN 1 AND 10000),
   qps_limit INTEGER NOT NULL DEFAULT 1 CHECK (qps_limit BETWEEN 1 AND 10000),
   daily_limit INTEGER NOT NULL DEFAULT 1000 CHECK (daily_limit BETWEEN 1 AND 100000000),
+  quota_service TEXT NOT NULL DEFAULT 'place-search',
+  quota_period TEXT NOT NULL DEFAULT 'day' CHECK (quota_period IN ('day','month')),
+  quota_limit INTEGER NOT NULL DEFAULT 1000 CHECK (quota_limit BETWEEN 1 AND 100000000),
+  quota_timezone_offset INTEGER NOT NULL DEFAULT 480 CHECK (quota_timezone_offset BETWEEN -720 AND 840),
   quota_scope_id TEXT NOT NULL,
+  provider_reported_used INTEGER,
+  provider_reported_limit INTEGER,
+  provider_reported_reset_at TEXT,
+  provider_reported_at TEXT,
   cooldown_until TEXT,
   failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
   last_used_at TEXT,
@@ -74,6 +82,14 @@ CREATE TABLE IF NOT EXISTS provider_usage_daily (
   accepted_count INTEGER NOT NULL DEFAULT 0,
   rejected_count INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (credential_id, usage_date)
+);
+
+CREATE TABLE IF NOT EXISTS provider_usage_periods (
+  credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
+  period_start TEXT NOT NULL,
+  accepted_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (credential_id, period_start)
 );
 
 CREATE TABLE IF NOT EXISTS browser_map_credentials (

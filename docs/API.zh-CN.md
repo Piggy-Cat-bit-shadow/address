@@ -18,7 +18,7 @@ https://YOUR_DOMAIN.example/api/v1
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-Token 在 `/admin/` 创建，只保存哈希，可设置权限、限速、到期时间和撤销状态，明文仅显示一次。WebUI 使用独立的 `/web-api/v1` 会话通道，不嵌入该 Token。
+Token 在 `/admin/` 创建，同时保存不可逆鉴权哈希和由服务端主密钥加密的密文，可设置权限、限速和到期时间，也可在管理员会话中查看、修改或撤销。WebUI 使用独立的 `/web-api/v1` 会话通道，不嵌入该 Token。鉴权失败返回 `401`；超过令牌每分钟限速返回 `429` 和 `Retry-After: 60`。
 
 ## 外部端点
 

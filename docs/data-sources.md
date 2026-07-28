@@ -26,7 +26,7 @@
 | 西班牙 ES | Overture | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [ES](strategies/ES-address-strategy.md) |
 | 荷兰 NL | Overture | 源字段 + catalog；`1234 AB` | 明确住宅建筑/用途 | [NL](strategies/NL-address-strategy.md) |
 | 俄罗斯 RU | Geofabrik OSM | 源字段 + catalog；6 位邮编 | OSM 住宅建筑 | [RU](strategies/RU-address-strategy.md) |
-| 中国 CN | AreaCity + 高德/百度/腾讯 | AreaCity + 民政部版本对照；6 位源邮编 | 至少两平台一致 | [CN](strategies/CN-China-address-generation.md) |
+| 中国 CN | AreaCity + 高德/百度/腾讯；旧 OSM 中国池退出发布 | AreaCity + 民政部版本对照；6 位源邮编 | 至少两平台一致 | [CN](strategies/CN-China-address-generation.md) |
 | 中国香港 HK | Geofabrik OSM | 源字段 + catalog；无通用邮编 | OSM 住宅建筑 | [HK](strategies/HK-address-strategy.md) |
 | 中国台湾 TW | Overture | 源字段 + catalog；TGOS 暂停 | 明确住宅建筑/用途 | [TW](strategies/TW-address-strategy.md) |
 | 日本 JP | Overture；ABR/Geolonia 为候选 | 源字段 + catalog；7 位邮编 | 明确住宅建筑/用途 | [JP](strategies/JP-address-strategy.md) |
@@ -77,7 +77,7 @@ OpenAddresses 只用于发现可用上游；每个上游需单独核验许可和
 | OneMap | <https://www.onemap.gov.sg/apidocs/> | 未找到统一公开日额度；Token 通常短期有效 | `ONEMAP_ACCESS_TOKEN` |
 | Geoapify | <https://www.geoapify.com/pricing> | 免费计划 3,000 credits/日、最多 5 req/s | `GEOAPIFY_API_KEY` |
 
-系统按每个 Key 的免费预算计数；出现 429、QPS、日/月额度错误或 Token 过期时自动冷却/暂停。多个同账号 Key 可能共享配额，轮换不用于突破平台总额度。
+系统按每个 Key 的官方周期计数：日额度按自然日、月额度按自然月，每个 Key 默认独立；仅在管理员明确配置同一额度组时共享。腾讯返回 `X-Limit` 时使用平台实时值，高德和百度使用本地统计并由超限错误校正。后台显示已用、上限、剩余、来源和重置时间；出现 429、QPS、日/月额度错误或 Token 过期时自动冷却或暂停，并在周期边界恢复。
 
 ## 5. 密钥安全
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { openDatabase, initializeSqliteDatabase, type SqliteDatabase } from '../server/database/sqlite.mjs';
 import {
-  AMAP_PERSONAL_MONTHLY_LIMIT, AMAP_SAFE_DAILY_LIMIT, ControlStore, credentialsFromEnvironment,
+  AMAP_PERSONAL_MONTHLY_LIMIT, ControlStore, credentialsFromEnvironment,
   credentialProviderDefaults, DEFAULT_MAP_DISPLAY_CONFIG, mapDisplayConfigFromEnvironment
 } from '../server/control/store';
 import { decryptSecret, encryptSecret, hashPassword, masterKeyFrom, verifyPassword } from '../server/control/security';
@@ -469,6 +469,17 @@ describe('control database security', () => {
     expect(await store.acquireCredential('amap')).toBeNull();
   });
 
+  it('uses provider-reported quota when the platform exposes it', async () => {
+    const id = await store.addCredential({ provider: 'tencent', label: 'Reported', secret: 'reported-key' });
+    await store.reportCredential(id, 'success', { used: 199, limit: 200 });
+    expect(await store.listCredentials()).toMatchObject([{
+      id, quotaUsed: 199, quotaLimit: 200, quotaRemaining: 1, quotaUsageSource: 'provider', quotaPeriod: 'day'
+    }]);
+    await store.reportCredential(id, 'success', { used: 200, limit: 200 });
+    expect(await store.listCredentials()).toMatchObject([{ id, status: 'quota_exhausted', quotaRemaining: 0 }]);
+    expect(await store.acquireCredentialById(id)).toBeNull();
+  });
+
   it('imports the same environment credential only once per provider', async () => {
     const first = await store.ensureCredential({ provider: 'onemap', label: 'Environment', secret: 'fixture.onemap.token' });
     const second = await store.ensureCredential({ provider: 'onemap', label: 'Renamed', secret: 'fixture.onemap.token' });
@@ -482,14 +493,19 @@ describe('control database security', () => {
   it('uses conservative free-tier defaults for every credential provider', async () => {
     for (const provider of ['amap', 'baidu', 'tencent', 'onemap'] as const) {
       const id = await store.addCredential({ provider, label: provider, secret: `${provider}-fixture` });
-      const row = await database.prepare('SELECT qps_limit,daily_limit FROM provider_credentials WHERE id=?')
-        .bind(id).first<{ qps_limit: number; daily_limit: number }>();
-      expect(row).toEqual({ qps_limit: credentialProviderDefaults[provider].qps, daily_limit: credentialProviderDefaults[provider].daily });
+      const row = await database.prepare(`SELECT qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset
+        FROM provider_credentials WHERE id=?`).bind(id).first();
+      expect(row).toEqual({
+        qps_limit: credentialProviderDefaults[provider].qps,
+        quota_service: credentialProviderDefaults[provider].service,
+        quota_period: credentialProviderDefaults[provider].period,
+        quota_limit: credentialProviderDefaults[provider].limit,
+        quota_timezone_offset: credentialProviderDefaults[provider].timezoneOffset
+      });
     }
-    expect(AMAP_SAFE_DAILY_LIMIT * 31).toBeLessThanOrEqual(AMAP_PERSONAL_MONTHLY_LIMIT);
-    expect((AMAP_SAFE_DAILY_LIMIT + 1) * 31).toBeGreaterThan(AMAP_PERSONAL_MONTHLY_LIMIT);
-    expect(credentialProviderDefaults.baidu).toEqual({ qps: 3, daily: 100 });
-    expect(credentialProviderDefaults.tencent).toEqual({ qps: 5, daily: 10_000 });
+    expect(credentialProviderDefaults.amap).toMatchObject({ period: 'month', limit: AMAP_PERSONAL_MONTHLY_LIMIT });
+    expect(credentialProviderDefaults.baidu).toMatchObject({ period: 'day', limit: 100 });
+    expect(credentialProviderDefaults.tencent).toMatchObject({ period: 'day', limit: 10_000 });
   });
 
   it('extracts only non-empty provider credentials from environment variables', () => {
@@ -546,6 +562,7 @@ describe('control database security', () => {
       await original.reportCredential(amapId, 'success');
       await legacy.exec(`PRAGMA foreign_keys=OFF;
         BEGIN IMMEDIATE;
+        DROP TABLE provider_usage_periods;
         ALTER TABLE provider_usage_daily RENAME TO provider_usage_daily_current;
         ALTER TABLE provider_credentials RENAME TO provider_credentials_current;
         CREATE TABLE provider_credentials (
@@ -576,7 +593,11 @@ describe('control database security', () => {
           rejected_count INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (credential_id,usage_date)
         );
-        INSERT INTO provider_credentials SELECT * FROM provider_credentials_current;
+        INSERT INTO provider_credentials(id,provider,label,secret_ciphertext,secret_iv,secret_tag,enabled,status,weight,qps_limit,
+          daily_limit,quota_scope_id,cooldown_until,failure_count,last_used_at,last_success_at,last_failure_at,created_at,updated_at)
+        SELECT id,provider,label,secret_ciphertext,secret_iv,secret_tag,enabled,status,weight,qps_limit,
+          daily_limit,quota_scope_id,cooldown_until,failure_count,last_used_at,last_success_at,last_failure_at,created_at,updated_at
+        FROM provider_credentials_current;
         INSERT INTO provider_usage_daily SELECT * FROM provider_usage_daily_current;
         DROP TABLE provider_usage_daily_current;
         DROP TABLE provider_credentials_current;
@@ -586,7 +607,7 @@ describe('control database security', () => {
 
       const migrated = new ControlStore(legacy, masterKey);
       await migrated.initialize('legacy administrator password');
-      expect(await migrated.listCredentials()).toMatchObject([{ id: amapId, provider: 'amap', usedToday: 1 }]);
+      expect(await migrated.listCredentials()).toMatchObject([{ id: amapId, provider: 'amap', quotaUsed: 1, quotaPeriod: 'month' }]);
       const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString('base64url');
       const token = `${encode({ alg: 'none' })}.${encode({ exp: Math.floor(Date.now() / 1000) + 3600 })}.signature`;
       const onemapId = await migrated.addCredential({ provider: 'onemap', label: 'OneMap', secret: token });
@@ -612,6 +633,9 @@ describe('control database security', () => {
     await store.reportCredential(first, 'success');
     expect(await store.acquireCredentialById(first)).toBeNull();
     expect((await store.acquireCredentialById(second))?.id).toBe(second);
+    expect(await store.availableProviders()).toEqual(['amap']);
+    await store.reportCredential(second, 'success');
+    expect(await store.availableProviders()).toEqual([]);
   });
 
   it('distinguishes API rate limiting from invalid credentials', async () => {

@@ -3,7 +3,11 @@ import { countryByCode, isCountryCode } from '../domain/countries';
 
 type View = 'dashboard' | 'access' | 'providers' | 'china' | 'tokens' | 'runs';
 type AdminLocale = 'zh-CN' | 'en';
-interface Credential { id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string; usedToday: number; lastSuccessAt?: string }
+interface Credential {
+  id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
+  quotaService: string; quotaPeriod: 'day' | 'month'; quotaUsed: number; quotaLimit: number; quotaRemaining: number;
+  quotaResetAt: string; quotaUsageSource: 'provider' | 'local'; providerReportedAt?: string | null; lastSuccessAt?: string;
+}
 interface CoverageNode { key: string; countryCode: string; level: number; levelLabel: string; regionCode: string; regionName: string; ordinaryCount: number; residentialCount: number; totalCount: number; childCount: number; updatedAt: string }
 interface AmapBrowserStatus { configured: boolean; enabled: boolean; label: string; mask: string; securityMask: string; status: string; lastUsedAt: string | null; updatedAt: string | null }
 interface MapSettings { google: { china: boolean; international: boolean }; amap: { china: boolean; international: boolean }; amapBrowser: AmapBrowserStatus }
@@ -20,7 +24,7 @@ const adminText = {
     bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据', dashboardDescription: '按国家和行政层级查看已收录地址。', allCountries: '全部国家', region: '区域', level: '行政层级', available: '可用地址', residential: '真实住宅', ordinary: '普通地址', children: '下级区域', updated: '更新时间', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
     accessTitle: '访问策略', accessDescription: '先设置访问方式，再保存密码和接口保护规则。', frontendPasswordEnabled: '启用前端访问密码', apiAuthEnabled: '外部接口强制使用访问令牌', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
-    providersTitle: '地图密钥', providersDescription: '管理地图平台凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: '平台', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', todayRequests: '今日请求', lastSuccess: '最近成功',
+    providersTitle: '地图密钥', providersDescription: '管理地图平台凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: '平台', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaProvider: '平台实时', quotaLocal: '本地统计', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
     amapBrowserTitle: '高德地图浏览器密钥', configureAmapBrowser: '配置密钥', editAmapBrowser: '修改密钥', amapBrowserDialog: '配置高德地图浏览器密钥', amapBrowserLabel: '密钥名称', amapBrowserPlaceholder: '高德浏览器地图', amapApiKey: '浏览器接口密钥', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德地图浏览器密钥已保存', amapBrowserRemoved: '高德地图浏览器密钥已删除', amapBrowserEmpty: '尚未配置高德地图浏览器密钥', amapBrowserSecurity: '浏览器只会收到受域名白名单约束的专用接口密钥；安全密钥和服务端同步密钥始终保留在服务端。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德地图浏览器密钥吗？',
     chinaTitle: '中国同步', chinaDescription: '配置真实小区同步，查看平台配额和覆盖进度。', chinaTotal: '真实小区', cities: '覆盖城市', districts: '已覆盖区县', focusCities: '已覆盖重点城市', crossVerified: '跨平台验证', availableKeys: '可用密钥', estimate: '基础覆盖预计', waitingKeys: '等待可用密钥', minutes: '约 {value} 分钟', autoSync: '自动同步', syncNow: '开始/继续同步', syncing: '同步中', areaFallback: '行政区划数据待导入，当前先覆盖重点城市；导入后自动切换全国区县。', areaReady: '系统优先为每个区县补齐 10 个真实小区，完成基础覆盖后自动继续丰富数据。', pendingCommunities: '{value} 个基础小区待补齐', focusCoverage: '重点城市覆盖', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '行政区划数据待初始化', platformData: '平台数据量', syncSubmitted: '同步任务已提交',
@@ -35,7 +39,7 @@ const adminText = {
     bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address data', dashboardDescription: 'Review imported addresses by country and administrative level.', allCountries: 'All countries', region: 'Region', level: 'Administrative level', available: 'Available addresses', residential: 'Verified residential', ordinary: 'Other addresses', children: 'Child regions', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
     accessTitle: 'Access policy', accessDescription: 'Choose the access path first, then save password and API protection rules.', frontendPasswordEnabled: 'Require a frontend password', apiAuthEnabled: 'Require a Bearer token for external API', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
-    providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', todayRequests: 'Requests today', lastSuccess: 'Last success',
+    providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaProvider: 'Provider live', quotaLocal: 'Local count', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
     amapBrowserTitle: 'AMap browser credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap browser credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap JavaScript API', amapApiKey: 'Browser API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap browser credential saved', amapBrowserRemoved: 'AMap browser credential deleted', amapBrowserEmpty: 'No AMap browser credential configured', amapBrowserSecurity: 'The browser receives only the dedicated domain-restricted API key. The security code and server-side sync key remain on the server.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap browser credential?',
     chinaTitle: 'China sync', chinaDescription: 'Configure verified community sync and review quota and coverage progress.', chinaTotal: 'Verified communities', cities: 'Cities covered', districts: 'Districts covered', focusCities: 'Priority cities covered', crossVerified: 'Cross-provider matches', availableKeys: 'Available keys', estimate: 'Base coverage estimate', waitingKeys: 'Waiting for an available key', minutes: 'About {value} minutes', autoSync: 'Automatic sync', syncNow: 'Start / resume sync', syncing: 'Syncing', areaFallback: 'AreaCity data is not imported; priority cities are covered first, then the full district list is enabled.', areaReady: 'The system targets 10 verified communities per district, then continues enrichment automatically.', pendingCommunities: '{value} base communities remaining', focusCoverage: 'Priority city coverage', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'Administrative data is not initialized', platformData: 'Provider totals', syncSubmitted: 'Sync task submitted',
@@ -111,12 +115,14 @@ export default function SyncAdmin() {
   const [initialized, setInitialized] = useState(true);
   const [password, setPassword] = useState('');
   const [view, setView] = useState<View>('dashboard');
-  const [data, setData] = useState<unknown>();
-  const [busy, setBusy] = useState(false);
+  const [dataByView, setDataByView] = useState<Partial<Record<View, unknown>>>({});
+  const [loadingView, setLoadingView] = useState<View | null>(null);
+  const [mutating, setMutating] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [coverageTrail, setCoverageTrail] = useState<CoverageNode[]>([]);
-  const loadId = useRef(0);
+  const loadIds = useRef<Record<View, number>>({ dashboard: 0, access: 0, providers: 0, china: 0, tokens: 0, runs: 0 });
   const viewRef = useRef<View>('dashboard');
   const coverageParent = useRef('');
 
@@ -134,6 +140,7 @@ export default function SyncAdmin() {
     const csrf = cookie('address_admin_csrf');
     const response = await fetch(`/admin/api${path}`, {
       ...options,
+      signal: options.signal || AbortSignal.timeout(15000),
       cache: 'no-store',
       headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...options.headers },
       credentials: 'same-origin'
@@ -149,8 +156,8 @@ export default function SyncAdmin() {
   }, [request]);
 
   const load = useCallback(async (selected: View, clearMessages = true, background = false): Promise<boolean> => {
-    const id = ++loadId.current;
-    if (!background) { setBusy(true); setData(undefined); }
+    const id = ++loadIds.current[selected];
+    if (!background) setLoadingView(selected);
     setError(''); if (clearMessages) setNotice('');
     try {
       const paths: Record<View, string> = {
@@ -160,13 +167,13 @@ export default function SyncAdmin() {
       const result = selected === 'providers'
         ? { credentials: await request('/providers'), maps: await request('/settings/maps') }
         : await request(paths[selected]);
-      if (id === loadId.current && selected === viewRef.current) setData(result);
+      if (id === loadIds.current[selected]) setDataByView((values) => ({ ...values, [selected]: result }));
       return true;
     } catch (value) {
-      if (id === loadId.current) setError(errorMessage(value, locale));
+      if (id === loadIds.current[selected] && selected === viewRef.current) setError(errorMessage(value, locale));
       return false;
     } finally {
-      if (id === loadId.current && !background) setBusy(false);
+      if (id === loadIds.current[selected] && !background) setLoadingView((value) => value === selected ? null : value);
     }
   }, [request, locale]);
 
@@ -187,7 +194,7 @@ export default function SyncAdmin() {
   }, [authenticated, load, view]);
 
   const login = async (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault(); setLoginBusy(true); setError('');
     try {
       const result = await fetch('/admin/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }), credentials: 'same-origin' });
       const body = await result.json();
@@ -195,18 +202,18 @@ export default function SyncAdmin() {
       setAuthenticated(true); setPassword('');
       setTimeout(() => void load('dashboard'), 0);
     } catch (value) { setError(errorMessage(value, locale)); }
-    finally { setBusy(false); }
+    finally { setLoginBusy(false); }
   };
 
   const mutate: Mutate = async <T,>(path: string, method: string, body?: unknown, success = locale === 'zh-CN' ? '操作已完成' : 'Operation completed'): Promise<T | undefined> => {
     const selected = viewRef.current;
-    setBusy(true); setError(''); setNotice('');
+    setMutating(true); setError(''); setNotice('');
     try {
       const result = await request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      if (selected !== viewRef.current || await load(selected, false, true)) setNotice(success);
+      if (await load(selected, false, true)) setNotice(success);
       return result;
     } catch (value) { setError(errorMessage(value, locale)); return undefined; }
-    finally { setBusy(false); }
+    finally { setMutating(false); }
   };
 
   if (!authenticated) return <main className="admin-login">
@@ -215,7 +222,7 @@ export default function SyncAdmin() {
       <h1>{t.loginTitle}</h1>
       {!initialized && <div className="admin-warning">{t.bootstrap}</div>}
       <label><span>{t.password}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-      <button disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button>
+      <button disabled={loginBusy || !password}>{loginBusy ? t.loggingIn : t.login}</button>
       {error && <div className="admin-error" role="alert">{error}</div>}
       <a href={locale === 'zh-CN' ? '/zh-CN/' : '/en/'}>{t.backGenerator}</a>
     </form>
@@ -241,11 +248,12 @@ export default function SyncAdmin() {
     try { await request('/logout', { method: 'POST' }); location.reload(); }
     catch (value) { setError(errorMessage(value, locale)); }
   };
+  const data = dataByView[view];
 
   return <div className="admin-shell">
     <aside className="admin-sidebar">
       <div className="admin-brand"><b>{t.brandName}</b><span>{t.brand}</span></div>
-      <nav>{(Object.keys(labelsFor(locale)) as View[]).map((item) => <button key={item} className={view === item ? 'active' : ''} disabled={busy} onClick={() => selectView(item)}>{labelsFor(locale)[item]}</button>)}</nav>
+      <nav>{(Object.keys(labelsFor(locale)) as View[]).map((item) => <button key={item} className={view === item ? 'active' : ''} onClick={() => selectView(item)}>{labelsFor(locale)[item]}</button>)}</nav>
     </aside>
     <main className="admin-content">
       <header className="admin-topbar">
@@ -254,8 +262,9 @@ export default function SyncAdmin() {
       </header>
       {error && <div className="admin-error" role="alert">{error}</div>}
       {notice && <div className="admin-notice">{notice}</div>}
-      {!data ? <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div> : <AdminView locale={locale} view={view} data={data} busy={busy} mutate={mutate} reveal={reveal}
+      {data === undefined ? <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div> : <AdminView locale={locale} view={view} data={data} busy={mutating} mutate={mutate} reveal={reveal}
         coverageTrail={coverageTrail} openCoverage={openCoverage} returnCoverage={returnCoverage} />}
+      {data !== undefined && loadingView === view && <div className="admin-refreshing" role="status" aria-label={t.loading}><span className="loading-dot" /></div>}
     </main>
   </div>;
 }
@@ -538,7 +547,16 @@ const Dialog = ({ title, close, locale, children }: { title: string; close: () =
 const Metric = ({ label, value }: { label: string; value: string }) => <div className="metric"><span>{label}</span><b>{value}</b></div>;
 const scopeLabel = (scope: string, locale: AdminLocale): string => ({ read: locale === 'zh-CN' ? '读取' : 'Read', generate: locale === 'zh-CN' ? '生成' : 'Generate', '*': locale === 'zh-CN' ? '全部' : 'All' } as Record<string, string>)[scope] || scope;
 const CoverageTable = ({ values, open, locale }: { values: CoverageNode[]; open: (value: CoverageNode) => void; locale: AdminLocale }) => { const t = adminText[locale]; return <div className="table-scroll"><table><thead><tr><th>{t.region}</th><th>{t.level}</th><th>{t.available}</th><th>{t.residential}</th><th>{t.ordinary}</th><th>{t.children}</th><th>{t.updated}</th></tr></thead><tbody>{values.map((item) => <tr key={item.key}><td><button className="drill-button" disabled={!item.childCount} title={!item.childCount ? t.noSubregions : undefined} onClick={() => open(item)}>{coverageRegionName(item, locale)}</button>{!item.totalCount && <span className="coverage-empty-tag">{t.noAddressData}</span>}</td><td>{coverageLevelName(item, locale)}</td><td>{item.totalCount.toLocaleString()}</td><td>{item.residentialCount.toLocaleString()}</td><td>{item.ordinaryCount.toLocaleString()}</td><td>{item.childCount.toLocaleString()}</td><td>{dateTime(item.updatedAt, locale)}</td></tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noSubregions}</p>}</div>; };
-const CredentialTable = ({ values, locale, reveal, actions }: { values: Credential[]; locale: AdminLocale; reveal: Reveal; actions?: (value: Credential) => ReactNode }) => { const t = adminText[locale]; return <div className="table-scroll"><table><thead><tr><th>{t.provider}</th><th>{t.name}</th><th>{t.key}</th><th>{t.statusLabel}</th><th>{t.todayRequests}</th><th>{t.lastSuccess}</th>{actions && <th>{t.actions}</th>}</tr></thead><tbody>{values.map((item) => <tr key={item.id}><td>{providerLabel(locale, item.provider)}</td><td>{credentialDisplayLabel(locale, item.label)}</td><td><SecretCell mask={item.mask} locale={locale} reveal={reveal} path={`/providers/${item.id}/reveal`} field="secret" /></td><td><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small> · {dateTime(item.expiresAt, locale)}</small>}</td><td>{item.usedToday.toLocaleString()}</td><td>{dateTime(item.lastSuccessAt, locale)}</td>{actions && <td className="row-actions">{actions(item)}</td>}</tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noKeys}</p>}</div>; };
+const CredentialTable = ({ values, locale, reveal, actions }: { values: Credential[]; locale: AdminLocale; reveal: Reveal; actions?: (value: Credential) => ReactNode }) => {
+  const t = adminText[locale];
+  return <div className="table-scroll"><table><thead><tr><th>{t.provider}</th><th>{t.name}</th><th>{t.key}</th><th>{t.statusLabel}</th><th>{t.quotaUsage}</th><th>{t.lastSuccess}</th>{actions && <th>{t.actions}</th>}</tr></thead><tbody>{values.map((item) => <tr key={item.id}>
+    <td>{providerLabel(locale, item.provider)}</td><td>{credentialDisplayLabel(locale, item.label)}</td>
+    <td><SecretCell mask={item.mask} locale={locale} reveal={reveal} path={`/providers/${item.id}/reveal`} field="secret" /></td>
+    <td><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small> · {dateTime(item.expiresAt, locale)}</small>}</td>
+    <td><div className="quota-cell"><strong>{item.quotaUsed.toLocaleString()} / {item.quotaLimit.toLocaleString()}</strong><small>{item.quotaPeriod === 'month' ? t.quotaMonth : t.quotaDay} · {item.quotaRemaining.toLocaleString()} {t.quotaRemaining}</small><small>{item.quotaUsageSource === 'provider' ? t.quotaProvider : t.quotaLocal} · {t.quotaReset} {dateTime(item.quotaResetAt, locale)}</small></div></td>
+    <td>{dateTime(item.lastSuccessAt, locale)}</td>{actions && <td className="row-actions">{actions(item)}</td>}
+  </tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noKeys}</p>}</div>;
+};
 const AreaCoverageTable = ({ values, locale }: { values: Array<Record<string, unknown>>; locale: AdminLocale }) => { const t = adminText[locale]; return <div className="table-scroll"><table><thead><tr><th>{t.province}</th><th>{t.city}</th><th>{t.district}</th><th>{t.currentCommunities}</th><th>{t.target}</th><th>{t.statusLabel}</th></tr></thead><tbody>{values.map((item, index) => { const current = Number(item.current_count || 0); const target = Number(item.target_count || 10); return <tr key={`${String(item.city)}-${String(item.district)}-${index}`}><td>{String(item.province)}</td><td>{String(item.city)}</td><td>{String(item.district)}</td><td>{current.toLocaleString()}</td><td>{target.toLocaleString()}</td><td><span className={`badge ${current >= target ? 'succeeded' : ''}`}>{current >= target ? t.covered : t.pending}</span></td></tr>; })}</tbody></table>{!values.length && <p className="admin-empty">{t.noAreas}</p>}</div>; };
 const TokenTable = ({ values, locale, reveal, edit, revoke }: { values: ApiTokenView[]; locale: AdminLocale; reveal: Reveal; edit: (value: ApiTokenView) => void; revoke: (id: string) => void }) => { const t = adminText[locale]; return <div className="table-scroll"><table><thead><tr><th>{t.name}</th><th>{t.tokenValue}</th><th>{t.scopes}</th><th>{t.perMinute}</th><th>{t.expires}</th><th>{t.actions}</th></tr></thead><tbody>{values.map((item) => <tr key={item.id}><td>{item.name}</td><td>{item.token_revealable ? <SecretCell mask={item.token_mask} locale={locale} reveal={reveal} path={`/tokens/${item.id}/reveal`} field="token" /> : <span className="token-unavailable">{t.tokenUnavailable}</span>}</td><td>{item.scopes.map((scope) => scopeLabel(String(scope), locale)).join(locale === 'zh-CN' ? '、' : ', ')}</td><td>{item.rate_limit_per_minute.toLocaleString()}</td><td>{item.expires_at ? dateTime(item.expires_at, locale) : t.neverExpires}</td><td className="row-actions"><button type="button" disabled={Boolean(item.revoked_at)} onClick={() => edit(item)}>{t.edit}</button><button type="button" className="danger" disabled={Boolean(item.revoked_at)} onClick={() => revoke(item.id)}>{item.revoked_at ? t.revoked : t.revoke}</button></td></tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noTokens}</p>}</div>; };
 const fieldLabels: Record<AdminLocale, Record<string, string>> = {

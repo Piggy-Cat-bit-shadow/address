@@ -56,6 +56,10 @@ button:disabled { cursor: default; opacity: .55; }
 .topbar-control.danger-control { color: #b42318; }
 .topbar-control.danger-control:hover { border-color: #f2a8a1; background: #fff7f6; }
 .admin-loading { min-height: 170px; display: flex; align-items: center; justify-content: center; gap: 9px; color: #667085; font-size: 12px; }
+.admin-refreshing { position: fixed; right: 28px; bottom: 24px; z-index: 20; display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid #d8e0ea; border-radius: 6px; background: #fff; box-shadow: 0 4px 12px rgb(15 23 42 / 10%); }
+.quota-cell { display: grid; gap: 3px; min-width: 180px; }
+.quota-cell strong { font-variant-numeric: tabular-nums; }
+.quota-cell small { color: #667085; white-space: nowrap; }
 .loading-dot { width: 8px; height: 8px; border-radius: 50%; background: #1769e0; box-shadow: 14px 0 #9bbff4; animation: loading-pulse 1s infinite alternate; }
 @keyframes loading-pulse { to { opacity: .35; transform: translateX(6px); } }
 

@@ -222,7 +222,13 @@ export const createSourceAdapters = ({
   };
 
   const geofabrikIndex = async () => {
-    if (!geofabrikIndexPromise) geofabrikIndexPromise = jsonRequest('https://download.geofabrik.de/index-v1-nogeom.json', fetchImpl);
+    if (!geofabrikIndexPromise) {
+      geofabrikIndexPromise = jsonRequest('https://download.geofabrik.de/index-v1-nogeom.json', fetchImpl)
+        .catch((error) => {
+          geofabrikIndexPromise = undefined;
+          throw error;
+        });
+    }
     return geofabrikIndexPromise;
   };
 

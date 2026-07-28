@@ -79,6 +79,34 @@ describe('address source shard catalog', () => {
     expect(disabled.buildingAssets).toEqual([]);
   });
 
+  it('reloads the Geofabrik index after a failed request', async () => {
+    let indexRequests = 0;
+    const fetchImpl = async (input, init = {}) => {
+      const url = String(input);
+      if (url.endsWith('index-v1-nogeom.json')) {
+        indexRequests += 1;
+        if (indexRequests === 1) return new Response('missing', { status: 404 });
+        return Response.json({ features: [{
+          properties: { id: 'china', urls: { pbf: 'https://download.geofabrik.de/asia/china-latest.osm.pbf' } }
+        }] });
+      }
+      if (init.method === 'HEAD') {
+        return new Response(null, { status: 200, headers: {
+          'last-modified': 'Mon, 27 Jul 2026 00:00:00 GMT', etag: 'fixture', 'content-length': '100'
+        } });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const adapters = createSourceAdapters({ fetchImpl });
+    const shard = {
+      id: 'geofabrik-osm-cn', countryCode: 'CN', extractId: 'china',
+      source: { adapter: 'geofabrik' }
+    };
+    await expect(adapters.discover(shard)).rejects.toMatchObject({ code: 'SOURCE_METADATA_HTTP', status: 404 });
+    await expect(adapters.discover(shard)).resolves.toMatchObject({ version: '2026-07-27-fixture' });
+    expect(indexRequests).toBe(2);
+  });
+
   it('reuses a complete one-day-old Geofabrik PBF only during initial bootstrap', async () => {
     const cacheDir = resolve('.data-cache', `recent-bootstrap-${process.pid}-${Date.now()}`);
     const rawDir = resolve(cacheDir, 'raw');

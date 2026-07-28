@@ -40,7 +40,7 @@ describe('synchronized address registry', () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean; generationMode: string }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
-      addressCount: 8, residentialCount: 8, residentialAvailable: false, generationMode: 'synchronized-pool'
+      addressCount: 8, residentialCount: 8, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
     expect(statements).toHaveLength(2);
     expect(statements[0]).toContain('FROM address_pool_runtime address');
@@ -51,7 +51,7 @@ describe('synchronized address registry', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 
-  it('marks residential mode available once the evidence-backed pool clears the floor', async () => {
+  it('marks residential mode available when the evidence-backed pool is non-empty', async () => {
     const addressDb = {
       prepare: () => {
         const statement = {
@@ -86,6 +86,25 @@ describe('synchronized address registry', () => {
     expect(statements[0]).toContain('FROM address_pool_runtime address');
     expect(statements[0]).toContain('datetime(address.expires_at) IS NOT NULL');
     expect(statements[1]).toContain('cn_communities_v2');
+  });
+
+  it('serves lightweight availability from precomputed state', async () => {
+    const statements: string[] = [];
+    const addressDb = {
+      prepare: (sql: string) => {
+        statements.push(sql);
+        return { all: async () => ({ results: [{ code: 'US', count: 8 }, { code: 'CN', count: 2 }] }) };
+      }
+    };
+    const response = await app.request('/api/v1/availability', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: addressDb });
+    expect(await response.json()).toEqual({ data: [
+      { code: 'US', residentialAvailable: true }, { code: 'CN', residentialAvailable: true }
+    ] });
+    expect(statements[0]).toContain('sync_country_state');
+    expect(statements[0]).toContain('residential_coverage');
+    expect(statements[0]).toContain('address_datasets');
+    expect(statements[0]).not.toContain('address_pool_runtime');
+    expect(response.headers.get('Cache-Control')).toContain('max-age=30');
   });
 
   it('counts each publishable residential runtime address once and rejects stale or invalid records', async () => {

@@ -16,6 +16,7 @@ const copy = zh ? {
   intro: '每次返回一个带来源证据、坐标和国家格式的真实地址。',
   back: '返回生成器',
   endpoints: '接口',
+  authentication: '鉴权',
   params: '生成参数',
   response: '响应示例',
   sources: '数据源规则'
@@ -24,6 +25,7 @@ const copy = zh ? {
   intro: 'Each request returns one source-backed address with coordinates and country-specific formatting.',
   back: 'Back to generator',
   endpoints: 'Endpoints',
+  authentication: 'Authentication',
   params: 'Generate parameters',
   response: 'Response example',
   sources: 'Source policy'
@@ -37,6 +39,13 @@ const copy = zh ? {
       <h1>{copy.title}</h1>
       <p>{copy.intro}</p>
     </header>
+
+    <section class="api-doc-card">
+      <h2>{copy.authentication}</h2>
+      <p>{zh ? '除健康检查外，外部接口需要管理员在 /admin/ 创建的 Bearer Token。令牌可设置权限、每分钟限速和到期时间，并可在管理员会话中查看、修改或撤销。' : 'Except for the health check, external endpoints require a Bearer token created in /admin/. Tokens support scopes, per-minute limits, expiry, reveal, editing, and revocation in an administrator session.'}</p>
+      <pre><code>{`Authorization: Bearer YOUR_API_TOKEN`}</code></pre>
+      <p>{zh ? '令牌无效或过期返回 401；超过每分钟限速返回 429，并附带 Retry-After: 60。' : 'Invalid or expired tokens return 401. Rate-limit exhaustion returns 429 with Retry-After: 60.'}</p>
+    </section>
 
     <section class="api-doc-card">
       <h2>{copy.endpoints}</h2>
