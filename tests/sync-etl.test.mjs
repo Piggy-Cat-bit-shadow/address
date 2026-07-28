@@ -369,11 +369,14 @@ describe('built-in ETL planning and publishing', () => {
     directories.push(directory);
     await mkdir(directory, { recursive: true });
     const file = resolve(directory, 'fixture.jsonl');
-    await writeFile(file, `${JSON.stringify({
+    await writeFile(file, `${[{
       id: 'overture-1', admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
       postcode: '19103', street: 'Market\u2028Street', number: '1700', longitude: -75.169, latitude: 39.953,
       property_type: 'residential', residential_building_id: 'building-1', residential_building_class: 'house'
-    })}\n`, 'utf8');
+    }, {
+      id: 'overture-address-only', admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
+      postcode: '19103', street: 'Market Street', number: '1701', longitude: -75.168, latitude: 39.953
+    }].map(JSON.stringify).join('\n')}\n`, 'utf8');
     const database = openDatabase(':memory:');
     const importer = new SqliteAddressImporter({
       database,
@@ -395,7 +398,10 @@ describe('built-in ETL planning and publishing', () => {
       maxRecords: 10,
       perLocality: 2
     });
-    expect(result).toMatchObject({ acceptedCount: 1, rejectedCount: 0, localityCount: 1, skipped: false });
+    expect(result).toMatchObject({
+      acceptedCount: 1, rejectedCount: 1, localityCount: 1, skipped: false,
+      rejectionReasons: { missing_residential_evidence: 1 }
+    });
     expect(await database.prepare('SELECT status,active_count FROM address_datasets WHERE id=?').bind(result.datasetId).first())
       .toMatchObject({ status: 'active', active_count: 1 });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM address_pool_runtime').first('count')).toBe(1);
@@ -405,7 +411,8 @@ describe('built-in ETL planning and publishing', () => {
     expect(await database.prepare('SELECT COUNT(*) AS count FROM pool_coverage').first('count')).toBe(1);
     await writeFile(file, `${JSON.stringify({
       id: 'overture-2', admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
-      postcode: '19103', street: 'Market Street', number: '1800', longitude: -75.17, latitude: 39.954
+      postcode: '19103', street: 'Market Street', number: '1800', longitude: -75.17, latitude: 39.954,
+      property_type: 'residential', residential_building_id: 'building-2', residential_building_class: 'house'
     })}\n`, 'utf8');
     const replacementSource = { ...source, id: 'replacement-source', name: 'Replacement source' };
     const replacement = await importer.importShard({
@@ -444,7 +451,8 @@ describe('built-in ETL planning and publishing', () => {
       ['3', 'New York', 'New York'], ['4', 'New York', 'Buffalo']
     ].map(([id, admin1, locality]) => ({
       id, admin1, locality, postal_city: locality, postcode: `1000${id}`, street: 'Main Street', number: id,
-      longitude: -75 + Number(id) / 100, latitude: 40 + Number(id) / 100
+      longitude: -75 + Number(id) / 100, latitude: 40 + Number(id) / 100,
+      property_type: 'residential', residential_building_id: `building-${id}`, residential_building_class: 'house'
     }));
     await writeFile(file, `${rows.map(JSON.stringify).join('\n')}\n`, 'utf8');
     const shard = { id: 'quality-us', countryCode: 'US', source, qualityGate: {
@@ -472,7 +480,8 @@ describe('built-in ETL planning and publishing', () => {
     const databasePath = resolve(directory, 'address.sqlite');
     await writeFile(file, `${JSON.stringify({
       id: 'overture-default', admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
-      postcode: '19103', street: 'Market Street', number: '1700', longitude: -75.169, latitude: 39.953
+      postcode: '19103', street: 'Market Street', number: '1700', longitude: -75.169, latitude: 39.953,
+      property_type: 'residential', residential_building_id: 'building-default', residential_building_class: 'house'
     })}\n`, 'utf8');
     const localizeRecords = async (records) => records.map((record) => ({
       ...record,

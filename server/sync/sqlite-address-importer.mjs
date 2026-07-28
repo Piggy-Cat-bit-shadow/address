@@ -179,7 +179,7 @@ const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
   if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(record.components, countryCode);
   return quality;
 };
-export const ADDRESS_IMPORT_REVISION = 'strict-quality-v14';
+export const ADDRESS_IMPORT_REVISION = 'strict-residential-v15';
 
 export class SourceQualityError extends Error {
   constructor(shardId, retrySignature, rejectionReasons) {
@@ -356,6 +356,10 @@ export class SqliteAddressImporter {
       const quality = applyQualityGate(record, shard.countryCode, this.rebuildFormattedAddress);
       if (!quality.valid) {
         reject(quality.reasons);
+        continue;
+      }
+      if (!['residential', 'apartment'].includes(record.propertyType) || !record.residentialSourceRecordId) {
+        reject(['missing_residential_evidence']);
         continue;
       }
       seen.add(record.canonicalHash);
