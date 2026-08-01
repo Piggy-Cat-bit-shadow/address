@@ -1,6 +1,9 @@
 name: Address Lite
 
 on:
+  push:
+    branches:
+      - codex/address-lite-ultra
   workflow_dispatch:
     inputs:
       deploy:
