@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { runAddressEtl } from '../../server/sync/address-etl.mjs';
 import { loadSourceCatalog } from '../../server/sync/source-adapters.mjs';
 import { openDatabase } from '../../server/database/sqlite.mjs';
+import { emptyResidentialFailure, emptyResidentialMetrics } from './failure-policy.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const manifestPath = resolve(root, 'config/lite-targets.json');
@@ -186,25 +187,35 @@ const buildAttempt = async (attemptTargets, tier, syntheticBounds) => {
   };
   const catalog = { ...baseCatalog, shards: [shard] };
   const started = performance.now();
-  const result = await runAddressEtl({
-    databasePath,
-    cacheDir,
-    dataRoot: resolve(attemptRoot, 'data'),
-    requestedShards: [shard.id],
-    force: true,
-    syncMode: 'manual',
-    softLimitBytes: 8 * 1024 ** 3,
-    hardLimitBytes: 11 * 1024 ** 3,
-    maxRecords,
-    perLocality: localityLimit,
-    maxShardsPerRun: 1,
-    requireResidential: true,
-    retainRaw: false,
-    prepareConcurrency: 1,
-    cpuConcurrency: 1,
-    catalog
-  });
-  const rows = await readVerifiedRows(databasePath);
+  let result;
+  let rows;
+  try {
+    result = await runAddressEtl({
+      databasePath,
+      cacheDir,
+      dataRoot: resolve(attemptRoot, 'data'),
+      requestedShards: [shard.id],
+      force: true,
+      syncMode: 'manual',
+      softLimitBytes: 8 * 1024 ** 3,
+      hardLimitBytes: 11 * 1024 ** 3,
+      maxRecords,
+      perLocality: localityLimit,
+      maxShardsPerRun: 1,
+      requireResidential: true,
+      retainRaw: false,
+      prepareConcurrency: 1,
+      cpuConcurrency: 1,
+      catalog
+    });
+    rows = await readVerifiedRows(databasePath);
+  } catch (error) {
+    if (!emptyResidentialFailure(error)) throw error;
+    const metrics = emptyResidentialMetrics(error);
+    console.warn(`[address-lite] ${identity} tier=${tier} produced no verified residential rows; recording shortage and continuing strict retries`);
+    result = { reports: [{ ...metrics }] };
+    rows = [];
+  }
   return { result, rows, databasePath, elapsedMs: Math.round(performance.now() - started), maxRecords, localityLimit };
 };
 
