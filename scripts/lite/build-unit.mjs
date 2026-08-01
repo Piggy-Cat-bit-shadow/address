@@ -251,7 +251,8 @@ for (const { target, addresses, attempt } of outputs) {
     country,
     target: {
       id: target.id, label: target.label, labelZh: target.labelZh, category: target.category,
-      scope: target.scope, bounds: target.bounds, note: target.note || ''
+      scope: target.scope, bounds: target.bounds, note: target.note || '',
+      ...(target.tax ? { tax: { ...target.tax } } : {})
     },
     stats: {
       addresses: addresses.length,

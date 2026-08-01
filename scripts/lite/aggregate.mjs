@@ -40,6 +40,7 @@ for (const target of manifest.targets) {
   country.targets.push({
     id: target.id, label: target.label, labelZh: target.labelZh, category: target.category,
     scope: target.scope, file: `/data/${target.file}`, note: target.note || '',
+    ...(target.tax ? { tax: { ...target.tax } } : {}),
     maxAddresses: manifest.candidateProfiles[target.scope].outputCap,
     addresses: payload.stats.addresses, postcodes: payload.stats.postcodes
   });

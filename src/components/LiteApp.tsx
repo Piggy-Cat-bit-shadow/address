@@ -3,7 +3,9 @@ import './LiteApp.css';
 
 type Locale = 'en' | 'zh-CN';
 type Category = 'low_tax' | 'major_city';
-interface TargetIndex { id: string; label: string; labelZh: string; category: Category; scope: string; file: string; note: string; maxAddresses: number; addresses: number; postcodes: number }
+type TaxType = 'tax_free' | 'low_tax' | 'special_tax_zone' | 'vat_gst_reduced' | 'customs_free_zone';
+interface TaxMetadata { type: TaxType; rate: string; label: string; note: string; noteZh: string }
+interface TargetIndex { id: string; label: string; labelZh: string; category: Category; scope: string; file: string; note: string; tax?: TaxMetadata; maxAddresses: number; addresses: number; postcodes: number }
 interface CountryIndex { code: string; name: string; nameZh: string; targets: TargetIndex[] }
 interface IndexPayload { generatedAt: string; maxAddressesPerPostcode: number; totalAddresses: number; countries: CountryIndex[] }
 interface AddressSource { name: string; url: string; license: string; licenseUrl: string; attribution: string; attributionUrl: string; datasetVersion: string; sourceRecordId: string }
@@ -15,7 +17,30 @@ interface AddressItem {
 interface PostcodeNode { postcode: string; addresses: AddressItem[] }
 interface CityNode { name: string; postcodes: PostcodeNode[] }
 interface RegionNode { name: string; cities: CityNode[] }
-interface TargetPayload { generatedAt: string; target: { id: string; label: string; labelZh: string; category: Category; note: string }; stats: { addresses: number; postcodes: number }; regions: RegionNode[] }
+interface TargetPayload { generatedAt: string; target: { id: string; label: string; labelZh: string; category: Category; note: string; tax?: TaxMetadata }; stats: { addresses: number; postcodes: number }; regions: RegionNode[] }
+
+export const taxTypeLabels: Record<Locale, Record<TaxType, string>> = {
+  en: {
+    tax_free: 'Tax-free state / territory',
+    low_tax: 'Low-tax state / province',
+    special_tax_zone: 'Special tax zone',
+    vat_gst_reduced: 'VAT / GST reduced area',
+    customs_free_zone: 'Customs-free zone'
+  },
+  'zh-CN': {
+    tax_free: '免税州 / 地区',
+    low_tax: '低税州 / 省',
+    special_tax_zone: '特殊税区',
+    vat_gst_reduced: 'VAT / GST 优惠区',
+    customs_free_zone: '免税海关区'
+  }
+};
+
+export const formatTaxReference = (tax: TaxMetadata, locale: Locale) => {
+  const reference = `${tax.rate} ${tax.label}`;
+  const note = locale === 'zh-CN' ? tax.noteZh : tax.note;
+  return note ? `${reference} · ${note}` : reference;
+};
 
 const copyText = async (value: string) => navigator.clipboard?.writeText(value);
 const randomItem = <T,>(values: T[]): T | undefined => {
@@ -33,14 +58,14 @@ const strings = {
     low: 'Low-tax / tax-free', cities: 'Major cities', target: 'Target area', region: 'Region', city: 'City / locality', postcode: 'Postcode',
     any: 'Any', generate: 'Generate address', another: 'Another one', copy: 'Copy', copied: 'Copied', verified: 'Residential evidence verified',
     noData: 'No verified residential address is available for this selection.', loading: 'Loading static address data…', source: 'Source', updated: 'Data build',
-    addresses: 'addresses', postcodes: 'postcode groups', note: 'Tax-area note', location: 'Coordinates', unavailable: 'This group is not configured for the selected country.'
+    addresses: 'addresses', postcodes: 'postcode groups', taxType: 'Tax type', taxReference: 'Tax reference', location: 'Coordinates', unavailable: 'This group is not configured for the selected country.'
   },
   'zh-CN': {
     title: 'Address Lite', subtitle: '真实住宅证据验证 · 全静态数据 · 不需要服务器 API', country: '国家 / 地区', category: '地址分类',
     low: '低税 / 免税地区', cities: '主要城市', target: '目标地区', region: 'Region', city: 'City / Locality', postcode: 'Postcode',
     any: '任意', generate: '随机生成地址', another: '换一个', copy: '复制', copied: '已复制', verified: '已通过住宅证据验证',
     noData: '当前筛选条件没有可用的已验证住宅地址。', loading: '正在加载静态地址数据…', source: '数据来源', updated: '数据构建时间',
-    addresses: '条地址', postcodes: '个邮编组', note: '税务地区说明', location: '坐标', unavailable: '当前国家没有配置这一分类。'
+    addresses: '条地址', postcodes: '个邮编组', taxType: '低税类型', taxReference: '税率参考', location: '坐标', unavailable: '当前国家没有配置这一分类。'
   }
 } as const;
 
@@ -144,7 +169,10 @@ export default function LiteApp({ locale }: { locale: Locale }) {
         {targets.map((entry) => <option key={entry.id} value={entry.id}>{locale === 'zh-CN' ? entry.labelZh : entry.label} · {entry.addresses} {t.addresses}</option>)}
       </select></label> : <p className="lite-muted">{t.unavailable}</p>}
 
-      {target?.note && <div className="lite-note"><strong>{t.note}</strong><span>{target.note}</span></div>}
+      {category === 'low_tax' && target?.tax && <div className="lite-tax">
+        <div><strong>{t.taxType}</strong><span>{taxTypeLabels[locale][target.tax.type]}</span></div>
+        <div><strong>{t.taxReference}</strong><span>{formatTaxReference(target.tax, locale)}</span></div>
+      </div>}
       {loading && <p className="lite-muted">{t.loading}</p>}
       {error && <p className="lite-error">{error}</p>}
 

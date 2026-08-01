@@ -154,6 +154,13 @@
       "file": "US/DE.json",
       "jobGroup": "US-DE",
       "note": "≈ 0% general sales tax",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "General rate",
+        "noteZh": "一般税"
+      },
       "regionAliases": [
         "Delaware",
         "DE"
@@ -175,6 +182,13 @@
       "file": "US/OR.json",
       "jobGroup": "US-OR",
       "note": "≈ 0% general sales tax",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "General rate",
+        "noteZh": "一般税"
+      },
       "regionAliases": [
         "Oregon",
         "OR"
@@ -196,6 +210,13 @@
       "file": "US/NH.json",
       "jobGroup": "US-NH",
       "note": "≈ 0% general sales tax; meals/lodging may be taxed separately",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Meals / lodging may have separate taxes",
+        "noteZh": "餐饮 / 住宿等另有专项税"
+      },
       "regionAliases": [
         "New Hampshire",
         "NH"
@@ -217,6 +238,13 @@
       "file": "US/MT.json",
       "jobGroup": "US-MT",
       "note": "≈ 0% general sales tax; some resort areas differ",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some resort areas differ",
+        "noteZh": "部分 resort 地区例外"
+      },
       "regionAliases": [
         "Montana",
         "MT"
@@ -301,6 +329,13 @@
       "file": "CA/AB.json",
       "jobGroup": "CA-AB",
       "note": "≈ 5% federal GST; PST 0%",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
       "regionAliases": [
         "Alberta",
         "AB"
@@ -322,6 +357,13 @@
       "file": "CA/YT.json",
       "jobGroup": "CA-YT",
       "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
       "regionAliases": [
         "Yukon",
         "YT"
@@ -343,6 +385,13 @@
       "file": "CA/NT.json",
       "jobGroup": "CA-NT",
       "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
       "regionAliases": [
         "Northwest Territories",
         "NT"
@@ -364,6 +413,13 @@
       "file": "CA/NU.json",
       "jobGroup": "CA-NU",
       "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
       "regionAliases": [
         "Nunavut",
         "NU"
@@ -550,7 +606,14 @@
       ],
       "file": "DE/BUS.json",
       "jobGroup": "DE-BUS",
-      "note": "Swiss VAT area; general rate around 8.1%"
+      "note": "Swiss VAT area; general rate around 8.1%",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 8.1%",
+        "label": "VAT",
+        "note": "Uses the Swiss VAT system",
+        "noteZh": "适用瑞士 VAT 体系"
+      }
     },
     {
       "id": "DE-HEL",
@@ -567,7 +630,14 @@
       ],
       "file": "DE/HEL.json",
       "jobGroup": "DE-HEL",
-      "note": "Special customs/VAT area"
+      "note": "Special customs/VAT area",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "VAT",
+        "note": "Special customs zone",
+        "noteZh": "特殊海关区"
+      }
     },
     {
       "id": "DE-BER",
@@ -686,7 +756,14 @@
       ],
       "file": "IT/CAM.json",
       "jobGroup": "IT-CAM",
-      "note": "ILCCI general rate around Swiss VAT level"
+      "note": "ILCCI general rate around Swiss VAT level",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 8.1%",
+        "label": "ILCCI",
+        "note": "General rate",
+        "noteZh": "一般税率"
+      }
     },
     {
       "id": "IT-LIV",
@@ -703,7 +780,14 @@
       ],
       "file": "IT/LIV.json",
       "jobGroup": "IT-LIV",
-      "note": "Special customs/VAT area"
+      "note": "Special customs/VAT area",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "VAT",
+        "note": "Special customs zone",
+        "noteZh": "特殊海关区"
+      }
     },
     {
       "id": "IT-ROM",
@@ -772,6 +856,13 @@
       "file": "ES/CAN.json",
       "jobGroup": "ES-CAN",
       "note": "IGIC general rate around 7%",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 7%",
+        "label": "IGIC",
+        "note": "",
+        "noteZh": ""
+      },
       "regionAliases": [
         "Canary Islands",
         "Canarias"
@@ -792,7 +883,14 @@
       ],
       "file": "ES/MEL.json",
       "jobGroup": "ES-MEL",
-      "note": "Special IPSI tax regime"
+      "note": "Special IPSI tax regime",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 4%",
+        "label": "IPSI",
+        "note": "Varies by goods / services",
+        "noteZh": "具体税率依商品 / 服务变化"
+      }
     },
     {
       "id": "ES-CEU",
@@ -809,7 +907,14 @@
       ],
       "file": "ES/CEU.json",
       "jobGroup": "ES-CEU",
-      "note": "Special IPSI tax regime"
+      "note": "Special IPSI tax regime",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 4%",
+        "label": "IPSI",
+        "note": "Varies by goods / services",
+        "noteZh": "具体税率依商品 / 服务变化"
+      }
     },
     {
       "id": "ES-MAD",
@@ -979,7 +1084,14 @@
       ],
       "file": "HK/SAR.json",
       "jobGroup": "HK",
-      "note": "No general sales tax / VAT / GST"
+      "note": "No general sales tax / VAT / GST",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "VAT / GST",
+        "note": "No general sales tax",
+        "noteZh": "无一般消费税"
+      }
     },
     {
       "id": "HK-HKI",
@@ -1370,7 +1482,14 @@
       ],
       "file": "MY/LGK.json",
       "jobGroup": "MY",
-      "note": "Duty-free status applies to many qualifying goods; exceptions exist"
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
     },
     {
       "id": "MY-LBU",
@@ -1387,7 +1506,14 @@
       ],
       "file": "MY/LBU.json",
       "jobGroup": "MY",
-      "note": "Duty-free status applies to many qualifying goods; exceptions exist"
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
     },
     {
       "id": "MY-TIO",
@@ -1404,7 +1530,14 @@
       ],
       "file": "MY/TIO.json",
       "jobGroup": "MY",
-      "note": "Duty-free status applies to many qualifying goods; exceptions exist"
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
     },
     {
       "id": "MY-KUL",
