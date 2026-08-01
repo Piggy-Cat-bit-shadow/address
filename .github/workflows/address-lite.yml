@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy the finished static site to the VPS
+        description: Deploy the finished static site to the configured remote host
         required: true
         default: false
         type: boolean
@@ -155,13 +155,6 @@ jobs:
     if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}
     runs-on: ubuntu-latest
     environment: address-lite-production
-    env:
-      VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_USER: ${{ secrets.VPS_USER }}
-      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-      VPS_PORT: ${{ secrets.VPS_PORT }}
-      VPS_WEB_ROOT: ${{ secrets.VPS_WEB_ROOT }}
-      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -169,51 +162,99 @@ jobs:
           path: ${{ runner.temp }}/release
       - id: config
         shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
-          if [[ -n "$VPS_HOST" && -n "$VPS_USER" && -n "$VPS_SSH_KEY" ]]; then
+          if [[ -n "$DEPLOY_HOST" && -n "$DEPLOY_USER" && -n "$DEPLOY_SSH_KEY" && -n "$DEPLOY_ROOT" && -n "$DEPLOY_KNOWN_HOSTS" ]]; then
             echo 'ready=true' >> "$GITHUB_OUTPUT"
           else
             echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo 'VPS secrets are not configured; build succeeded and deployment is skipped.'
+            echo 'Deployment secrets are not fully configured; deployment is skipped.'
           fi
-      - name: Deploy atomically to VPS
+      - name: Deploy atomically to remote host
         if: steps.config.outputs.ready == 'true'
         shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          port="${VPS_PORT:-22}"
-          root="${VPS_WEB_ROOT:-/var/www/address}"
+          port="${DEPLOY_PORT:-22}"
+          root="$DEPLOY_ROOT"
           release_id="${GITHUB_SHA::12}"
           archive="$(find "$RUNNER_TEMP/release" -name 'address-lite-*.tar.gz' -type f | head -n1)"
           checksum="$archive.sha256"
+          credential_dir="$RUNNER_TEMP/address-lite-deploy-credentials"
+          private_key="$credential_dir/private-key"
+          known_hosts="$credential_dir/known_hosts"
+          cleanup_local_credentials() {
+            rm -rf -- "$credential_dir"
+          }
+          trap cleanup_local_credentials EXIT
           (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$checksum")")
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/address-lite
-          chmod 600 ~/.ssh/address-lite
-          if [[ -n "${VPS_KNOWN_HOSTS:-}" ]]; then
-            printf '%s\n' "$VPS_KNOWN_HOSTS" >> ~/.ssh/known_hosts
-          else
-            ssh-keyscan -p "$port" -H "$VPS_HOST" >> ~/.ssh/known_hosts
-          fi
-          scp -P "$port" -i ~/.ssh/address-lite "$archive" "$checksum" "$VPS_USER@$VPS_HOST:/tmp/"
-          ssh -p "$port" -i ~/.ssh/address-lite "$VPS_USER@$VPS_HOST" \
+          install -m 700 -d "$credential_dir"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts"
+          chmod 600 "$known_hosts"
+          ssh_options=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts")
+          scp -P "$port" -i "$private_key" "${ssh_options[@]}" "$archive" "$checksum" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
+          ssh -p "$port" -i "$private_key" "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
             "ROOT='$root' RELEASE='$release_id' bash -s" <<'REMOTE'
           set -euo pipefail
-          cd /tmp
-          sha256sum -c "address-lite-$RELEASE.tar.gz.sha256"
+          umask 022
+          archive="/tmp/address-lite-$RELEASE.tar.gz"
+          checksum="$archive.sha256"
           incoming="$ROOT/releases/$RELEASE.incoming"
           final="$ROOT/releases/$RELEASE"
+          cleanup_remote_files() {
+            rm -f -- "$archive" "$checksum"
+            if [[ -n "${incoming:-}" && -d "$incoming" ]]; then
+              rm -rf -- "$incoming"
+            fi
+          }
+          trap cleanup_remote_files EXIT
+          cd /tmp
+          sha256sum -c "$(basename "$checksum")"
           mkdir -p "$ROOT/releases"
           rm -rf "$incoming"
           mkdir -p "$incoming"
-          tar -xzf "/tmp/address-lite-$RELEASE.tar.gz" -C "$incoming"
+          tar --no-same-owner -xzf "$archive" -C "$incoming"
           test -s "$incoming/index.html"
           test -s "$incoming/data/countries.json"
-          rm -rf "$final"
-          mv "$incoming" "$final"
+          if [[ -e "$final" ]]; then
+            test -s "$final/index.html"
+            test -s "$final/data/countries.json"
+            rm -rf "$incoming"
+          else
+            mv "$incoming" "$final"
+          fi
+          incoming=''
           ln -sfn "releases/$RELEASE" "$ROOT/current.next"
           mv -Tf "$ROOT/current.next" "$ROOT/current"
-          rm -f "/tmp/address-lite-$RELEASE.tar.gz" "/tmp/address-lite-$RELEASE.tar.gz.sha256"
-          cd "$ROOT/releases"
-          ls -1dt */ 2>/dev/null | tail -n +4 | xargs -r rm -rf --
+          active_release="$(basename "$(readlink "$ROOT/current")")"
+          mapfile -t release_dirs < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn | cut -d' ' -f2-)
+          formal_releases=()
+          for release_dir in "${release_dirs[@]}"; do
+            if [[ "$release_dir" =~ ^[0-9a-f]{12}$ ]]; then
+              formal_releases+=("$release_dir")
+            fi
+          done
+          declare -A keep_releases=(["$active_release"]=1)
+          for release_dir in "${formal_releases[@]:0:3}"; do
+            keep_releases["$release_dir"]=1
+          done
+          for release_dir in "${formal_releases[@]}"; do
+            if [[ -z "${keep_releases[$release_dir]:-}" ]]; then
+              rm -rf -- "$ROOT/releases/$release_dir"
+            fi
+          done
           REMOTE

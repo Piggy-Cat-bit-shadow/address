@@ -1,6 +1,6 @@
-# Put these locations in the existing server{} block for the Address hostname.
-# The GitHub Actions deployment maintains /var/www/address/current atomically.
-root /var/www/address/current;
+# Add these locations to the static HTTP server configuration.
+# The GitHub Actions deployment maintains <deploy-root>/current atomically.
+root /path/to/static-site/current;
 index index.html;
 
 location = /data/countries.json {

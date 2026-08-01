@@ -12,14 +12,14 @@ GitHub Actions
   -> max 3 addresses per Region + City + Postcode slot
   -> static JSON shards
   -> Astro static build
-  -> atomic upload to VPS
+  -> atomic upload to a configured remote host
 
-VPS
-  -> Nginx only
-  -> /var/www/address/current -> releases/<commit>
+Remote host
+  -> static HTTP server only
+  -> <deploy-root>/current -> releases/<commit>
 ```
 
-The VPS does **not** run Node, SQLite, Python, DuckDB, the sync controller, or Supervisor for Address Lite.
+The remote host does **not** run Node, SQLite, Python, DuckDB, the sync controller, or Supervisor for Address Lite.
 
 ## Quality invariants
 
@@ -234,39 +234,41 @@ Manual build:
 1. Open **Actions -> Address Lite**.
 2. Choose **Run workflow**.
 3. Leave `deploy=false` for a build-only test.
-4. Set `deploy=true` after VPS secrets are configured.
+4. Set `deploy=true` after the deployment secrets are configured.
 
-A weekly rebuild is configured for Sunday 03:17 UTC. Scheduled runs also attempt deployment when deployment secrets exist. Missing VPS secrets do not fail the build; the deployment step is skipped.
+A weekly rebuild is configured for Sunday 03:17 UTC. Scheduled runs also attempt deployment when all required deployment secrets exist. Missing deployment secrets do not fail the build; the deployment step is skipped.
 
-## Deployment secrets
+## Generic remote static deployment
 
 Create the GitHub Environment `address-lite-production`, then configure:
 
 Required:
 
-- `VPS_HOST` - VPS hostname or IP
-- `VPS_USER` - SSH user that owns the Address release directory
-- `VPS_SSH_KEY` - private key for that SSH user
+- `DEPLOY_HOST` - remote hostname or IP
+- `DEPLOY_USER` - dedicated non-root deployment account
+- `DEPLOY_SSH_KEY` - private key for that account, stored only as a GitHub Environment Secret
+- `DEPLOY_ROOT` - absolute remote directory managed by the deployment account
+- `DEPLOY_KNOWN_HOSTS` - pinned SSH host key entry or entries
 
 Optional:
 
-- `VPS_PORT` - defaults to `22`
-- `VPS_WEB_ROOT` - defaults to `/var/www/address`
-- `VPS_KNOWN_HOSTS` - recommended: pinned `known_hosts` line(s) for the VPS; if omitted the workflow falls back to `ssh-keyscan`
+- `DEPLOY_PORT` - defaults to the standard SSH port `22`
 
-Run `ops/address-lite/bootstrap-vps.sh` once on the VPS to create the directory layout. The user used by Actions must be able to write that directory.
+Run `sudo bash ops/address-lite/bootstrap-vps.sh <web-root> <owner>` once to create the deployment root and its `releases` directory. The dedicated deployment account needs SSH access and write access to `DEPLOY_ROOT` and the remote temporary directory. It does not need `sudo` or root SSH. The static HTTP server only needs read access through `DEPLOY_ROOT/current`.
 
-## Nginx
+The workflow requires pinned `DEPLOY_KNOWN_HOSTS`; it does not discover or trust a host key on first connection. Its temporary private-key and `known_hosts` files are removed on both successful and failed exits. The remote extraction uses `umask 022` and `tar --no-same-owner` so files in a new release belong to the deployment account instead of restoring UID/GID values recorded by the GitHub runner archive.
 
-Point the existing Nginx virtual host at:
+## Static HTTP server
 
-```nginx
-root /var/www/address/current;
+Point the existing static HTTP server at:
+
+```text
+<deploy-root>/current
 ```
 
 A complete location example is provided in `ops/address-lite/nginx.conf.example`.
 
-The release archive is SHA-256 verified both on the runner and again on the VPS before extraction. Deployment is atomic:
+The release archive is SHA-256 verified both on the runner and again on the remote host before extraction. Deployment is atomic:
 
 ```text
 upload archive to /tmp
@@ -277,14 +279,14 @@ upload archive to /tmp
 -> retain the latest 3 releases
 ```
 
-No Nginx reload is required for a normal data update because the document-root symlink remains the same path.
+No HTTP server reload is required for a normal data update because the document-root symlink remains the same path. The workflow retains the three newest commit-named releases and always protects the release referenced by `current` from cleanup.
 
 ## Observed resource profile
 
 Complete 63-group GitHub Actions runs have succeeded. The latest pre-release baseline completed in about 41 minutes and produced a static site artifact under 200 KiB. Per-target address counts, shortages, source-size estimates, elapsed time and peak RSS remain available in the `address-lite-metrics` artifact for each run.
 
-- VPS Address-specific resident processes: approximately 0 MB (no Address daemon)
-- VPS request memory: Nginx/kernel page-cache only
+- remote-host Address-specific resident processes: approximately 0 MB (no Address daemon)
+- remote-host request memory: static HTTP server/kernel page-cache only
 - Overture Action job: DuckDB remains capped at 2 GB plus Node/Python/runtime overhead
 - Geofabrik Action job: disk/download volume can dominate because the source PBF still has to be obtained; bbox filtering reduces retained candidates and downstream work, not the remote PBF file size
 
