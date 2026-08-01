@@ -69,7 +69,10 @@ describe('Address Lite generic remote deployment', () => {
     expect(workflow).toContain('rm -rf -- "$ROOT/releases/$release_dir"');
   });
 
-  it('keeps build-only pushes, opt-in manual deploys, and the weekly schedule', () => {
+  it('keeps opt-in manual deploys and the weekly schedule without a push trigger', () => {
+    expect(workflow).not.toMatch(/^  push:/mu);
+    expect(workflow).toMatch(/^  workflow_dispatch:/mu);
+    expect(workflow).toMatch(/^  schedule:/mu);
     expect(workflow).toContain("if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}");
     expect(workflow).toContain("default: false");
     expect(workflow).toContain("cron: '17 3 * * 0'");

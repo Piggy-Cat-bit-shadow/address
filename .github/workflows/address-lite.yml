@@ -1,9 +1,6 @@
 name: Address Lite
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       deploy:
