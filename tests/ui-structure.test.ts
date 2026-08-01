@@ -15,17 +15,12 @@ import { messages } from '../src/domain/i18n';
 const appSource = App.toString();
 const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
 const adminPageSource = readFileSync('src/pages/admin.astro', 'utf8');
-const adminSource = readFileSync('src/components/SyncAdmin.tsx', 'utf8');
 
 describe('strict residential generator page structure', () => {
-  it('keeps the standalone admin page branded and exposes blacklist management', () => {
-    expect(adminPageSource).toContain('href="/favicon.svg"');
-    expect(adminSource).toContain("blacklist: '地址黑名单'");
-    expect(adminSource).toContain("blacklistTitle: '地址黑名单'");
-    expect(adminSource).toContain("'/settings/blacklist'");
-    expect(adminSource).not.toContain('admin-topbar-copy');
-    expect(adminSource).toContain('合格住宅小区');
-    expect(adminSource).toContain('增强验证');
+  it('redirects the retired runtime admin page to the static Lite site', () => {
+    expect(adminPageSource).toContain("const target = '/'");
+    expect(adminPageSource).toContain('http-equiv="refresh"');
+    expect(adminPageSource).toContain('Address Lite');
   });
   it('resolves the AMap proxy to an absolute same-origin service host', () => {
     expect(resolveAmapServiceHost('/_AMapService', 'https://address.example')).toBe('https://address.example/_AMapService');

@@ -1,0 +1,177 @@
+import { useEffect, useMemo, useState } from 'react';
+import './LiteApp.css';
+
+type Locale = 'en' | 'zh-CN';
+type Category = 'low_tax' | 'major_city';
+interface TargetIndex { id: string; label: string; labelZh: string; category: Category; scope: string; file: string; note: string; maxAddresses: number; addresses: number; postcodes: number }
+interface CountryIndex { code: string; name: string; nameZh: string; targets: TargetIndex[] }
+interface IndexPayload { generatedAt: string; maxAddressesPerPostcode: number; totalAddresses: number; countries: CountryIndex[] }
+interface AddressSource { name: string; url: string; license: string; licenseUrl: string; attribution: string; attributionUrl: string; datasetVersion: string; sourceRecordId: string }
+interface AddressItem {
+  id: string; region: string; regionCode: string; city: string; locality: string; postalLocality: string; district: string;
+  postcode: string; street: string; houseNumber: string; buildingName: string; unit: string; latitude: number; longitude: number;
+  propertyType: 'residential' | 'apartment'; residentialEvidence: boolean; qualityScore: number; formattedAddress: string; formattedAddressEn: string; formattedAddressZh: string; source: AddressSource;
+}
+interface PostcodeNode { postcode: string; addresses: AddressItem[] }
+interface CityNode { name: string; postcodes: PostcodeNode[] }
+interface RegionNode { name: string; cities: CityNode[] }
+interface TargetPayload { generatedAt: string; target: { id: string; label: string; labelZh: string; category: Category; note: string }; stats: { addresses: number; postcodes: number }; regions: RegionNode[] }
+
+const copyText = async (value: string) => navigator.clipboard?.writeText(value);
+const randomItem = <T,>(values: T[]): T | undefined => {
+  if (!values.length) return undefined;
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(bytes);
+    return values[bytes[0] % values.length];
+  }
+  return values[Math.floor(Math.random() * values.length)];
+};
+const strings = {
+  en: {
+    title: 'Address Lite', subtitle: 'Verified residential addresses · static data · no server API', country: 'Country / region', category: 'Address group',
+    low: 'Low-tax / tax-free', cities: 'Major cities', target: 'Target area', region: 'Region', city: 'City / locality', postcode: 'Postcode',
+    any: 'Any', generate: 'Generate address', another: 'Another one', copy: 'Copy', copied: 'Copied', verified: 'Residential evidence verified',
+    noData: 'No verified residential address is available for this selection.', loading: 'Loading static address data…', source: 'Source', updated: 'Data build',
+    addresses: 'addresses', postcodes: 'postcode groups', note: 'Tax-area note', location: 'Coordinates', unavailable: 'This group is not configured for the selected country.'
+  },
+  'zh-CN': {
+    title: 'Address Lite', subtitle: '真实住宅证据验证 · 全静态数据 · 不需要服务器 API', country: '国家 / 地区', category: '地址分类',
+    low: '低税 / 免税地区', cities: '主要城市', target: '目标地区', region: 'Region', city: 'City / Locality', postcode: 'Postcode',
+    any: '任意', generate: '随机生成地址', another: '换一个', copy: '复制', copied: '已复制', verified: '已通过住宅证据验证',
+    noData: '当前筛选条件没有可用的已验证住宅地址。', loading: '正在加载静态地址数据…', source: '数据来源', updated: '数据构建时间',
+    addresses: '条地址', postcodes: '个邮编组', note: '税务地区说明', location: '坐标', unavailable: '当前国家没有配置这一分类。'
+  }
+} as const;
+
+export default function LiteApp({ locale }: { locale: Locale }) {
+  const t = strings[locale];
+  const [index, setIndex] = useState<IndexPayload>();
+  const [countryCode, setCountryCode] = useState('US');
+  const [category, setCategory] = useState<Category>('low_tax');
+  const [targetId, setTargetId] = useState('');
+  const [payload, setPayload] = useState<TargetPayload>();
+  const [regionName, setRegionName] = useState('');
+  const [cityName, setCityName] = useState('');
+  const [postcode, setPostcode] = useState('');
+  const [result, setResult] = useState<AddressItem>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    fetch('/data/countries.json', { cache: 'no-cache' })
+      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      .then((data: IndexPayload) => {
+        setIndex(data);
+        const initial = data.countries.some((country) => country.code === 'US') ? 'US' : data.countries[0]?.code || '';
+        setCountryCode(initial);
+      })
+      .catch((reason) => setError(String(reason)));
+  }, []);
+
+  const country = useMemo(() => index?.countries.find((entry) => entry.code === countryCode), [index, countryCode]);
+  const availableCategories = useMemo(() => new Set(country?.targets.map((target) => target.category) || []), [country]);
+  const targets = useMemo(() => country?.targets.filter((target) => target.category === category) || [], [country, category]);
+  const target = useMemo(() => country?.targets.find((entry) => entry.id === targetId), [country, targetId]);
+
+  useEffect(() => {
+    if (!country) return;
+    const nextCategory: Category = availableCategories.has(category) ? category : availableCategories.has('low_tax') ? 'low_tax' : 'major_city';
+    if (nextCategory !== category) setCategory(nextCategory);
+  }, [country, availableCategories, category]);
+
+  useEffect(() => {
+    const next = targets[0]?.id || '';
+    if (!targets.some((entry) => entry.id === targetId)) setTargetId(next);
+  }, [targets, targetId]);
+
+  useEffect(() => {
+    setPayload(undefined); setResult(undefined); setRegionName(''); setCityName(''); setPostcode(''); setError('');
+    if (!target) return;
+    setLoading(true);
+    fetch(target.file, { cache: 'no-cache' })
+      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      .then((data: TargetPayload) => {
+        setPayload(data);
+        setRegionName(data.regions[0]?.name || '');
+      })
+      .catch((reason) => setError(String(reason)))
+      .finally(() => setLoading(false));
+  }, [target?.id]);
+
+  const region = useMemo(() => payload?.regions.find((entry) => entry.name === regionName), [payload, regionName]);
+  useEffect(() => {
+    if (!region) { setCityName(''); return; }
+    if (!region.cities.some((entry) => entry.name === cityName)) setCityName(region.cities[0]?.name || '');
+  }, [region, cityName]);
+  const city = useMemo(() => region?.cities.find((entry) => entry.name === cityName), [region, cityName]);
+  useEffect(() => {
+    if (!city) { setPostcode(''); return; }
+    if (postcode && !city.postcodes.some((entry) => entry.postcode === postcode)) setPostcode('');
+  }, [city, postcode]);
+
+  const candidates = useMemo(() => {
+    if (!city) return [];
+    const nodes = postcode ? city.postcodes.filter((entry) => entry.postcode === postcode) : city.postcodes;
+    return nodes.flatMap((entry) => entry.addresses);
+  }, [city, postcode]);
+  const generate = () => { setResult(randomItem(candidates)); setCopied(false); };
+  const resultAddress = result
+    ? locale === 'zh-CN' && result.formattedAddressZh ? result.formattedAddressZh
+      : locale === 'en' && result.formattedAddressEn ? result.formattedAddressEn
+        : result.formattedAddress
+    : '';
+
+  if (!index && !error) return <main className="lite-shell"><div className="lite-card lite-loading">{t.loading}</div></main>;
+  return <main className="lite-shell">
+    <section className="lite-hero">
+      <div><span className="lite-kicker">ULTRA LITE</span><h1>{t.title}</h1><p>{t.subtitle}</p></div>
+      {index && <div className="lite-build"><strong>{index.totalAddresses.toLocaleString()}</strong><span>{t.addresses}</span><small>{new Date(index.generatedAt).toLocaleString(locale)}</small></div>}
+    </section>
+
+    <section className="lite-card lite-controls">
+      <label><span>{t.country}</span><select value={countryCode} onChange={(event) => setCountryCode(event.target.value)}>
+        {index?.countries.map((entry) => <option key={entry.code} value={entry.code}>{locale === 'zh-CN' ? entry.nameZh : entry.name} ({entry.code})</option>)}
+      </select></label>
+
+      <div className="lite-field"><span>{t.category}</span><div className="lite-tabs">
+        <button className={category === 'low_tax' ? 'active' : ''} disabled={!availableCategories.has('low_tax')} onClick={() => setCategory('low_tax')}>{t.low}</button>
+        <button className={category === 'major_city' ? 'active' : ''} disabled={!availableCategories.has('major_city')} onClick={() => setCategory('major_city')}>{t.cities}</button>
+      </div></div>
+
+      {targets.length ? <label><span>{t.target}</span><select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+        {targets.map((entry) => <option key={entry.id} value={entry.id}>{locale === 'zh-CN' ? entry.labelZh : entry.label} · {entry.addresses} {t.addresses}</option>)}
+      </select></label> : <p className="lite-muted">{t.unavailable}</p>}
+
+      {target?.note && <div className="lite-note"><strong>{t.note}</strong><span>{target.note}</span></div>}
+      {loading && <p className="lite-muted">{t.loading}</p>}
+      {error && <p className="lite-error">{error}</p>}
+
+      {payload && <div className="lite-grid">
+        <label><span>{t.region}</span><select value={regionName} onChange={(event) => { setRegionName(event.target.value); setResult(undefined); }}>
+          {payload.regions.map((entry) => <option key={entry.name} value={entry.name}>{entry.name}</option>)}
+        </select></label>
+        <label><span>{t.city}</span><select value={cityName} onChange={(event) => { setCityName(event.target.value); setPostcode(''); setResult(undefined); }}>
+          {region?.cities.map((entry) => <option key={entry.name} value={entry.name}>{entry.name}</option>)}
+        </select></label>
+        <label><span>{t.postcode}</span><select value={postcode} onChange={(event) => { setPostcode(event.target.value); setResult(undefined); }}>
+          <option value="">{t.any}</option>{city?.postcodes.map((entry) => <option key={entry.postcode || '__blank'} value={entry.postcode}>{entry.postcode || '—'} ({entry.addresses.length})</option>)}
+        </select></label>
+      </div>}
+      <button className="lite-generate" disabled={!candidates.length} onClick={generate}>{result ? t.another : t.generate}</button>
+      {payload && <p className="lite-summary">{payload.stats.addresses} {t.addresses} · {payload.stats.postcodes} {t.postcodes}</p>}
+    </section>
+
+    {result ? <section className="lite-card lite-result">
+      <div className="lite-result-head"><span className="lite-verified">✓ {t.verified}</span><span>{Math.round(result.qualityScore * 100)}%</span></div>
+      <h2>{resultAddress}</h2>
+      <dl>
+        <div><dt>{t.region}</dt><dd>{result.region || '—'}</dd></div><div><dt>{t.city}</dt><dd>{result.city || result.locality || '—'}</dd></div>
+        <div><dt>{t.postcode}</dt><dd>{result.postcode || '—'}</dd></div><div><dt>{t.location}</dt><dd>{result.latitude.toFixed(6)}, {result.longitude.toFixed(6)}</dd></div>
+      </dl>
+      <div className="lite-actions"><button onClick={async () => { await copyText(resultAddress); setCopied(true); }}>{copied ? t.copied : t.copy}</button></div>
+      <footer><span>{t.source}: {result.source.name}</span>{result.source.license && <span>{result.source.license}</span>}<span>{t.updated}: {payload?.generatedAt ? new Date(payload.generatedAt).toLocaleDateString(locale) : '—'}</span></footer>
+    </section> : payload && !candidates.length ? <section className="lite-card lite-empty">{t.noData}</section> : null}
+  </main>;
+}
