@@ -46,8 +46,32 @@ The manifest currently contains:
 
 The UI presents two separate categories:
 
-1. Low-tax / tax-free areas
-2. Major cities
+1. 19 low-tax / tax-free areas
+2. 76 major cities
+
+The two categories remain independent. Every `low_tax` target must define structured tax metadata, while `major_city` targets are not allowed to define it:
+
+```json
+{
+  "tax": {
+    "type": "vat_gst_reduced",
+    "rate": "≈ 5%",
+    "label": "GST",
+    "note": "PST 0%",
+    "noteZh": "PST 0%"
+  }
+}
+```
+
+Supported `tax.type` values are:
+
+- `tax_free`
+- `low_tax`
+- `special_tax_zone`
+- `vat_gst_reduced`
+- `customs_free_zone`
+
+Tax metadata is a manually maintained, concise frontend reference. It is copied into the static target JSON and `countries.json`; it is not calculated by the sync pipeline and does not participate in residential validation. The legacy target `note` field remains for compatibility, but the production `LiteApp` renders only structured `tax` metadata for a selected `low_tax` target.
 
 Each target contains a conservative geographic bounding box. Overture targets use that box at GeoParquet/STAC selection time. Geofabrik targets use one or more boxes while scanning the downloaded PBF so non-target addresses are discarded before the candidate pool is built.
 
@@ -169,15 +193,15 @@ public/data/
     LA.json
     CHI.json
   DE/
-    BUSINGEN.json
-    HELGOLAND.json
-    BERLIN.json
-    HAMBURG.json
-    MUNICH.json
+    BUS.json
+    HEL.json
+    BER.json
+    HAM.json
+    MUC.json
   JP/
-    TOKYO.json
-    OSAKA.json
-    YOKOHAMA.json
+    TYO.json
+    OSA.json
+    YOK.json
 ```
 
 The exact paths come from `config/lite-targets.json`.
@@ -199,9 +223,11 @@ The target-level output caps above keep the whole site small even when a region 
 
 Every matrix unit writes JSON metrics plus `/usr/bin/time -v` output. The metrics include candidate tier, candidate limit, source sample percentage, accepted/rejected counts, validation success rate, postcode groups, target elapsed time, peak RSS, ETL storage estimates, post-import storage and source-size metadata. For Geofabrik, `sourceBytes` is the downloaded PBF size; for Overture, Lite requests asset-size metadata and the value represents the intersecting source-asset size estimate, not the exact HTTP range bytes DuckDB transferred. The workflow uploads all metrics for 30 days.
 
-Use the first complete Actions run as the performance baseline. The most useful follow-up tuning is to change only the slow target's bounds or retry tiers rather than globally enlarging all countries.
+Use the latest successful complete Actions run as the performance baseline. The most useful follow-up tuning is to change only the slow target's bounds or retry tiers rather than globally enlarging all countries.
 
 ## GitHub Actions use
+
+Pushes to `main` run the complete build-only pipeline. Deployment remains conditional and is not required for a successful build.
 
 Manual build:
 
@@ -210,7 +236,7 @@ Manual build:
 3. Leave `deploy=false` for a build-only test.
 4. Set `deploy=true` after VPS secrets are configured.
 
-A weekly rebuild is configured for Sunday 03:17 UTC. Scheduled runs also attempt deployment when deployment secrets exist.
+A weekly rebuild is configured for Sunday 03:17 UTC. Scheduled runs also attempt deployment when deployment secrets exist. Missing VPS secrets do not fail the build; the deployment step is skipped.
 
 ## Deployment secrets
 
@@ -253,17 +279,16 @@ upload archive to /tmp
 
 No Nginx reload is required for a normal data update because the document-root symlink remains the same path.
 
-## Expected resource profile
+## Observed resource profile
 
-These are engineering estimates until the first real GitHub Actions run produces metrics:
+Complete 63-group GitHub Actions runs have succeeded. The latest pre-release baseline completed in about 41 minutes and produced a static site artifact under 200 KiB. Per-target address counts, shortages, source-size estimates, elapsed time and peak RSS remain available in the `address-lite-metrics` artifact for each run.
 
 - VPS Address-specific resident processes: approximately 0 MB (no Address daemon)
-- VPS disk: expected low tens of MB including the Astro site; address JSON itself is bounded to at most 1,206 records with the current manifest
 - VPS request memory: Nginx/kernel page-cache only
-- Overture Action job: DuckDB remains capped at 2 GB plus Node/Python/runtime overhead; a 16 GB standard runner has ample RAM
+- Overture Action job: DuckDB remains capped at 2 GB plus Node/Python/runtime overhead
 - Geofabrik Action job: disk/download volume can dominate because the source PBF still has to be obtained; bbox filtering reduces retained candidates and downstream work, not the remote PBF file size
 
-The workflow is structured for the full rebuild to be controlled by the slowest groups rather than the sum of 26 countries. Actual wall-clock performance depends on Overture/Geofabrik network throughput and residential hit rate.
+The workflow is structured for the full rebuild to be controlled by the slowest groups rather than the sum of 26 countries. Actual wall-clock performance still depends on Overture/Geofabrik network throughput and residential hit rate.
 
 ## Upstream updates
 
@@ -275,4 +300,4 @@ The Lite changes are deliberately concentrated in:
 - one dedicated workflow
 - the static `LiteApp`
 
-This makes rebasing onto future upstream releases easier. The installer runs `git apply --check` first; if the upstream core changed enough that the patch no longer matches, it stops instead of silently applying a damaged patch.
+This makes rebasing onto future upstream releases easier. The current repository branch is the source of truth: do not reapply the original one-shot ZIP over it. For a future upstream update, compare the real branch and resolve only the affected Lite-gated code instead of overwriting the completed CI and metadata fixes.
