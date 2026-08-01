@@ -199,6 +199,7 @@ jobs:
           ssh -p "$port" -i ~/.ssh/address-lite "$VPS_USER@$VPS_HOST" \
             "ROOT='$root' RELEASE='$release_id' bash -s" <<'REMOTE'
           set -euo pipefail
+          umask 022
           cd /tmp
           sha256sum -c "address-lite-$RELEASE.tar.gz.sha256"
           incoming="$ROOT/releases/$RELEASE.incoming"
@@ -206,7 +207,7 @@ jobs:
           mkdir -p "$ROOT/releases"
           rm -rf "$incoming"
           mkdir -p "$incoming"
-          tar -xzf "/tmp/address-lite-$RELEASE.tar.gz" -C "$incoming"
+          tar --no-same-owner -xzf "/tmp/address-lite-$RELEASE.tar.gz" -C "$incoming"
           test -s "$incoming/index.html"
           test -s "$incoming/data/countries.json"
           rm -rf "$final"

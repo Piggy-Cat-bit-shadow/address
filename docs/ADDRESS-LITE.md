@@ -245,7 +245,7 @@ Create the GitHub Environment `address-lite-production`, then configure:
 Required:
 
 - `VPS_HOST` - VPS hostname or IP
-- `VPS_USER` - SSH user that owns the Address release directory
+- `VPS_USER` - SSH user that owns the Address release directory; `addressdeploy` is recommended for production
 - `VPS_SSH_KEY` - private key for that SSH user
 
 Optional:
@@ -254,7 +254,9 @@ Optional:
 - `VPS_WEB_ROOT` - defaults to `/var/www/address`
 - `VPS_KNOWN_HOSTS` - recommended: pinned `known_hosts` line(s) for the VPS; if omitted the workflow falls back to `ssh-keyscan`
 
-Run `ops/address-lite/bootstrap-vps.sh` once on the VPS to create the directory layout. The user used by Actions must be able to write that directory.
+Run `ops/address-lite/bootstrap-vps.sh` once on the VPS to create the directory layout. For production, use a dedicated deployment account such as `addressdeploy` and let that account manage `/var/www/address`. It needs SSH access and write access to `/var/www/address` and `/tmp`, but it does not need `sudo` or root SSH. Nginx only needs read access to the static files through `/var/www/address/current`.
+
+The remote extraction uses `umask 022` and `tar --no-same-owner` so files in a new release belong to the deployment user instead of restoring UID/GID values recorded by the GitHub runner archive.
 
 ## Nginx
 
