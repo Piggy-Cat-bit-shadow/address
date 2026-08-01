@@ -1,6 +1,7 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseTimeMetrics } from './time-metrics.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const args = process.argv.slice(2);
@@ -9,23 +10,10 @@ const metricsRoot = resolve(at >= 0 ? args[at + 1] : resolve(root, '.lite-artifa
 const manifest = JSON.parse(await readFile(resolve(root, 'config/lite-targets.json'), 'utf8'));
 const files = await readdir(metricsRoot).catch(() => []);
 const timeByGroup = new Map();
-const parseElapsed = (value) => {
-  const parts = String(value || '').trim().split(':').map(Number);
-  if (parts.some((part) => !Number.isFinite(part))) return null;
-  if (parts.length === 3) return Math.round((parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000);
-  if (parts.length === 2) return Math.round((parts[0] * 60 + parts[1]) * 1000);
-  return Math.round((parts[0] || 0) * 1000);
-};
 for (const name of files.filter((name) => /^time-.+\.log$/u.test(name))) {
   const group = name.replace(/^time-/, '').replace(/\.log$/, '');
   const text = await readFile(resolve(metricsRoot, name), 'utf8');
-  const rss = text.match(/Maximum resident set size \(kbytes\):\s*(\d+)/u);
-  const elapsed = text.match(/Elapsed \(wall clock\) time.*:\s*([0-9:.]+)/u);
-  timeByGroup.set(group, {
-    peakRssKiB: rss ? Number(rss[1]) : null,
-    peakRssMiB: rss ? Math.round(Number(rss[1]) / 1024) : null,
-    wallClockMs: elapsed ? parseElapsed(elapsed[1]) : null
-  });
+  timeByGroup.set(group, parseTimeMetrics(text));
 }
 const rows = [];
 for (const target of manifest.targets) {
