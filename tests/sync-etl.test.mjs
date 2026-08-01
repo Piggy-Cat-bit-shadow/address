@@ -326,7 +326,8 @@ describe('built-in ETL planning and publishing', () => {
     const geofabrik = (await readFile('server/sync/geofabrik-export.py', 'utf8')).replace(/\r\n/g, '\n');
     expect(geofabrik).not.toContain('--communities-file');
     expect(overture).toContain('candidate_limit');
-    expect(overture).toContain('USING SAMPLE system(25 PERCENT)');
+    expect(overture).toContain('parser.add_argument("--source-sample-percent", type=int, default=25)');
+    expect(overture).toContain('USING SAMPLE system({args.source_sample_percent} PERCENT)');
     expect(overture).toContain('AND bbox.xmin >= {minimum_longitude}');
     expect(overture).toContain('AND bbox.ymax <= {maximum_latitude}');
     expect(overture).toContain('--building-assets-file');
@@ -346,7 +347,7 @@ describe('built-in ETL planning and publishing', () => {
     expect(overture).toContain('FROM address_candidates\n  LEFT JOIN classified');
     expect(overture).toContain('Residential building classification failed; exporting address-only fallback');
     expect(overture.indexOf('WHERE country = {country}')).toBeLessThan(
-      overture.indexOf('USING SAMPLE system(25 PERCENT)')
+      overture.indexOf('USING SAMPLE system({args.source_sample_percent} PERCENT)')
     );
     expect(overture).toContain('PARTITION BY coalesce(nullif(trim(admin1)');
     expect(overture).toContain('locality_rank');

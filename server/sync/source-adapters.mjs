@@ -423,6 +423,7 @@ export const createSourceAdapters = ({
           '--per-locality', String(options.perLocality), '--assets-file', assetsFile,
           '--building-assets-file', buildingAssetsFile,
           '--bounds', ...((shard.bounds || countryBounds[shard.countryCode]).map(String)),
+          ...(shard.sourceSamplePercent ? ['--source-sample-percent', String(shard.sourceSamplePercent)] : []),
           ...(candidateJsonl ? ['--candidate-jsonl', candidateJsonl] : [])],
         phase: `materialize:${shard.id}`
       });
@@ -474,6 +475,7 @@ export const createSourceAdapters = ({
         file: pythonBin,
         args: [geofabrikExporter, '--input', raw, '--output', temporary,
           '--max-records', String(options.maxRecords), '--per-locality', String(options.perLocality),
+          ...(shard.boundsList || []).flatMap((bounds) => ['--bounds', ...bounds.map(String)]),
           ...(discovery.boundaryUrl ? ['--boundary', boundary] : []),
           ...excludeBoundaries.flatMap((file) => ['--exclude-boundary', file])],
         phase: `materialize:${shard.id}`

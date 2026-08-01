@@ -1,0 +1,1951 @@
+{
+  "schemaVersion": 1,
+  "profile": "address-lite-ultra",
+  "maxAddressesPerPostcode": 3,
+  "candidateProfiles": {
+    "micro": {
+      "tiers": [
+        48,
+        128,
+        320
+      ],
+      "perLocality": 48,
+      "outputCap": 6
+    },
+    "city": {
+      "tiers": [
+        128,
+        384,
+        1024
+      ],
+      "perLocality": 64,
+      "outputCap": 12
+    },
+    "region": {
+      "tiers": [
+        768,
+        2048,
+        5000
+      ],
+      "perLocality": 96,
+      "outputCap": 24
+    }
+  },
+  "countries": {
+    "US": {
+      "name": "United States",
+      "nameZh": "美国"
+    },
+    "CA": {
+      "name": "Canada",
+      "nameZh": "加拿大"
+    },
+    "MX": {
+      "name": "Mexico",
+      "nameZh": "墨西哥"
+    },
+    "GB": {
+      "name": "United Kingdom",
+      "nameZh": "英国"
+    },
+    "DE": {
+      "name": "Germany",
+      "nameZh": "德国"
+    },
+    "FR": {
+      "name": "France",
+      "nameZh": "法国"
+    },
+    "IT": {
+      "name": "Italy",
+      "nameZh": "意大利"
+    },
+    "ES": {
+      "name": "Spain",
+      "nameZh": "西班牙"
+    },
+    "NL": {
+      "name": "Netherlands",
+      "nameZh": "荷兰"
+    },
+    "RU": {
+      "name": "Russia",
+      "nameZh": "俄罗斯"
+    },
+    "HK": {
+      "name": "Hong Kong SAR",
+      "nameZh": "中国香港"
+    },
+    "TW": {
+      "name": "Taiwan",
+      "nameZh": "中国台湾"
+    },
+    "JP": {
+      "name": "Japan",
+      "nameZh": "日本"
+    },
+    "KR": {
+      "name": "South Korea",
+      "nameZh": "韩国"
+    },
+    "SG": {
+      "name": "Singapore",
+      "nameZh": "新加坡"
+    },
+    "VN": {
+      "name": "Vietnam",
+      "nameZh": "越南"
+    },
+    "TH": {
+      "name": "Thailand",
+      "nameZh": "泰国"
+    },
+    "PH": {
+      "name": "Philippines",
+      "nameZh": "菲律宾"
+    },
+    "MY": {
+      "name": "Malaysia",
+      "nameZh": "马来西亚"
+    },
+    "IN": {
+      "name": "India",
+      "nameZh": "印度"
+    },
+    "AU": {
+      "name": "Australia",
+      "nameZh": "澳大利亚"
+    },
+    "TR": {
+      "name": "Türkiye",
+      "nameZh": "土耳其"
+    },
+    "SA": {
+      "name": "Saudi Arabia",
+      "nameZh": "沙特阿拉伯"
+    },
+    "BR": {
+      "name": "Brazil",
+      "nameZh": "巴西"
+    },
+    "NG": {
+      "name": "Nigeria",
+      "nameZh": "尼日利亚"
+    },
+    "ZA": {
+      "name": "South Africa",
+      "nameZh": "南非"
+    }
+  },
+  "targets": [
+    {
+      "id": "US-DE",
+      "country": "US",
+      "label": "Delaware",
+      "labelZh": "特拉华州",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -75.8,
+        38.4,
+        -74.9,
+        39.85
+      ],
+      "file": "US/DE.json",
+      "jobGroup": "US-DE",
+      "note": "≈ 0% general sales tax",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "General rate",
+        "noteZh": "一般税"
+      },
+      "regionAliases": [
+        "Delaware",
+        "DE"
+      ]
+    },
+    {
+      "id": "US-OR",
+      "country": "US",
+      "label": "Oregon",
+      "labelZh": "俄勒冈州",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -124.8,
+        41.9,
+        -116.45,
+        46.35
+      ],
+      "file": "US/OR.json",
+      "jobGroup": "US-OR",
+      "note": "≈ 0% general sales tax",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "General rate",
+        "noteZh": "一般税"
+      },
+      "regionAliases": [
+        "Oregon",
+        "OR"
+      ]
+    },
+    {
+      "id": "US-NH",
+      "country": "US",
+      "label": "New Hampshire",
+      "labelZh": "新罕布什尔州",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -72.65,
+        42.65,
+        -70.55,
+        45.35
+      ],
+      "file": "US/NH.json",
+      "jobGroup": "US-NH",
+      "note": "≈ 0% general sales tax; meals/lodging may be taxed separately",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Meals / lodging may have separate taxes",
+        "noteZh": "餐饮 / 住宿等另有专项税"
+      },
+      "regionAliases": [
+        "New Hampshire",
+        "NH"
+      ]
+    },
+    {
+      "id": "US-MT",
+      "country": "US",
+      "label": "Montana",
+      "labelZh": "蒙大拿州",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -116.2,
+        44.25,
+        -104.0,
+        49.1
+      ],
+      "file": "US/MT.json",
+      "jobGroup": "US-MT",
+      "note": "≈ 0% general sales tax; some resort areas differ",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some resort areas differ",
+        "noteZh": "部分 resort 地区例外"
+      },
+      "regionAliases": [
+        "Montana",
+        "MT"
+      ]
+    },
+    {
+      "id": "US-NYC",
+      "country": "US",
+      "label": "New York City, New York",
+      "labelZh": "纽约市，纽约州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -74.28,
+        40.48,
+        -73.68,
+        40.95
+      ],
+      "file": "US/NYC.json",
+      "jobGroup": "US-NYC",
+      "note": "",
+      "regionAliases": [
+        "New York",
+        "NY"
+      ]
+    },
+    {
+      "id": "US-LA",
+      "country": "US",
+      "label": "Los Angeles, California",
+      "labelZh": "洛杉矶，加利福尼亚州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -118.72,
+        33.65,
+        -118.1,
+        34.35
+      ],
+      "file": "US/LA.json",
+      "jobGroup": "US-LA",
+      "note": "",
+      "regionAliases": [
+        "California",
+        "CA"
+      ]
+    },
+    {
+      "id": "US-CHI",
+      "country": "US",
+      "label": "Chicago, Illinois",
+      "labelZh": "芝加哥，伊利诺伊州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -87.95,
+        41.6,
+        -87.5,
+        42.1
+      ],
+      "file": "US/CHI.json",
+      "jobGroup": "US-CHI",
+      "note": "",
+      "regionAliases": [
+        "Illinois",
+        "IL"
+      ]
+    },
+    {
+      "id": "CA-AB",
+      "country": "CA",
+      "label": "Alberta",
+      "labelZh": "阿尔伯塔省",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -120.05,
+        48.95,
+        -109.95,
+        60.05
+      ],
+      "file": "CA/AB.json",
+      "jobGroup": "CA-AB",
+      "note": "≈ 5% federal GST; PST 0%",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
+      "regionAliases": [
+        "Alberta",
+        "AB"
+      ]
+    },
+    {
+      "id": "CA-YT",
+      "country": "CA",
+      "label": "Yukon",
+      "labelZh": "育空地区",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -141.0,
+        59.9,
+        -123.8,
+        69.8
+      ],
+      "file": "CA/YT.json",
+      "jobGroup": "CA-YT",
+      "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
+      "regionAliases": [
+        "Yukon",
+        "YT"
+      ]
+    },
+    {
+      "id": "CA-NT",
+      "country": "CA",
+      "label": "Northwest Territories",
+      "labelZh": "西北地区",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -136.6,
+        59.9,
+        -101.9,
+        78.8
+      ],
+      "file": "CA/NT.json",
+      "jobGroup": "CA-NT",
+      "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
+      "regionAliases": [
+        "Northwest Territories",
+        "NT"
+      ]
+    },
+    {
+      "id": "CA-NU",
+      "country": "CA",
+      "label": "Nunavut",
+      "labelZh": "努纳武特地区",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -121.0,
+        51.0,
+        -61.0,
+        84.0
+      ],
+      "file": "CA/NU.json",
+      "jobGroup": "CA-NU",
+      "note": "≈ 5% GST",
+      "tax": {
+        "type": "vat_gst_reduced",
+        "rate": "≈ 5%",
+        "label": "GST",
+        "note": "PST 0%",
+        "noteZh": "PST 0%"
+      },
+      "regionAliases": [
+        "Nunavut",
+        "NU"
+      ]
+    },
+    {
+      "id": "CA-TOR",
+      "country": "CA",
+      "label": "Toronto, Ontario",
+      "labelZh": "多伦多，安大略省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -79.65,
+        43.5,
+        -79.1,
+        43.9
+      ],
+      "file": "CA/TOR.json",
+      "jobGroup": "CA-TOR",
+      "note": "",
+      "regionAliases": [
+        "Ontario",
+        "ON"
+      ]
+    },
+    {
+      "id": "CA-MTL",
+      "country": "CA",
+      "label": "Montreal, Quebec",
+      "labelZh": "蒙特利尔，魁北克省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -74.05,
+        45.35,
+        -73.35,
+        45.75
+      ],
+      "file": "CA/MTL.json",
+      "jobGroup": "CA-MTL",
+      "note": "",
+      "regionAliases": [
+        "Quebec",
+        "Québec",
+        "QC"
+      ]
+    },
+    {
+      "id": "CA-VAN",
+      "country": "CA",
+      "label": "Vancouver, British Columbia",
+      "labelZh": "温哥华，不列颠哥伦比亚省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -123.35,
+        49.0,
+        -122.8,
+        49.4
+      ],
+      "file": "CA/VAN.json",
+      "jobGroup": "CA-VAN",
+      "note": "",
+      "regionAliases": [
+        "British Columbia",
+        "BC"
+      ]
+    },
+    {
+      "id": "MX-MEX",
+      "country": "MX",
+      "label": "Mexico City",
+      "labelZh": "墨西哥城",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -99.4,
+        19.1,
+        -98.85,
+        19.65
+      ],
+      "file": "MX/MEX.json",
+      "jobGroup": "MX-MEX",
+      "note": ""
+    },
+    {
+      "id": "MX-GDL",
+      "country": "MX",
+      "label": "Guadalajara, Jalisco",
+      "labelZh": "瓜达拉哈拉，哈利斯科州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -103.6,
+        20.45,
+        -103.1,
+        20.9
+      ],
+      "file": "MX/GDL.json",
+      "jobGroup": "MX-GDL",
+      "note": ""
+    },
+    {
+      "id": "MX-MTY",
+      "country": "MX",
+      "label": "Monterrey, Nuevo Leon",
+      "labelZh": "蒙特雷，新莱昂州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -100.6,
+        25.45,
+        -99.95,
+        25.95
+      ],
+      "file": "MX/MTY.json",
+      "jobGroup": "MX-MTY",
+      "note": ""
+    },
+    {
+      "id": "GB-LON",
+      "country": "GB",
+      "label": "London",
+      "labelZh": "伦敦",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -0.55,
+        51.25,
+        0.35,
+        51.75
+      ],
+      "file": "GB/LON.json",
+      "jobGroup": "GB",
+      "note": ""
+    },
+    {
+      "id": "GB-BHM",
+      "country": "GB",
+      "label": "Birmingham",
+      "labelZh": "伯明翰",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -2.1,
+        52.35,
+        -1.65,
+        52.65
+      ],
+      "file": "GB/BHM.json",
+      "jobGroup": "GB",
+      "note": ""
+    },
+    {
+      "id": "GB-MAN",
+      "country": "GB",
+      "label": "Manchester",
+      "labelZh": "曼彻斯特",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -2.45,
+        53.3,
+        -2.05,
+        53.65
+      ],
+      "file": "GB/MAN.json",
+      "jobGroup": "GB",
+      "note": ""
+    },
+    {
+      "id": "DE-BUS",
+      "country": "DE",
+      "label": "Büsingen am Hochrhein, Baden-Württemberg",
+      "labelZh": "布辛根，巴登-符腾堡州",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        8.64,
+        47.65,
+        8.75,
+        47.74
+      ],
+      "file": "DE/BUS.json",
+      "jobGroup": "DE-BUS",
+      "note": "Swiss VAT area; general rate around 8.1%",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 8.1%",
+        "label": "VAT",
+        "note": "Uses the Swiss VAT system",
+        "noteZh": "适用瑞士 VAT 体系"
+      }
+    },
+    {
+      "id": "DE-HEL",
+      "country": "DE",
+      "label": "Helgoland, Schleswig-Holstein",
+      "labelZh": "黑尔戈兰，石勒苏益格-荷尔斯泰因州",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        7.84,
+        54.15,
+        7.95,
+        54.21
+      ],
+      "file": "DE/HEL.json",
+      "jobGroup": "DE-HEL",
+      "note": "Special customs/VAT area",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "VAT",
+        "note": "Special customs zone",
+        "noteZh": "特殊海关区"
+      }
+    },
+    {
+      "id": "DE-BER",
+      "country": "DE",
+      "label": "Berlin",
+      "labelZh": "柏林",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        13.05,
+        52.3,
+        13.8,
+        52.75
+      ],
+      "file": "DE/BER.json",
+      "jobGroup": "DE-BER",
+      "note": ""
+    },
+    {
+      "id": "DE-HAM",
+      "country": "DE",
+      "label": "Hamburg",
+      "labelZh": "汉堡",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        9.7,
+        53.35,
+        10.35,
+        53.8
+      ],
+      "file": "DE/HAM.json",
+      "jobGroup": "DE-HAM",
+      "note": ""
+    },
+    {
+      "id": "DE-MUC",
+      "country": "DE",
+      "label": "Munich, Bavaria",
+      "labelZh": "慕尼黑，巴伐利亚州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        11.25,
+        48.0,
+        11.85,
+        48.35
+      ],
+      "file": "DE/MUC.json",
+      "jobGroup": "DE-MUC",
+      "note": ""
+    },
+    {
+      "id": "FR-PAR",
+      "country": "FR",
+      "label": "Paris",
+      "labelZh": "巴黎",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        2.1,
+        48.7,
+        2.6,
+        49.05
+      ],
+      "file": "FR/PAR.json",
+      "jobGroup": "FR-PAR",
+      "note": ""
+    },
+    {
+      "id": "FR-MRS",
+      "country": "FR",
+      "label": "Marseille",
+      "labelZh": "马赛",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        5.15,
+        43.15,
+        5.65,
+        43.5
+      ],
+      "file": "FR/MRS.json",
+      "jobGroup": "FR-MRS",
+      "note": ""
+    },
+    {
+      "id": "FR-LYO",
+      "country": "FR",
+      "label": "Lyon",
+      "labelZh": "里昂",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        4.55,
+        45.55,
+        5.15,
+        46.0
+      ],
+      "file": "FR/LYO.json",
+      "jobGroup": "FR-LYO",
+      "note": ""
+    },
+    {
+      "id": "IT-CAM",
+      "country": "IT",
+      "label": "Campione d'Italia, Lombardy",
+      "labelZh": "坎皮奥内，伦巴第",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        8.94,
+        45.94,
+        9.0,
+        46.0
+      ],
+      "file": "IT/CAM.json",
+      "jobGroup": "IT-CAM",
+      "note": "ILCCI general rate around Swiss VAT level",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 8.1%",
+        "label": "ILCCI",
+        "note": "General rate",
+        "noteZh": "一般税率"
+      }
+    },
+    {
+      "id": "IT-LIV",
+      "country": "IT",
+      "label": "Livigno, Lombardy",
+      "labelZh": "利维尼奥，伦巴第",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        10.03,
+        46.45,
+        10.2,
+        46.6
+      ],
+      "file": "IT/LIV.json",
+      "jobGroup": "IT-LIV",
+      "note": "Special customs/VAT area",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "VAT",
+        "note": "Special customs zone",
+        "noteZh": "特殊海关区"
+      }
+    },
+    {
+      "id": "IT-ROM",
+      "country": "IT",
+      "label": "Rome, Lazio",
+      "labelZh": "罗马，拉齐奥",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        12.2,
+        41.65,
+        12.8,
+        42.1
+      ],
+      "file": "IT/ROM.json",
+      "jobGroup": "IT-ROM",
+      "note": ""
+    },
+    {
+      "id": "IT-MIL",
+      "country": "IT",
+      "label": "Milan, Lombardy",
+      "labelZh": "米兰，伦巴第",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        8.95,
+        45.3,
+        9.45,
+        45.65
+      ],
+      "file": "IT/MIL.json",
+      "jobGroup": "IT-MIL",
+      "note": ""
+    },
+    {
+      "id": "IT-NAP",
+      "country": "IT",
+      "label": "Naples, Campania",
+      "labelZh": "那不勒斯，坎帕尼亚",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        14.0,
+        40.65,
+        14.55,
+        41.1
+      ],
+      "file": "IT/NAP.json",
+      "jobGroup": "IT-NAP",
+      "note": ""
+    },
+    {
+      "id": "ES-CAN",
+      "country": "ES",
+      "label": "Canary Islands",
+      "labelZh": "加那利群岛",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        -18.2,
+        27.5,
+        -13.3,
+        29.5
+      ],
+      "file": "ES/CAN.json",
+      "jobGroup": "ES-CAN",
+      "note": "IGIC general rate around 7%",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 7%",
+        "label": "IGIC",
+        "note": "",
+        "noteZh": ""
+      },
+      "regionAliases": [
+        "Canary Islands",
+        "Canarias"
+      ]
+    },
+    {
+      "id": "ES-MEL",
+      "country": "ES",
+      "label": "Melilla",
+      "labelZh": "梅利利亚",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        -3.02,
+        35.25,
+        -2.87,
+        35.34
+      ],
+      "file": "ES/MEL.json",
+      "jobGroup": "ES-MEL",
+      "note": "Special IPSI tax regime",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 4%",
+        "label": "IPSI",
+        "note": "Varies by goods / services",
+        "noteZh": "具体税率依商品 / 服务变化"
+      }
+    },
+    {
+      "id": "ES-CEU",
+      "country": "ES",
+      "label": "Ceuta",
+      "labelZh": "休达",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        -5.42,
+        35.84,
+        -5.26,
+        35.93
+      ],
+      "file": "ES/CEU.json",
+      "jobGroup": "ES-CEU",
+      "note": "Special IPSI tax regime",
+      "tax": {
+        "type": "special_tax_zone",
+        "rate": "≈ 4%",
+        "label": "IPSI",
+        "note": "Varies by goods / services",
+        "noteZh": "具体税率依商品 / 服务变化"
+      }
+    },
+    {
+      "id": "ES-MAD",
+      "country": "ES",
+      "label": "Madrid",
+      "labelZh": "马德里",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -3.95,
+        40.2,
+        -3.45,
+        40.65
+      ],
+      "file": "ES/MAD.json",
+      "jobGroup": "ES-MAD",
+      "note": ""
+    },
+    {
+      "id": "ES-BCN",
+      "country": "ES",
+      "label": "Barcelona, Catalonia",
+      "labelZh": "巴塞罗那，加泰罗尼亚",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        1.95,
+        41.2,
+        2.35,
+        41.6
+      ],
+      "file": "ES/BCN.json",
+      "jobGroup": "ES-BCN",
+      "note": ""
+    },
+    {
+      "id": "ES-VLC",
+      "country": "ES",
+      "label": "Valencia, Valencian Community",
+      "labelZh": "瓦伦西亚，瓦伦西亚自治区",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -0.6,
+        39.3,
+        -0.1,
+        39.7
+      ],
+      "file": "ES/VLC.json",
+      "jobGroup": "ES-VLC",
+      "note": ""
+    },
+    {
+      "id": "NL-AMS",
+      "country": "NL",
+      "label": "Amsterdam, North Holland",
+      "labelZh": "阿姆斯特丹，北荷兰省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        4.65,
+        52.2,
+        5.1,
+        52.55
+      ],
+      "file": "NL/AMS.json",
+      "jobGroup": "NL-AMS",
+      "note": ""
+    },
+    {
+      "id": "NL-RTM",
+      "country": "NL",
+      "label": "Rotterdam, South Holland",
+      "labelZh": "鹿特丹，南荷兰省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        4.25,
+        51.75,
+        4.75,
+        52.1
+      ],
+      "file": "NL/RTM.json",
+      "jobGroup": "NL-RTM",
+      "note": ""
+    },
+    {
+      "id": "NL-HAG",
+      "country": "NL",
+      "label": "The Hague, South Holland",
+      "labelZh": "海牙，南荷兰省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        4.15,
+        52.0,
+        4.45,
+        52.2
+      ],
+      "file": "NL/HAG.json",
+      "jobGroup": "NL-HAG",
+      "note": ""
+    },
+    {
+      "id": "RU-MOW",
+      "country": "RU",
+      "label": "Moscow",
+      "labelZh": "莫斯科",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        37.2,
+        55.45,
+        37.95,
+        55.95
+      ],
+      "file": "RU/MOW.json",
+      "jobGroup": "RU",
+      "note": ""
+    },
+    {
+      "id": "RU-LED",
+      "country": "RU",
+      "label": "Saint Petersburg",
+      "labelZh": "圣彼得堡",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        29.7,
+        59.65,
+        30.8,
+        60.2
+      ],
+      "file": "RU/LED.json",
+      "jobGroup": "RU",
+      "note": ""
+    },
+    {
+      "id": "RU-OVB",
+      "country": "RU",
+      "label": "Novosibirsk, Novosibirsk Oblast",
+      "labelZh": "新西伯利亚，新西伯利亚州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        82.6,
+        54.75,
+        83.3,
+        55.25
+      ],
+      "file": "RU/OVB.json",
+      "jobGroup": "RU",
+      "note": ""
+    },
+    {
+      "id": "HK-SAR",
+      "country": "HK",
+      "label": "Hong Kong SAR",
+      "labelZh": "香港特别行政区",
+      "category": "low_tax",
+      "scope": "region",
+      "bounds": [
+        113.8,
+        22.15,
+        114.45,
+        22.6
+      ],
+      "file": "HK/SAR.json",
+      "jobGroup": "HK",
+      "note": "No general sales tax / VAT / GST",
+      "tax": {
+        "type": "tax_free",
+        "rate": "≈ 0%",
+        "label": "VAT / GST",
+        "note": "No general sales tax",
+        "noteZh": "无一般消费税"
+      }
+    },
+    {
+      "id": "HK-HKI",
+      "country": "HK",
+      "label": "Hong Kong Island",
+      "labelZh": "香港岛",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        114.1,
+        22.2,
+        114.3,
+        22.32
+      ],
+      "file": "HK/HKI.json",
+      "jobGroup": "HK",
+      "note": ""
+    },
+    {
+      "id": "HK-KLN",
+      "country": "HK",
+      "label": "Kowloon",
+      "labelZh": "九龙",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        114.12,
+        22.28,
+        114.25,
+        22.37
+      ],
+      "file": "HK/KLN.json",
+      "jobGroup": "HK",
+      "note": ""
+    },
+    {
+      "id": "HK-ST",
+      "country": "HK",
+      "label": "Sha Tin, New Territories",
+      "labelZh": "新界沙田",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        114.13,
+        22.35,
+        114.25,
+        22.48
+      ],
+      "file": "HK/ST.json",
+      "jobGroup": "HK",
+      "note": ""
+    },
+    {
+      "id": "TW-TPE",
+      "country": "TW",
+      "label": "Taipei City",
+      "labelZh": "台北市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        121.4,
+        24.95,
+        121.7,
+        25.25
+      ],
+      "file": "TW/TPE.json",
+      "jobGroup": "TW-TPE",
+      "note": ""
+    },
+    {
+      "id": "TW-NWT",
+      "country": "TW",
+      "label": "New Taipei City",
+      "labelZh": "新北市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        121.2,
+        24.65,
+        122.05,
+        25.35
+      ],
+      "file": "TW/NWT.json",
+      "jobGroup": "TW-NWT",
+      "note": ""
+    },
+    {
+      "id": "TW-KHH",
+      "country": "TW",
+      "label": "Kaohsiung City",
+      "labelZh": "高雄市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        120.1,
+        22.45,
+        120.55,
+        23.0
+      ],
+      "file": "TW/KHH.json",
+      "jobGroup": "TW-KHH",
+      "note": ""
+    },
+    {
+      "id": "JP-TYO",
+      "country": "JP",
+      "label": "Tokyo",
+      "labelZh": "东京",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        139.45,
+        35.45,
+        140.05,
+        35.9
+      ],
+      "file": "JP/TYO.json",
+      "jobGroup": "JP-TYO",
+      "note": ""
+    },
+    {
+      "id": "JP-OSA",
+      "country": "JP",
+      "label": "Osaka",
+      "labelZh": "大阪",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        135.3,
+        34.5,
+        135.7,
+        34.85
+      ],
+      "file": "JP/OSA.json",
+      "jobGroup": "JP-OSA",
+      "note": ""
+    },
+    {
+      "id": "JP-YOK",
+      "country": "JP",
+      "label": "Yokohama, Kanagawa",
+      "labelZh": "横滨，神奈川县",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        139.45,
+        35.25,
+        139.8,
+        35.65
+      ],
+      "file": "JP/YOK.json",
+      "jobGroup": "JP-YOK",
+      "note": ""
+    },
+    {
+      "id": "KR-SEL",
+      "country": "KR",
+      "label": "Seoul",
+      "labelZh": "首尔",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        126.75,
+        37.42,
+        127.2,
+        37.72
+      ],
+      "file": "KR/SEL.json",
+      "jobGroup": "KR",
+      "note": ""
+    },
+    {
+      "id": "KR-PUS",
+      "country": "KR",
+      "label": "Busan",
+      "labelZh": "釜山",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        128.75,
+        34.95,
+        129.35,
+        35.4
+      ],
+      "file": "KR/PUS.json",
+      "jobGroup": "KR",
+      "note": ""
+    },
+    {
+      "id": "KR-ICN",
+      "country": "KR",
+      "label": "Incheon",
+      "labelZh": "仁川",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        126.35,
+        37.3,
+        126.85,
+        37.65
+      ],
+      "file": "KR/ICN.json",
+      "jobGroup": "KR",
+      "note": ""
+    },
+    {
+      "id": "SG-SIN",
+      "country": "SG",
+      "label": "Singapore",
+      "labelZh": "新加坡",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        103.6,
+        1.15,
+        104.1,
+        1.5
+      ],
+      "file": "SG/SIN.json",
+      "jobGroup": "SG",
+      "note": ""
+    },
+    {
+      "id": "VN-SGN",
+      "country": "VN",
+      "label": "Ho Chi Minh City",
+      "labelZh": "胡志明市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        106.45,
+        10.6,
+        106.95,
+        11.0
+      ],
+      "file": "VN/SGN.json",
+      "jobGroup": "VN",
+      "note": ""
+    },
+    {
+      "id": "VN-HAN",
+      "country": "VN",
+      "label": "Hanoi",
+      "labelZh": "河内",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        105.55,
+        20.85,
+        106.1,
+        21.3
+      ],
+      "file": "VN/HAN.json",
+      "jobGroup": "VN",
+      "note": ""
+    },
+    {
+      "id": "VN-DAD",
+      "country": "VN",
+      "label": "Da Nang",
+      "labelZh": "岘港",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        107.9,
+        15.9,
+        108.45,
+        16.25
+      ],
+      "file": "VN/DAD.json",
+      "jobGroup": "VN",
+      "note": ""
+    },
+    {
+      "id": "TH-BKK",
+      "country": "TH",
+      "label": "Bangkok",
+      "labelZh": "曼谷",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        100.3,
+        13.45,
+        100.95,
+        14.05
+      ],
+      "file": "TH/BKK.json",
+      "jobGroup": "TH",
+      "note": ""
+    },
+    {
+      "id": "TH-CNX",
+      "country": "TH",
+      "label": "Chiang Mai",
+      "labelZh": "清迈",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        98.75,
+        18.6,
+        99.2,
+        19.1
+      ],
+      "file": "TH/CNX.json",
+      "jobGroup": "TH",
+      "note": ""
+    },
+    {
+      "id": "TH-HKT",
+      "country": "TH",
+      "label": "Phuket",
+      "labelZh": "普吉岛",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        98.2,
+        7.7,
+        98.55,
+        8.2
+      ],
+      "file": "TH/HKT.json",
+      "jobGroup": "TH",
+      "note": ""
+    },
+    {
+      "id": "PH-MNL",
+      "country": "PH",
+      "label": "Manila",
+      "labelZh": "马尼拉",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        120.9,
+        14.45,
+        121.05,
+        14.7
+      ],
+      "file": "PH/MNL.json",
+      "jobGroup": "PH",
+      "note": ""
+    },
+    {
+      "id": "PH-QC",
+      "country": "PH",
+      "label": "Quezon City",
+      "labelZh": "奎松市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        120.95,
+        14.55,
+        121.15,
+        14.85
+      ],
+      "file": "PH/QC.json",
+      "jobGroup": "PH",
+      "note": ""
+    },
+    {
+      "id": "PH-CEB",
+      "country": "PH",
+      "label": "Cebu City",
+      "labelZh": "宿务市",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        123.75,
+        10.15,
+        124.05,
+        10.5
+      ],
+      "file": "PH/CEB.json",
+      "jobGroup": "PH",
+      "note": ""
+    },
+    {
+      "id": "MY-LGK",
+      "country": "MY",
+      "label": "Langkawi, Kedah",
+      "labelZh": "兰卡威，吉打",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        99.55,
+        6.15,
+        99.95,
+        6.5
+      ],
+      "file": "MY/LGK.json",
+      "jobGroup": "MY",
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
+    },
+    {
+      "id": "MY-LBU",
+      "country": "MY",
+      "label": "Labuan",
+      "labelZh": "纳闽",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        115.1,
+        5.2,
+        115.4,
+        5.45
+      ],
+      "file": "MY/LBU.json",
+      "jobGroup": "MY",
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
+    },
+    {
+      "id": "MY-TIO",
+      "country": "MY",
+      "label": "Tioman Island, Pahang",
+      "labelZh": "刁曼岛，彭亨",
+      "category": "low_tax",
+      "scope": "micro",
+      "bounds": [
+        104.05,
+        2.7,
+        104.3,
+        2.9
+      ],
+      "file": "MY/TIO.json",
+      "jobGroup": "MY",
+      "note": "Duty-free status applies to many qualifying goods; exceptions exist",
+      "tax": {
+        "type": "customs_free_zone",
+        "rate": "≈ 0%",
+        "label": "Sales Tax",
+        "note": "Some goods / services excluded",
+        "noteZh": "部分商品 / 服务例外"
+      }
+    },
+    {
+      "id": "MY-KUL",
+      "country": "MY",
+      "label": "Kuala Lumpur",
+      "labelZh": "吉隆坡",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        101.5,
+        3.0,
+        101.85,
+        3.3
+      ],
+      "file": "MY/KUL.json",
+      "jobGroup": "MY",
+      "note": ""
+    },
+    {
+      "id": "MY-PEN",
+      "country": "MY",
+      "label": "George Town, Penang",
+      "labelZh": "乔治市，槟城",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        100.2,
+        5.25,
+        100.45,
+        5.55
+      ],
+      "file": "MY/PEN.json",
+      "jobGroup": "MY",
+      "note": ""
+    },
+    {
+      "id": "MY-JHB",
+      "country": "MY",
+      "label": "Johor Bahru, Johor",
+      "labelZh": "新山，柔佛",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        103.55,
+        1.3,
+        103.95,
+        1.65
+      ],
+      "file": "MY/JHB.json",
+      "jobGroup": "MY",
+      "note": ""
+    },
+    {
+      "id": "IN-BOM",
+      "country": "IN",
+      "label": "Mumbai, Maharashtra",
+      "labelZh": "孟买，马哈拉施特拉邦",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        72.7,
+        18.85,
+        73.1,
+        19.35
+      ],
+      "file": "IN/BOM.json",
+      "jobGroup": "IN",
+      "note": ""
+    },
+    {
+      "id": "IN-DEL",
+      "country": "IN",
+      "label": "Delhi",
+      "labelZh": "德里",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        76.8,
+        28.35,
+        77.4,
+        28.9
+      ],
+      "file": "IN/DEL.json",
+      "jobGroup": "IN",
+      "note": ""
+    },
+    {
+      "id": "IN-BLR",
+      "country": "IN",
+      "label": "Bengaluru, Karnataka",
+      "labelZh": "班加罗尔，卡纳塔克邦",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        77.35,
+        12.75,
+        77.85,
+        13.25
+      ],
+      "file": "IN/BLR.json",
+      "jobGroup": "IN",
+      "note": ""
+    },
+    {
+      "id": "AU-SYD",
+      "country": "AU",
+      "label": "Sydney, New South Wales",
+      "labelZh": "悉尼，新南威尔士州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        150.7,
+        -34.2,
+        151.4,
+        -33.55
+      ],
+      "file": "AU/SYD.json",
+      "jobGroup": "AU-SYD",
+      "note": ""
+    },
+    {
+      "id": "AU-MEL",
+      "country": "AU",
+      "label": "Melbourne, Victoria",
+      "labelZh": "墨尔本，维多利亚州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        144.55,
+        -38.15,
+        145.6,
+        -37.45
+      ],
+      "file": "AU/MEL.json",
+      "jobGroup": "AU-MEL",
+      "note": ""
+    },
+    {
+      "id": "AU-BNE",
+      "country": "AU",
+      "label": "Brisbane, Queensland",
+      "labelZh": "布里斯班，昆士兰州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        152.7,
+        -27.8,
+        153.35,
+        -27.1
+      ],
+      "file": "AU/BNE.json",
+      "jobGroup": "AU-BNE",
+      "note": ""
+    },
+    {
+      "id": "TR-IST",
+      "country": "TR",
+      "label": "Istanbul",
+      "labelZh": "伊斯坦布尔",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        28.5,
+        40.75,
+        29.5,
+        41.35
+      ],
+      "file": "TR/IST.json",
+      "jobGroup": "TR",
+      "note": ""
+    },
+    {
+      "id": "TR-ANK",
+      "country": "TR",
+      "label": "Ankara",
+      "labelZh": "安卡拉",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        32.45,
+        39.65,
+        33.15,
+        40.2
+      ],
+      "file": "TR/ANK.json",
+      "jobGroup": "TR",
+      "note": ""
+    },
+    {
+      "id": "TR-IZM",
+      "country": "TR",
+      "label": "Izmir",
+      "labelZh": "伊兹密尔",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        26.9,
+        38.2,
+        27.4,
+        38.7
+      ],
+      "file": "TR/IZM.json",
+      "jobGroup": "TR",
+      "note": ""
+    },
+    {
+      "id": "SA-RUH",
+      "country": "SA",
+      "label": "Riyadh",
+      "labelZh": "利雅得",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        46.35,
+        24.35,
+        47.05,
+        25.05
+      ],
+      "file": "SA/RUH.json",
+      "jobGroup": "SA",
+      "note": ""
+    },
+    {
+      "id": "SA-JED",
+      "country": "SA",
+      "label": "Jeddah, Makkah Province",
+      "labelZh": "吉达，麦加省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        38.95,
+        21.25,
+        39.45,
+        21.9
+      ],
+      "file": "SA/JED.json",
+      "jobGroup": "SA",
+      "note": ""
+    },
+    {
+      "id": "SA-DMM",
+      "country": "SA",
+      "label": "Dammam, Eastern Province",
+      "labelZh": "达曼，东部省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        49.85,
+        26.2,
+        50.35,
+        26.65
+      ],
+      "file": "SA/DMM.json",
+      "jobGroup": "SA",
+      "note": ""
+    },
+    {
+      "id": "BR-SAO",
+      "country": "BR",
+      "label": "Sao Paulo, Sao Paulo",
+      "labelZh": "圣保罗，圣保罗州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -46.9,
+        -24.0,
+        -46.3,
+        -23.3
+      ],
+      "file": "BR/SAO.json",
+      "jobGroup": "BR",
+      "note": ""
+    },
+    {
+      "id": "BR-RIO",
+      "country": "BR",
+      "label": "Rio de Janeiro, Rio de Janeiro",
+      "labelZh": "里约热内卢，里约热内卢州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -43.8,
+        -23.1,
+        -43.05,
+        -22.65
+      ],
+      "file": "BR/RIO.json",
+      "jobGroup": "BR",
+      "note": ""
+    },
+    {
+      "id": "BR-BSB",
+      "country": "BR",
+      "label": "Brasilia, Federal District",
+      "labelZh": "巴西利亚，联邦区",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        -48.3,
+        -16.2,
+        -47.3,
+        -15.35
+      ],
+      "file": "BR/BSB.json",
+      "jobGroup": "BR",
+      "note": ""
+    },
+    {
+      "id": "NG-LOS",
+      "country": "NG",
+      "label": "Lagos, Lagos State",
+      "labelZh": "拉各斯，拉各斯州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        3.05,
+        6.3,
+        3.75,
+        6.8
+      ],
+      "file": "NG/LOS.json",
+      "jobGroup": "NG",
+      "note": ""
+    },
+    {
+      "id": "NG-ABV",
+      "country": "NG",
+      "label": "Abuja, Federal Capital Territory",
+      "labelZh": "阿布贾，联邦首都区",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        7.1,
+        8.75,
+        7.75,
+        9.35
+      ],
+      "file": "NG/ABV.json",
+      "jobGroup": "NG",
+      "note": ""
+    },
+    {
+      "id": "NG-KAN",
+      "country": "NG",
+      "label": "Kano, Kano State",
+      "labelZh": "卡诺，卡诺州",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        8.25,
+        11.75,
+        8.85,
+        12.35
+      ],
+      "file": "NG/KAN.json",
+      "jobGroup": "NG",
+      "note": ""
+    },
+    {
+      "id": "ZA-JNB",
+      "country": "ZA",
+      "label": "Johannesburg, Gauteng",
+      "labelZh": "约翰内斯堡，豪登省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        27.65,
+        -26.45,
+        28.35,
+        -25.85
+      ],
+      "file": "ZA/JNB.json",
+      "jobGroup": "ZA",
+      "note": ""
+    },
+    {
+      "id": "ZA-CPT",
+      "country": "ZA",
+      "label": "Cape Town, Western Cape",
+      "labelZh": "开普敦，西开普省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        18.2,
+        -34.2,
+        18.95,
+        -33.65
+      ],
+      "file": "ZA/CPT.json",
+      "jobGroup": "ZA",
+      "note": ""
+    },
+    {
+      "id": "ZA-DUR",
+      "country": "ZA",
+      "label": "Durban, KwaZulu-Natal",
+      "labelZh": "德班，夸祖鲁-纳塔尔省",
+      "category": "major_city",
+      "scope": "city",
+      "bounds": [
+        30.7,
+        -30.2,
+        31.35,
+        -29.6
+      ],
+      "file": "ZA/DUR.json",
+      "jobGroup": "ZA",
+      "note": ""
+    }
+  ]
+}

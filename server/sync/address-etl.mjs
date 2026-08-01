@@ -525,13 +525,14 @@ export const runAddressEtl = async ({
   stateStore: providedStateStore,
   measureStorage = measureStorageBytes
 } = {}) => {
+  const liteMode = boolean(process.env.ADDRESS_SYNC_LITE);
   const catalog = providedCatalog || await loadSourceCatalog();
   const requested = selectShards(catalog, requestedShards);
   const stateFile = resolve(cacheDir, 'manifest.json');
   const activeRun = !dryRun && !estimate;
   const database = activeRun && !providedImporter ? providedDatabase || openDatabase(databasePath) : providedDatabase;
   const ownsDatabase = activeRun && !providedImporter && !providedDatabase;
-  const runtimePolicy = database && activeRun
+  const runtimePolicy = database && activeRun && !liteMode
     ? await getRuntimePolicy(database)
     : { prepareConcurrency: Math.min(10, prepareConcurrency), cpuConcurrency: Math.min(4, cpuConcurrency) };
   const adapters = providedAdapters || createSourceAdapters({ processConcurrency: runtimePolicy.cpuConcurrency });
@@ -629,9 +630,13 @@ export const runAddressEtl = async ({
         continue;
       }
       const defaults = providedImporter || providedCatalog ? null : ADDRESS_POLICY_DEFAULTS[shard.countryCode];
-      const policy = database && activeRun && !providedImporter
+      const storedPolicy = database && activeRun && !providedImporter
         ? await loadImportPolicy(database, shard.countryCode, maxRecords, perLocality)
         : { enabled: true, targetCount: defaults?.target || maxRecords, levelLimits: defaults?.limits || [maxRecords, perLocality, perLocality, perLocality], overrides: new Map() };
+      const policy = liteMode
+        ? { ...storedPolicy, enabled: true, targetCount: maxRecords,
+          levelLimits: [maxRecords, perLocality, perLocality, perLocality], overrides: new Map() }
+        : storedPolicy;
       if (policy.enabled === false) {
         disabledCountries.add(shard.countryCode);
         reports.push({ shardId: shard.id, shardKey: shard.id, sourceId: shard.source.id, countryCode: shard.countryCode,
@@ -645,7 +650,7 @@ export const runAddressEtl = async ({
     const discovered = await mapConcurrent(work, runtimePolicy.prepareConcurrency, async (task) => {
       try {
         console.log(`[address-sync] ${task.shard.countryCode} discover`);
-        const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir });
+        const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate || liteMode, syncMode, cacheDir });
         const discovery = {
           ...discoveredSource,
           failureSignature: sourceQualityFailureSignature(task.shard, discoveredSource)
@@ -725,8 +730,14 @@ export const runAddressEtl = async ({
       prepared.push(...await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
         try {
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
-          const candidateLimit = Math.min(300_000, Math.max(task.policy.targetCount + 1_000, task.policy.targetCount * 3));
-          const candidatePerLocality = Math.max(perLocality, ...task.policy.levelLimits);
+          const candidateLimit = liteMode
+            ? Math.min(
+              integer(process.env.ADDRESS_SYNC_LITE_MAX_CANDIDATES, 15_000),
+              Math.max(integer(process.env.ADDRESS_SYNC_LITE_MIN_CANDIDATES, 32),
+                task.policy.targetCount * integer(process.env.ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER, 2))
+            )
+            : Math.min(300_000, Math.max(task.policy.targetCount + 1_000, task.policy.targetCount * 3));
+          const candidatePerLocality = liteMode ? perLocality : Math.max(perLocality, ...task.policy.levelLimits);
           const materialized = await adapters.materialize(task.shard, task.discovery, {
             cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
             maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1

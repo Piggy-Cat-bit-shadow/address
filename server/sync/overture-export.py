@@ -25,6 +25,7 @@ parser.add_argument("--per-locality", type=int, required=True)
 parser.add_argument("--assets-file", required=True)
 parser.add_argument("--building-assets-file", required=True)
 parser.add_argument("--bounds", type=float, nargs=4, required=True)
+parser.add_argument("--source-sample-percent", type=int, default=25)
 parser.add_argument("--candidate-jsonl")
 args = parser.parse_args()
 
@@ -32,6 +33,8 @@ if not args.country.isalpha() or len(args.country) != 2:
     raise ValueError("country must be an ISO alpha-2 code")
 if args.max_records < 1 or args.per_locality < 1:
     raise ValueError("record limits must be positive")
+if not 1 <= args.source_sample_percent <= 100:
+    raise ValueError("source-sample-percent must be between 1 and 100")
 
 assets = json.loads(pathlib.Path(args.assets_file).read_text(encoding="utf-8"))
 if not assets or not all(isinstance(value, str) and value.startswith("https://") for value in assets):
@@ -117,7 +120,7 @@ CREATE TEMP TABLE address_candidates AS
       AND nullif(trim(street), '') IS NOT NULL
       AND nullif(trim(number), '') IS NOT NULL
       AND geometry IS NOT NULL
-    USING SAMPLE system(25 PERCENT) REPEATABLE (17)
+    USING SAMPLE system({args.source_sample_percent} PERCENT) REPEATABLE (17)
   ), candidates AS (
     SELECT * FROM source
     USING SAMPLE reservoir({candidate_limit} ROWS) REPEATABLE (42)

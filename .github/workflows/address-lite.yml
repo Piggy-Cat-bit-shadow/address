@@ -1,0 +1,219 @@
+name: Address Lite
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the finished static site to the VPS
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: '17 3 * * 0'
+
+concurrency:
+  group: address-lite-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Validate Lite manifest
+        run: node scripts/lite/check-config.mjs
+      - id: matrix
+        shell: bash
+        run: echo "matrix=$(node scripts/lite/matrix.mjs)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: server/sync/requirements.txt
+      - name: Install runtime dependencies
+        run: |
+          npm ci --omit=dev
+          python -m pip install --disable-pip-version-check -r server/sync/requirements.txt
+      - name: Build verified residential target group
+        env:
+          ADDRESS_SYNC_LITE: 'true'
+          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
+          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
+          ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
+          ADDRESS_SYNC_TRANSLATION_COUNTRIES: ''
+          TRANSLATION_BACKFILL_ENABLED: 'false'
+          GOOGLE_TRANSLATION_ENABLED: 'false'
+          ADDRESS_SYNC_RETAIN_RAW: 'false'
+          ADDRESS_SYNC_PREPARE_CONCURRENCY: '1'
+          ADDRESS_SYNC_CPU_CONCURRENCY: '1'
+          ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER: '2'
+          ADDRESS_SYNC_LITE_MIN_CANDIDATES: '32'
+          ADDRESS_SYNC_LITE_MAX_CANDIDATES: '15000'
+        run: |
+          mkdir -p "$RUNNER_TEMP/lite-out"
+          /usr/bin/time -v node scripts/lite/build-unit.mjs \
+            --group '${{ matrix.group }}' \
+            --out "$RUNNER_TEMP/lite-out" \
+            --work "$RUNNER_TEMP/lite-work" \
+            2> >(tee "$RUNNER_TEMP/time-${{ matrix.group }}.log" >&2)
+          cp "$RUNNER_TEMP/time-${{ matrix.group }}.log" "$RUNNER_TEMP/lite-out/metrics/time-${{ matrix.group }}.log"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lite-${{ matrix.group }}
+          path: ${{ runner.temp }}/lite-out
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lite-*
+          path: ${{ runner.temp }}/lite-artifacts
+          merge-multiple: true
+      - name: Assemble static shards
+        run: |
+          rm -rf public/data
+          node scripts/lite/aggregate.mjs --input "$RUNNER_TEMP/lite-artifacts" --output public/data
+          node scripts/lite/verify-static.mjs --data public/data
+          node scripts/lite/summarize-metrics.mjs --metrics "$RUNNER_TEMP/lite-artifacts/metrics"
+      - name: Build static website
+        env:
+          PUBLIC_API_BASE_URL: ''
+        run: npm run build
+      - name: Package release
+        shell: bash
+        run: |
+          release="address-lite-${GITHUB_SHA::12}.tar.gz"
+          tar -C dist -czf "$RUNNER_TEMP/$release" .
+          (cd "$RUNNER_TEMP" && sha256sum "$release" > "$release.sha256")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: address-lite-site
+          path: |
+            ${{ runner.temp }}/address-lite-*.tar.gz
+            ${{ runner.temp }}/address-lite-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: address-lite-metrics
+          path: ${{ runner.temp }}/lite-artifacts/metrics
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 6
+
+  deploy:
+    needs: assemble
+    if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}
+    runs-on: ubuntu-latest
+    environment: address-lite-production
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_WEB_ROOT: ${{ secrets.VPS_WEB_ROOT }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: address-lite-site
+          path: ${{ runner.temp }}/release
+      - id: config
+        shell: bash
+        run: |
+          if [[ -n "$VPS_HOST" && -n "$VPS_USER" && -n "$VPS_SSH_KEY" ]]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo 'VPS secrets are not configured; build succeeded and deployment is skipped.'
+          fi
+      - name: Deploy atomically to VPS
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          port="${VPS_PORT:-22}"
+          root="${VPS_WEB_ROOT:-/var/www/address}"
+          release_id="${GITHUB_SHA::12}"
+          archive="$(find "$RUNNER_TEMP/release" -name 'address-lite-*.tar.gz' -type f | head -n1)"
+          checksum="$archive.sha256"
+          (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$checksum")")
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/address-lite
+          chmod 600 ~/.ssh/address-lite
+          if [[ -n "${VPS_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$VPS_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$port" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          fi
+          scp -P "$port" -i ~/.ssh/address-lite "$archive" "$checksum" "$VPS_USER@$VPS_HOST:/tmp/"
+          ssh -p "$port" -i ~/.ssh/address-lite "$VPS_USER@$VPS_HOST" \
+            "ROOT='$root' RELEASE='$release_id' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /tmp
+          sha256sum -c "address-lite-$RELEASE.tar.gz.sha256"
+          incoming="$ROOT/releases/$RELEASE.incoming"
+          final="$ROOT/releases/$RELEASE"
+          mkdir -p "$ROOT/releases"
+          rm -rf "$incoming"
+          mkdir -p "$incoming"
+          tar -xzf "/tmp/address-lite-$RELEASE.tar.gz" -C "$incoming"
+          test -s "$incoming/index.html"
+          test -s "$incoming/data/countries.json"
+          rm -rf "$final"
+          mv "$incoming" "$final"
+          ln -sfn "releases/$RELEASE" "$ROOT/current.next"
+          mv -Tf "$ROOT/current.next" "$ROOT/current"
+          rm -f "/tmp/address-lite-$RELEASE.tar.gz" "/tmp/address-lite-$RELEASE.tar.gz.sha256"
+          cd "$ROOT/releases"
+          ls -1dt */ 2>/dev/null | tail -n +4 | xargs -r rm -rf --
+          REMOTE

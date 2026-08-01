@@ -55,7 +55,7 @@ def polygons_from_geojson(path):
 
 
 class AddressSampler:
-    def __init__(self, max_records, per_locality, polygons, exclude_polygons=None):
+    def __init__(self, max_records, per_locality, polygons, exclude_polygons=None, bounds=None):
         self.max_records = max_records
         self.per_locality = per_locality
         self.maximum_groups = min(max_records, max(1, math.ceil(max_records / 10)))
@@ -63,6 +63,7 @@ class AddressSampler:
         self.residential_limit = min(max_records, 1000)
         self.polygons = polygons
         self.exclude_polygons = exclude_polygons or []
+        self.bounds = bounds or []
         self.groups = {}
         self.group_heap = []
         self.residential = []
@@ -82,6 +83,14 @@ class AddressSampler:
             for (minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude), outer, holes in polygons
         )
 
+    def inside_bounds(self, longitude, latitude):
+        if not self.bounds:
+            return True
+        return any(
+            minimum_longitude <= longitude <= maximum_longitude and minimum_latitude <= latitude <= maximum_latitude
+            for minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude in self.bounds
+        )
+
     def inside_boundary(self, longitude, latitude):
         if self.exclude_polygons and self._inside(longitude, latitude, self.exclude_polygons):
             return False
@@ -94,7 +103,7 @@ class AddressSampler:
         street = (tags.get("addr:street") or tags.get("addr:place") or "").strip()
         if not house_number or not street:
             return
-        if not self.inside_boundary(longitude, latitude):
+        if not self.inside_bounds(longitude, latitude) or not self.inside_boundary(longitude, latitude):
             return
         locality = next((tags.get(key, "").strip() for key in (
             "addr:city", "addr:town", "addr:village", "addr:municipality", "addr:place", "addr:postcode"
@@ -177,12 +186,13 @@ parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--boundary")
 parser.add_argument("--exclude-boundary", action="append", default=[])
+parser.add_argument("--bounds", action="append", nargs=4, type=float, default=[])
 parser.add_argument("--max-records", required=True, type=int)
 parser.add_argument("--per-locality", required=True, type=int)
 args = parser.parse_args()
 
 exclude_polygons = [polygon for path in args.exclude_boundary for polygon in polygons_from_geojson(path)]
-sampler = AddressSampler(args.max_records, args.per_locality, polygons_from_geojson(args.boundary), exclude_polygons)
+sampler = AddressSampler(args.max_records, args.per_locality, polygons_from_geojson(args.boundary), exclude_polygons, args.bounds)
 location_index = None
 location_storage = "flex_mem"
 if pathlib.Path(args.input).stat().st_size >= 1_000_000_000:
