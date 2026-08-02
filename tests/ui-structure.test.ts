@@ -11,10 +11,16 @@ import App, {
 import { resolveAmapServiceHost } from '../src/components/AmapPreview';
 import { countries } from '../src/domain/countries';
 import { messages } from '../src/domain/i18n';
+import { formatLiteAddressLines } from '../src/components/LiteApp';
 
 const appSource = App.toString();
 const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
 const adminPageSource = readFileSync('src/pages/admin.astro', 'utf8');
+const liteAppSource = readFileSync('src/components/LiteApp.tsx', 'utf8');
+const liteCssSource = readFileSync('src/components/LiteApp.css', 'utf8');
+const globalCssSource = readFileSync('src/styles/global.css', 'utf8');
+const layoutSource = readFileSync('src/layouts/Layout.astro', 'utf8');
+const manifest = JSON.parse(readFileSync('public/manifest.webmanifest', 'utf8'));
 
 describe('strict residential generator page structure', () => {
   it('redirects the retired runtime admin page to the static Lite site', () => {
@@ -211,5 +217,66 @@ describe('strict residential generator page structure', () => {
     expect(messages.en.copyFailed).toBeTruthy();
     expect(messages['zh-CN'].copySuccess).toBeTruthy();
     expect(messages['zh-CN'].copyFailed).toBeTruthy();
+  });
+});
+
+describe('Address Lite mobile and PWA presentation', () => {
+  it('formats visible and copied addresses from structured fields', () => {
+    const formatted = formatLiteAddressLines({
+      houseNumber: '103',
+      street: 'EDGEWOOD STREET',
+      city: 'BRIDGEVILLE',
+      locality: '',
+      postalLocality: '',
+      region: 'Delaware',
+      regionCode: 'DE',
+      postcode: '19933'
+    }, 'United States');
+
+    expect(formatted.lines).toEqual([
+      '103 EDGEWOOD STREET',
+      'BRIDGEVILLE, DE 19933',
+      'United States'
+    ]);
+    expect(formatted.copyText).toBe('103 EDGEWOOD STREET\nBRIDGEVILLE, DE 19933\nUnited States');
+    expect(formatLiteAddressLines({
+      houseNumber: '', street: '', city: '', locality: '', postalLocality: '', region: '', regionCode: '', postcode: ''
+    }, 'Canada').lines).toEqual(['Canada']);
+  });
+
+  it('keeps mobile statistics data-driven and avoids formatted-address display strings', () => {
+    expect(liteAppSource).toContain('index.totalAddresses.toLocaleString(locale)');
+    expect(liteAppSource).toContain('index.countries.length.toLocaleString(locale)');
+    expect(liteAppSource).toContain("resultAddress?.copyText || ''");
+    expect(liteAppSource).toContain('resultAddress?.lines.slice(1)');
+    expect(liteAppSource).not.toMatch(/copyText\(result\.formattedAddress/);
+  });
+
+  it('uses a compact, safe-area-aware mobile layout with coherent theme tokens', () => {
+    expect(liteCssSource).toContain('@media (max-width: 700px)');
+    expect(liteCssSource).toContain('env(safe-area-inset-left)');
+    expect(liteCssSource).toContain('.lite-mobile-stats');
+    expect(liteCssSource).toContain('overflow-wrap: anywhere');
+    expect(liteCssSource).not.toContain('backdrop-filter');
+    expect(globalCssSource).toContain('@media (prefers-color-scheme: dark)');
+    expect(globalCssSource).toContain('--surface: #151b26');
+    expect(globalCssSource).toContain('overflow-x: hidden');
+  });
+
+  it('publishes installable PWA and Apple home-screen metadata', () => {
+    expect(layoutSource).toContain('name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)"');
+    expect(layoutSource).toContain('name="theme-color" content="#0c111b" media="(prefers-color-scheme: dark)"');
+    expect(layoutSource).toContain('name="apple-mobile-web-app-title" content="Address Lite"');
+    expect(layoutSource).toContain('rel="apple-touch-icon"');
+    expect(layoutSource).toContain('rel="manifest"');
+    expect(manifest.name).toBe('Address Lite');
+    expect(manifest.short_name).toBe('Address Lite');
+    expect(manifest.start_url).toBe('/');
+    expect(manifest.display).toBe('standalone');
+    expect(manifest.icons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sizes: '192x192', purpose: 'any' }),
+      expect.objectContaining({ sizes: '512x512', purpose: 'any' }),
+      expect.objectContaining({ sizes: '512x512', purpose: 'maskable' })
+    ]));
   });
 });
