@@ -36,6 +36,8 @@ describe('Address Lite layered workflow architecture', () => {
     expect(workflow).toContain('address-lite-data.tar.gz.sha256');
     expect(workflow).toContain('snapshot.json');
     expect(workflow).toContain('public/build-info.json');
+    expect(workflow).toContain("if: ${{ always() && needs.site-build.result == 'success' }}");
+    expect(workflow).toContain('Address Lite pipeline did not complete every required layer.');
   });
 
   it('pins every official Action to an immutable commit', () => {
