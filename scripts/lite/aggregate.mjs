@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -7,6 +7,8 @@ const args = process.argv.slice(2);
 const arg = (name, fallback = '') => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : fallback; };
 const input = resolve(arg('--input', resolve(root, '.lite-artifacts')));
 const output = resolve(arg('--output', resolve(root, 'public/data')));
+const generatedAt = arg('--generated-at', new Date().toISOString());
+if (!Number.isFinite(new Date(generatedAt).getTime())) throw new Error(`Invalid --generated-at value: ${generatedAt}`);
 const manifest = JSON.parse(await readFile(resolve(root, 'config/lite-targets.json'), 'utf8'));
 await mkdir(output, { recursive: true });
 
@@ -32,7 +34,13 @@ for (const target of manifest.targets) {
   const payload = JSON.parse(await readFile(source, 'utf8'));
   const destination = resolve(output, target.file);
   await mkdir(dirname(destination), { recursive: true });
-  await copyFile(source, destination);
+  payload.generatedAt = generatedAt;
+  payload.target = {
+    id: target.id, label: target.label, labelZh: target.labelZh, category: target.category,
+    scope: target.scope, bounds: target.bounds, note: target.note || '',
+    ...(target.tax ? { tax: { ...target.tax } } : {})
+  };
+  await writeFile(destination, `${JSON.stringify(payload)}\n`, 'utf8');
   const countryMeta = manifest.countries[target.country];
   const country = countries.get(target.country) || {
     code: target.country, name: countryMeta.name, nameZh: countryMeta.nameZh, targets: []
@@ -50,7 +58,7 @@ for (const target of manifest.targets) {
 const index = {
   schemaVersion: 1,
   profile: manifest.profile,
-  generatedAt: new Date().toISOString(),
+  generatedAt,
   maxAddressesPerPostcode: manifest.maxAddressesPerPostcode,
   totalAddresses,
   countries: [...countries.values()].map((country) => ({

@@ -3,8 +3,16 @@ name: Address Lite
 on:
   workflow_dispatch:
     inputs:
+      data_mode:
+        description: Reuse compatible verified data automatically, or force a complete source refresh
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - refresh
       deploy:
-        description: Deploy the finished static site to the configured remote host
+        description: Deploy the finished static site to Production
         required: true
         default: false
         type: boolean
@@ -17,46 +25,102 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   NODE_VERSION: '24'
   PYTHON_VERSION: '3.12'
+  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.site'
 
 jobs:
-  plan:
+  resolve:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      matrixGroups: ${{ steps.matrix.outputs.groups }}
+      requestedMode: ${{ steps.resolve.outputs.requestedMode }}
+      deployRequested: ${{ steps.resolve.outputs.deployRequested }}
+      decision: ${{ steps.resolve.outputs.decision }}
+      sourceMode: ${{ steps.resolve.outputs.sourceMode }}
+      assembleMode: ${{ steps.resolve.outputs.assembleMode }}
+      reason: ${{ steps.resolve.outputs.reason }}
+      refreshFingerprint: ${{ steps.resolve.outputs.refreshFingerprint }}
+      assembleFingerprint: ${{ steps.resolve.outputs.assembleFingerprint }}
+      snapshotStatus: ${{ steps.resolve.outputs.snapshotStatus }}
+      snapshotRunId: ${{ steps.resolve.outputs.snapshotRunId }}
+      snapshotId: ${{ steps.resolve.outputs.snapshotId }}
+      snapshotSourceRunId: ${{ steps.resolve.outputs.snapshotSourceRunId }}
+      snapshotSourceSha: ${{ steps.resolve.outputs.snapshotSourceSha }}
+      snapshotGeneratedAt: ${{ steps.resolve.outputs.snapshotGeneratedAt }}
+      snapshotAgeDays: ${{ steps.resolve.outputs.snapshotAgeDays }}
+      candidateAvailable: ${{ steps.resolve.outputs.candidateAvailable }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Validate Lite manifest
         run: node scripts/lite/check-config.mjs
       - id: matrix
         shell: bash
-        run: echo "matrix=$(node scripts/lite/matrix.mjs)" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix="$(node scripts/lite/matrix.mjs)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "groups=$(node -e 'const value=JSON.parse(process.argv[1]);console.log(value.include.length)' "$matrix")" >> "$GITHUB_OUTPUT"
+      - id: resolve
+        name: Resolve verified data source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_MODE: ${{ github.event_name == 'schedule' && 'refresh' || inputs.data_mode }}
+          DEPLOY_REQUESTED: ${{ github.event_name == 'schedule' && 'true' || inputs.deploy }}
+        run: |
+          node scripts/lite/resolve-data.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --event "$GITHUB_EVENT_NAME" \
+            --requested-mode "$REQUESTED_MODE" \
+            --deploy "$DEPLOY_REQUESTED" \
+            --output-bundle "$RUNNER_TEMP/selected-data" \
+            --json-output "$RUNNER_TEMP/decision.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Preserve selected verified Snapshot for downstream jobs
+        if: steps.resolve.outputs.candidateAvailable == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-selected-data
+          path: ${{ runner.temp }}/selected-data
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Upload resolve diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-resolve-diagnostics
+          path: ${{ runner.temp }}/decision.json
+          if-no-files-found: warn
+          retention-days: 7
 
-  build:
-    needs: plan
+  source-refresh:
+    needs: resolve
+    if: needs.resolve.outputs.decision == 'refresh'
     runs-on: ubuntu-latest
     timeout-minutes: 55
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -88,7 +152,7 @@ jobs:
             --work "$RUNNER_TEMP/lite-work" \
             2> >(tee "$RUNNER_TEMP/time-${{ matrix.group }}.log" >&2)
           cp "$RUNNER_TEMP/time-${{ matrix.group }}.log" "$RUNNER_TEMP/lite-out/metrics/time-${{ matrix.group }}.log"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: lite-${{ matrix.group }}
           path: ${{ runner.temp }}/lite-out
@@ -96,41 +160,267 @@ jobs:
           retention-days: 7
           compression-level: 6
 
-  assemble:
-    needs: build
+  data-assemble:
+    needs: [resolve, source-refresh]
+    if: >-
+      ${{ always() && needs.resolve.result == 'success' &&
+      ((needs.resolve.outputs.decision == 'refresh' && needs.source-refresh.result == 'success') ||
+      (needs.resolve.outputs.decision == 'reassemble' && needs.source-refresh.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      snapshotId: ${{ steps.snapshot.outputs.snapshotId }}
+      generatedAt: ${{ steps.snapshot.outputs.generatedAt }}
+      sourceSha: ${{ steps.snapshot.outputs.sourceSha }}
+      sourceRunId: ${{ steps.snapshot.outputs.sourceRunId }}
+      totalAddresses: ${{ steps.snapshot.outputs.totalAddresses }}
+      targetCount: ${{ steps.snapshot.outputs.targetCount }}
+      countryCount: ${{ steps.snapshot.outputs.countryCount }}
+      archiveSha256: ${{ steps.snapshot.outputs.archiveSha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v8
+      - name: Download Source Refresh group outputs
+        if: needs.resolve.outputs.decision == 'refresh'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: lite-*
           path: ${{ runner.temp }}/lite-artifacts
           merge-multiple: true
-      - name: Assemble static shards
+      - name: Download previous compatible Snapshot
+        if: needs.resolve.outputs.candidateAvailable == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: address-lite-selected-data
+          path: ${{ runner.temp }}/previous-snapshot
+      - id: provenance
+        name: Resolve data provenance
+        shell: bash
+        env:
+          DECISION: ${{ needs.resolve.outputs.decision }}
         run: |
+          if [[ "$DECISION" == 'refresh' ]]; then
+            echo "generatedAt=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+            echo "sourceSha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "sourceRunId=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "sourceEvent=$GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"
+          else
+            snapshot="$RUNNER_TEMP/previous-snapshot/snapshot.json"
+            echo "generatedAt=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).generatedAt' "$snapshot")" >> "$GITHUB_OUTPUT"
+            echo "sourceSha=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).sourceSha' "$snapshot")" >> "$GITHUB_OUTPUT"
+            echo "sourceRunId=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).sourceRunId' "$snapshot")" >> "$GITHUB_OUTPUT"
+            echo "sourceEvent=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).sourceEvent' "$snapshot")" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore verified target shards for assemble-only mode
+        if: needs.resolve.outputs.decision == 'reassemble'
+        run: |
+          node scripts/lite/snapshot.mjs restore \
+            --bundle "$RUNNER_TEMP/previous-snapshot" \
+            --output-data "$RUNNER_TEMP/reassembled-input" \
+            --refresh-fingerprint '${{ needs.resolve.outputs.refreshFingerprint }}' \
+            --assemble-fingerprint '${{ needs.resolve.outputs.assembleFingerprint }}' \
+            --published-run-id '${{ needs.resolve.outputs.snapshotRunId }}' \
+            --allow-assemble-mismatch
+      - name: Assemble and verify static data
+        shell: bash
+        env:
+          DECISION: ${{ needs.resolve.outputs.decision }}
+          GENERATED_AT: ${{ steps.provenance.outputs.generatedAt }}
+        run: |
+          input="$RUNNER_TEMP/lite-artifacts"
+          if [[ "$DECISION" == 'reassemble' ]]; then input="$RUNNER_TEMP/reassembled-input"; fi
           rm -rf public/data
-          node scripts/lite/aggregate.mjs --input "$RUNNER_TEMP/lite-artifacts" --output public/data
+          node scripts/lite/aggregate.mjs --input "$input" --output public/data --generated-at "$GENERATED_AT"
           node scripts/lite/verify-static.mjs --data public/data
-          node scripts/lite/summarize-metrics.mjs --metrics "$RUNNER_TEMP/lite-artifacts/metrics"
-      - name: Build static website
+          node scripts/lite/size-budget.mjs --data-root public/data
+          if [[ "$DECISION" == 'refresh' ]]; then
+            node scripts/lite/summarize-metrics.mjs --metrics "$RUNNER_TEMP/lite-artifacts/metrics"
+          fi
+      - id: snapshot
+        name: Package verified Data Snapshot
+        shell: bash
+        env:
+          REFRESH_FINGERPRINT: ${{ needs.resolve.outputs.refreshFingerprint }}
+          ASSEMBLE_FINGERPRINT: ${{ needs.resolve.outputs.assembleFingerprint }}
+          GENERATED_AT: ${{ steps.provenance.outputs.generatedAt }}
+          SOURCE_SHA: ${{ steps.provenance.outputs.sourceSha }}
+          SOURCE_RUN_ID: ${{ steps.provenance.outputs.sourceRunId }}
+          SOURCE_EVENT: ${{ steps.provenance.outputs.sourceEvent }}
+        run: |
+          stage="$RUNNER_TEMP/address-lite-data-stage"
+          bundle="$RUNNER_TEMP/address-lite-data"
+          mkdir -p "$stage/public" "$bundle"
+          cp -a public/data "$stage/public/data"
+          tar -C "$stage" -czf "$bundle/address-lite-data.tar.gz" public/data
+          (cd "$bundle" && sha256sum address-lite-data.tar.gz > address-lite-data.tar.gz.sha256)
+          archive_sha="$(cut -d' ' -f1 "$bundle/address-lite-data.tar.gz.sha256")"
+          node scripts/lite/size-budget.mjs --data-archive "$bundle/address-lite-data.tar.gz" --data-root public/data
+          node scripts/lite/snapshot.mjs create \
+            --data public/data \
+            --refresh-fingerprint "$REFRESH_FINGERPRINT" \
+            --assemble-fingerprint "$ASSEMBLE_FINGERPRINT" \
+            --generated-at "$GENERATED_AT" \
+            --source-sha "$SOURCE_SHA" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-event "$SOURCE_EVENT" \
+            --published-run-id "$GITHUB_RUN_ID" \
+            --archive-sha256 "$archive_sha" \
+            --output "$bundle/snapshot.json"
+          node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const key of ["snapshotId","generatedAt","sourceSha","sourceRunId","totalAddresses","targetCount","countryCount","archiveSha256"])fs.appendFileSync(process.env.GITHUB_OUTPUT,`${key}=${value[key]}\n`)' "$bundle/snapshot.json"
+      - name: Summarize Snapshot delta
+        if: needs.resolve.outputs.candidateAvailable == 'true'
+        run: |
+          node scripts/lite/compare-snapshot.mjs \
+            --previous "$RUNNER_TEMP/previous-snapshot/snapshot.json" \
+            --current "$RUNNER_TEMP/address-lite-data/snapshot.json" \
+            --json-output "$RUNNER_TEMP/address-lite-delta.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload Verified Data Snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-data
+          path: ${{ runner.temp }}/address-lite-data
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Upload complete Refresh metrics
+        if: needs.resolve.outputs.decision == 'refresh'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-metrics
+          path: |
+            ${{ runner.temp }}/lite-artifacts/metrics
+            ${{ runner.temp }}/address-lite-delta.json
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 6
+
+  site-build:
+    needs: [resolve, source-refresh, data-assemble]
+    if: >-
+      ${{ always() && needs.resolve.result == 'success' &&
+      ((needs.resolve.outputs.decision == 'reuse' && needs.source-refresh.result == 'skipped' && needs.data-assemble.result == 'skipped') ||
+      (needs.resolve.outputs.decision != 'reuse' && needs.data-assemble.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      snapshotId: ${{ steps.info.outputs.snapshotId }}
+      generatedAt: ${{ steps.info.outputs.generatedAt }}
+      sourceSha: ${{ steps.info.outputs.sourceSha }}
+      sourceRunId: ${{ steps.info.outputs.sourceRunId }}
+      totalAddresses: ${{ steps.info.outputs.totalAddresses }}
+      targetCount: ${{ steps.info.outputs.targetCount }}
+      countryCount: ${{ steps.info.outputs.countryCount }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Audit tracked public/PWA files
+        run: npm run check:public
+      - name: Download reused Snapshot
+        if: needs.resolve.outputs.decision == 'reuse'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: address-lite-selected-data
+          path: ${{ runner.temp }}/active-data
+      - name: Download rebuilt Snapshot
+        if: needs.resolve.outputs.decision != 'reuse'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: address-lite-data
+          path: ${{ runner.temp }}/active-data
+      - id: info
+        name: Restore and verify active Snapshot
+        shell: bash
+        env:
+          EXPECTED_PUBLISHED_RUN: ${{ needs.resolve.outputs.decision == 'reuse' && needs.resolve.outputs.snapshotRunId || github.run_id }}
+        run: |
+          node scripts/lite/snapshot.mjs restore \
+            --bundle "$RUNNER_TEMP/active-data" \
+            --output-data public/data \
+            --refresh-fingerprint '${{ needs.resolve.outputs.refreshFingerprint }}' \
+            --assemble-fingerprint '${{ needs.resolve.outputs.assembleFingerprint }}' \
+            --published-run-id "$EXPECTED_PUBLISHED_RUN"
+          snapshot="$RUNNER_TEMP/active-data/snapshot.json"
+          built_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          node scripts/lite/build-info.mjs --snapshot "$snapshot" --output public/build-info.json --site-sha "$GITHUB_SHA" --site-built-at "$built_at" --data-mode '${{ needs.resolve.outputs.decision }}'
+          node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const key of ["snapshotId","generatedAt","sourceSha","sourceRunId","totalAddresses","targetCount","countryCount"])fs.appendFileSync(process.env.GITHUB_OUTPUT,`${key}=${value[key]}\n`)' "$snapshot"
+      - name: Build current main frontend
         env:
           PUBLIC_API_BASE_URL: ''
-        run: npm run build
-      - name: Package release
+        run: |
+          node scripts/lite/check-config.mjs
+          node scripts/lite/verify-static.mjs --data public/data
+          npm run check
+          npm run build
+          test -s dist/index.html
+          test -s dist/data/countries.json
+          test -s dist/build-info.json
+          test -s dist/manifest.webmanifest
+          test -s dist/apple-touch-icon.png
+      - name: Upload built static distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
+      - name: Upload Site Build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: address-lite-site-build-diagnostics
+          path: |
+            public/build-info.json
+            test-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    needs: site-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      archiveSha256: ${{ steps.package.outputs.archiveSha256 }}
+      archiveBytes: ${{ steps.package.outputs.archiveBytes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: address-lite-dist
+          path: ${{ runner.temp }}/dist
+      - id: package
+        name: Package immutable Site Release
         shell: bash
         run: |
+          test -s "$RUNNER_TEMP/dist/index.html"
+          test -s "$RUNNER_TEMP/dist/data/countries.json"
+          test -s "$RUNNER_TEMP/dist/build-info.json"
           release="address-lite-${GITHUB_SHA::12}.tar.gz"
-          tar -C dist -czf "$RUNNER_TEMP/$release" .
+          tar -C "$RUNNER_TEMP/dist" -czf "$RUNNER_TEMP/$release" .
           (cd "$RUNNER_TEMP" && sha256sum "$release" > "$release.sha256")
-      - uses: actions/upload-artifact@v7
+          node scripts/lite/size-budget.mjs --site-archive "$RUNNER_TEMP/$release"
+          echo "archiveSha256=$(cut -d' ' -f1 "$RUNNER_TEMP/$release.sha256")" >> "$GITHUB_OUTPUT"
+          echo "archiveBytes=$(stat -c '%s' "$RUNNER_TEMP/$release")" >> "$GITHUB_OUTPUT"
+      - name: Upload Site Release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: address-lite-site
           path: |
@@ -139,25 +429,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
-      - uses: actions/upload-artifact@v7
-        with:
-          name: address-lite-metrics
-          path: ${{ runner.temp }}/lite-artifacts/metrics
-          if-no-files-found: warn
-          retention-days: 30
-          compression-level: 6
 
   deploy:
-    needs: assemble
-    if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}
+    needs: [resolve, release]
+    if: ${{ always() && needs.release.result == 'success' && needs.resolve.outputs.deployRequested == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: address-lite-production
+    outputs:
+      currentRelease: ${{ steps.deploy.outputs.currentRelease }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: address-lite-site
           path: ${{ runner.temp }}/release
       - id: config
+        name: Require complete Production deployment configuration
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -166,14 +453,10 @@ jobs:
           DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
-          if [[ -n "$DEPLOY_HOST" && -n "$DEPLOY_USER" && -n "$DEPLOY_SSH_KEY" && -n "$DEPLOY_ROOT" && -n "$DEPLOY_KNOWN_HOSTS" ]]; then
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo 'Deployment secrets are not fully configured; deployment is skipped.'
-          fi
-      - name: Deploy atomically to remote host
-        if: steps.config.outputs.ready == 'true'
+          [[ -n "$DEPLOY_HOST" && -n "$DEPLOY_USER" && -n "$DEPLOY_SSH_KEY" && -n "$DEPLOY_ROOT" && -n "$DEPLOY_KNOWN_HOSTS" ]] \
+            || { echo 'Required Production deployment configuration is incomplete.' >&2; exit 1; }
+      - id: deploy
+        name: Deploy atomically and verify remote release
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -192,9 +475,7 @@ jobs:
           credential_dir="$RUNNER_TEMP/address-lite-deploy-credentials"
           private_key="$credential_dir/private-key"
           known_hosts="$credential_dir/known_hosts"
-          cleanup_local_credentials() {
-            rm -rf -- "$credential_dir"
-          }
+          cleanup_local_credentials() { rm -rf -- "$credential_dir"; }
           trap cleanup_local_credentials EXIT
           (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$checksum")")
           install -m 700 -d "$credential_dir"
@@ -205,7 +486,7 @@ jobs:
           ssh_options=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts")
           scp -P "$port" -i "$private_key" "${ssh_options[@]}" "$archive" "$checksum" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
           ssh -p "$port" -i "$private_key" "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "ROOT='$root' RELEASE='$release_id' bash -s" <<'REMOTE'
+            "ROOT='$root' RELEASE='$release_id' SITE_SHA='$GITHUB_SHA' bash -s" <<'REMOTE'
           set -euo pipefail
           umask 022
           archive="/tmp/address-lite-$RELEASE.tar.gz"
@@ -214,9 +495,7 @@ jobs:
           final="$ROOT/releases/$RELEASE"
           cleanup_remote_files() {
             rm -f -- "$archive" "$checksum"
-            if [[ -n "${incoming:-}" && -d "$incoming" ]]; then
-              rm -rf -- "$incoming"
-            fi
+            if [[ -n "${incoming:-}" && -d "$incoming" ]]; then rm -rf -- "$incoming"; fi
           }
           trap cleanup_remote_files EXIT
           cd /tmp
@@ -227,9 +506,15 @@ jobs:
           tar --no-same-owner -xzf "$archive" -C "$incoming"
           test -s "$incoming/index.html"
           test -s "$incoming/data/countries.json"
+          test -s "$incoming/build-info.json"
+          test -s "$incoming/manifest.webmanifest"
+          test -s "$incoming/apple-touch-icon.png"
+          grep -Fq "\"siteSha\": \"$SITE_SHA\"" "$incoming/build-info.json"
           if [[ -e "$final" ]]; then
             test -s "$final/index.html"
             test -s "$final/data/countries.json"
+            test -s "$final/build-info.json"
+            grep -Fq "\"siteSha\": \"$SITE_SHA\"" "$final/build-info.json"
             rm -rf "$incoming"
           else
             mv "$incoming" "$final"
@@ -238,20 +523,98 @@ jobs:
           ln -sfn "releases/$RELEASE" "$ROOT/current.next"
           mv -Tf "$ROOT/current.next" "$ROOT/current"
           active_release="$(basename "$(readlink "$ROOT/current")")"
+          [[ "$active_release" == "$RELEASE" ]]
+          test -s "$ROOT/current/index.html"
+          test -s "$ROOT/current/data/countries.json"
+          test -s "$ROOT/current/build-info.json"
           mapfile -t release_dirs < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn | cut -d' ' -f2-)
           formal_releases=()
           for release_dir in "${release_dirs[@]}"; do
-            if [[ "$release_dir" =~ ^[0-9a-f]{12}$ ]]; then
-              formal_releases+=("$release_dir")
-            fi
+            if [[ "$release_dir" =~ ^[0-9a-f]{12}$ ]]; then formal_releases+=("$release_dir"); fi
           done
           declare -A keep_releases=(["$active_release"]=1)
-          for release_dir in "${formal_releases[@]:0:3}"; do
-            keep_releases["$release_dir"]=1
-          done
+          for release_dir in "${formal_releases[@]:0:3}"; do keep_releases["$release_dir"]=1; done
           for release_dir in "${formal_releases[@]}"; do
-            if [[ -z "${keep_releases[$release_dir]:-}" ]]; then
-              rm -rf -- "$ROOT/releases/$release_dir"
-            fi
+            if [[ -z "${keep_releases[$release_dir]:-}" ]]; then rm -rf -- "$ROOT/releases/$release_dir"; fi
           done
           REMOTE
+          current_release="$(ssh -p "$port" -i "$private_key" "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "basename \"\$(readlink '$root/current')\"")"
+          [[ "$current_release" == "$release_id" ]]
+          echo "currentRelease=$current_release" >> "$GITHUB_OUTPUT"
+      - name: Public HTTPS smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in / /data/countries.json /build-info.json /manifest.webmanifest /apple-touch-icon.png /favicon.svg /icons/icon-192.png /icons/icon-512.png; do
+            passed=false
+            for attempt in 1 2 3; do
+              if curl -fsS --connect-timeout 10 --max-time 30 -o /dev/null "$ADDRESS_LITE_PUBLIC_URL$path"; then passed=true; break; fi
+              sleep $((attempt * 3))
+            done
+            [[ "$passed" == 'true' ]] || { echo "Smoke test failed: $path" >&2; exit 1; }
+            echo "HTTP 200: $path"
+          done
+
+  summary:
+    needs: [resolve, source-refresh, data-assemble, site-build, release, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write Address Lite run summary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_MODE: ${{ needs.resolve.outputs.requestedMode }}
+          DECISION: ${{ needs.resolve.outputs.decision }}
+          SOURCE_MODE: ${{ needs.resolve.outputs.sourceMode }}
+          ASSEMBLE_MODE: ${{ needs.resolve.outputs.assembleMode }}
+          DEPLOY_REQUESTED: ${{ needs.resolve.outputs.deployRequested }}
+          REASON: ${{ needs.resolve.outputs.reason }}
+          REFRESH_FINGERPRINT: ${{ needs.resolve.outputs.refreshFingerprint }}
+          ASSEMBLE_FINGERPRINT: ${{ needs.resolve.outputs.assembleFingerprint }}
+          SNAPSHOT_STATUS: ${{ needs.resolve.outputs.snapshotStatus }}
+          SNAPSHOT_ID_RESOLVED: ${{ needs.resolve.outputs.snapshotId }}
+          SNAPSHOT_ID_BUILT: ${{ needs.site-build.outputs.snapshotId }}
+          SNAPSHOT_RUN: ${{ needs.resolve.outputs.snapshotSourceRunId }}
+          SNAPSHOT_SHA: ${{ needs.site-build.outputs.sourceSha || needs.resolve.outputs.snapshotSourceSha }}
+          SNAPSHOT_GENERATED: ${{ needs.site-build.outputs.generatedAt || needs.resolve.outputs.snapshotGeneratedAt }}
+          SNAPSHOT_AGE: ${{ needs.resolve.outputs.snapshotAgeDays }}
+          MATRIX_GROUPS: ${{ needs.resolve.outputs.matrixGroups }}
+          SOURCE_RESULT: ${{ needs.source-refresh.result }}
+          ASSEMBLE_RESULT: ${{ needs.data-assemble.result }}
+          SITE_RESULT: ${{ needs.site-build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          completed="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | startswith("lite-"))] | length' | awk '{sum+=$1} END {print sum+0}')"
+          launched=0
+          [[ "$SOURCE_RESULT" != 'skipped' ]] && launched="${MATRIX_GROUPS:-0}"
+          snapshot_id="${SNAPSHOT_ID_BUILT:-$SNAPSHOT_ID_RESOLVED}"
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Address Lite pipeline
+
+          | Field | Value |
+          |---|---|
+          | Requested Data Mode | ${REQUESTED_MODE^^} |
+          | Resolved Source Mode | ${SOURCE_MODE^^} |
+          | Data Assemble | ${ASSEMBLE_MODE^^} |
+          | Deploy Requested | $DEPLOY_REQUESTED |
+          | Refresh Fingerprint | \`$REFRESH_FINGERPRINT\` |
+          | Assemble Fingerprint | \`$ASSEMBLE_FINGERPRINT\` |
+          | Snapshot | ${SNAPSHOT_STATUS^^} |
+          | Snapshot ID | ${snapshot_id:-—} |
+          | Snapshot Source Run | ${SNAPSHOT_RUN:-—} |
+          | Snapshot Source SHA | ${SNAPSHOT_SHA:-—} |
+          | Snapshot Generated At | ${SNAPSHOT_GENERATED:-—} |
+          | Snapshot Age | ${SNAPSHOT_AGE:-—} days |
+          | Decision Reason | $REASON |
+          | Source Refresh | $SOURCE_RESULT |
+          | Matrix Groups Launched | $launched |
+          | Matrix Groups Completed | $completed |
+          | Data Assemble Job | $ASSEMBLE_RESULT |
+          | Site Build | $SITE_RESULT |
+          | Release | $RELEASE_RESULT |
+          | Deploy | $DEPLOY_RESULT |
+          | Site SHA | \`$GITHUB_SHA\` |
+          SUMMARY

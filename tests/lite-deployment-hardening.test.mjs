@@ -31,11 +31,11 @@ describe('Address Lite generic remote deployment', () => {
   });
 
   it('requires all non-port deployment values before connecting', () => {
-    const readiness = workflow.match(/if \[\[ -n "\$DEPLOY_HOST"[^\n]+/u)?.[0] ?? '';
+    const readiness = workflow.match(/\[\[ -n "\$DEPLOY_HOST"[^\n]+/u)?.[0] ?? '';
     for (const name of ['DEPLOY_HOST', 'DEPLOY_USER', 'DEPLOY_SSH_KEY', 'DEPLOY_ROOT', 'DEPLOY_KNOWN_HOSTS']) {
       expect(readiness).toContain(`-n "$${name}"`);
     }
-    expect(workflow).toContain('Deployment secrets are not fully configured; deployment is skipped.');
+    expect(workflow).toContain('Required Production deployment configuration is incomplete.');
     expect(workflow).toContain('port="${DEPLOY_PORT:-22}"');
     expect(workflow).toContain('root="$DEPLOY_ROOT"');
   });
@@ -73,7 +73,8 @@ describe('Address Lite generic remote deployment', () => {
     expect(workflow).not.toMatch(/^  push:/mu);
     expect(workflow).toMatch(/^  workflow_dispatch:/mu);
     expect(workflow).toMatch(/^  schedule:/mu);
-    expect(workflow).toContain("if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}");
+    expect(workflow).toContain("DEPLOY_REQUESTED: ${{ github.event_name == 'schedule' && 'true' || inputs.deploy }}");
+    expect(workflow).toContain("needs.resolve.outputs.deployRequested == 'true'");
     expect(workflow).toContain("default: false");
     expect(workflow).toContain("cron: '17 3 1 1,3,5,7,9,11 *'");
     expect(workflow).toContain('environment: address-lite-production');

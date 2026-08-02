@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:admin-e2e": "npm run build && node tests/admin-console.e2e.mjs",
     "test:watch": "vitest",
+    "test:lite-mobile": "npm run build && node tests/lite-mobile.e2e.mjs",
     "data:regions": "node scripts/update-regions.mjs",
     "data:catalog": "node scripts/sync-location-catalog.mjs",
     "data:catalog:import": "node scripts/import-location-catalog.mjs",

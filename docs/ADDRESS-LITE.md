@@ -219,24 +219,49 @@ Region
 
 The target-level output caps above keep the whole site small even when a region contains many postcode/locality combinations.
 
+## Data Snapshot pipeline
+
+Address Lite separates expensive address acquisition from ordinary frontend releases:
+
+```text
+Source Refresh (63 Matrix groups, only when required)
+  -> Data Assemble + strict verification
+  -> address-lite-data Snapshot
+  -> Site Build
+  -> immutable Site Release
+  -> optional atomic Deploy
+```
+
+`address-lite-data` contains only the verified static `public/data` tree, its SHA-256 checksum, and `snapshot.json`. It never contains raw Overture databases, Geofabrik PBF files, SQLite files, or private deployment values. The Snapshot is retained for 90 days and may be reused for at most 75 days.
+
+Two independent fingerprints decide the safe path:
+
+- **Refresh fingerprint** covers source selection, target geometry, candidate profiles, strict residential validation, Overture/Geofabrik adapters, and database/ETL code. A change forces all 63 source groups to run.
+- **Assemble fingerprint** covers static aggregation and the complete manifest. Tax, label, or display-only metadata can therefore rebuild the static data without downloading raw sources again.
+- Frontend/PWA-only changes reuse the current verified Snapshot and launch zero Matrix groups.
+
+`data_mode=auto` is the normal manual mode. It searches successful trusted `main` runs for the newest compatible, checksum-valid Snapshot. Missing, expired, malformed, unverifiable, or source-incompatible Snapshots fail closed to a full Refresh. `data_mode=refresh` explicitly forces a Refresh.
+
+Every site publishes `/build-info.json` with separate site and data provenance, including the site SHA, source SHA, source run, Snapshot ID, data generation time, and resolved data mode. Artifact retention is 90 days for verified data and metrics, 30 days for deployable Site Releases, and 3 days for the intermediate distribution.
+
 ## Build metrics
 
-Every matrix unit writes JSON metrics plus `/usr/bin/time -v` output. The metrics include candidate tier, candidate limit, source sample percentage, accepted/rejected counts, validation success rate, postcode groups, target elapsed time, peak RSS, ETL storage estimates, post-import storage and source-size metadata. For Geofabrik, `sourceBytes` is the downloaded PBF size; for Overture, Lite requests asset-size metadata and the value represents the intersecting source-asset size estimate, not the exact HTTP range bytes DuckDB transferred. The workflow uploads all metrics for 30 days.
+Every matrix unit writes JSON metrics plus `/usr/bin/time -v` output. The metrics include candidate tier, candidate limit, source sample percentage, accepted/rejected counts, validation success rate, postcode groups, target elapsed time, peak RSS, ETL storage estimates, post-import storage and source-size metadata. For Geofabrik, `sourceBytes` is the downloaded PBF size; for Overture, Lite requests asset-size metadata and the value represents the intersecting source-asset size estimate, not the exact HTTP range bytes DuckDB transferred. The workflow uploads complete Refresh metrics for 90 days. The run summary reports the resolved mode, both fingerprints, Snapshot provenance, launched/completed Matrix groups, and every pipeline layer. Refresh summaries also report total wall time, the slowest jobs, peak RSS, target counts, shortages, and data deltas against the preceding Snapshot.
 
 Use the latest successful complete Actions run as the performance baseline. The most useful follow-up tuning is to change only the slow target's bounds or retry tiers rather than globally enlarging all countries.
 
 ## GitHub Actions use
 
-Pushes to `main` run the complete build-only pipeline. Deployment remains conditional and is not required for a successful build.
+Normal pushes to `main` run the ordinary repository CI only. They do not launch the expensive Address Lite source pipeline and do not deploy Production.
 
 Manual build:
 
 1. Open **Actions -> Address Lite**.
 2. Choose **Run workflow**.
-3. Leave `deploy=false` for a build-only test.
-4. Set `deploy=true` after the deployment secrets are configured.
+3. Leave `data_mode=auto` to reuse a compatible verified Snapshot, or select `refresh` to force all source groups.
+4. Leave `deploy=false` for a build-only run; set it to `true` only when the finished Site Release should become Production.
 
-An automatic rebuild is configured for 03:17 UTC on the first day of January, March, May, July, September, and November. Scheduled runs also attempt deployment when all required deployment secrets exist. Missing deployment secrets do not fail the build; the deployment step is skipped.
+An automatic run is configured for 03:17 UTC on the first day of January, March, May, July, September, and November. A scheduled run always forces a complete Refresh and requests Production deployment. Missing required Production configuration fails the deploy layer explicitly; it never turns a requested deployment into a silent success.
 
 ## Generic remote static deployment
 
@@ -280,6 +305,12 @@ upload archive to /tmp
 ```
 
 No HTTP server reload is required for a normal data update because the document-root symlink remains the same path. The workflow retains the three newest commit-named releases and always protects the release referenced by `current` from cleanup.
+
+## Rollback
+
+The standalone **Address Lite Rollback** workflow switches `current` atomically to either `previous` or an explicitly retained 12-character release SHA. It validates `index.html`, `data/countries.json`, and `build-info.json` before switching, then performs the public HTTPS smoke test. Rollback does not rebuild data, overwrite a release, delete the failed release, or require `sudo`.
+
+For a validation exercise, run rollback with `release=previous`, confirm the public site and recorded release, then run the normal Address Lite workflow with `data_mode=auto` and `deploy=true` to restore the latest immutable release.
 
 ## Observed resource profile
 
