@@ -390,6 +390,7 @@ jobs:
 
   release:
     needs: site-build
+    if: ${{ always() && needs.site-build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -565,6 +566,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
           REQUESTED_MODE: ${{ needs.resolve.outputs.requestedMode }}
           DECISION: ${{ needs.resolve.outputs.decision }}
           SOURCE_MODE: ${{ needs.resolve.outputs.sourceMode }}
@@ -618,3 +620,17 @@ jobs:
           | Deploy | $DEPLOY_RESULT |
           | Site SHA | \`$GITHUB_SHA\` |
           SUMMARY
+          failed=false
+          [[ "$RESOLVE_RESULT" == 'success' && "$SITE_RESULT" == 'success' && "$RELEASE_RESULT" == 'success' ]] || failed=true
+          case "$DECISION" in
+            refresh) [[ "$SOURCE_RESULT" == 'success' && "$ASSEMBLE_RESULT" == 'success' ]] || failed=true ;;
+            reassemble) [[ "$SOURCE_RESULT" == 'skipped' && "$ASSEMBLE_RESULT" == 'success' ]] || failed=true ;;
+            reuse) [[ "$SOURCE_RESULT" == 'skipped' && "$ASSEMBLE_RESULT" == 'skipped' ]] || failed=true ;;
+            *) failed=true ;;
+          esac
+          if [[ "$DEPLOY_REQUESTED" == 'true' ]]; then
+            [[ "$DEPLOY_RESULT" == 'success' ]] || failed=true
+          else
+            [[ "$DEPLOY_RESULT" == 'skipped' ]] || failed=true
+          fi
+          [[ "$failed" == 'false' ]] || { echo 'Address Lite pipeline did not complete every required layer.' >&2; exit 1; }
