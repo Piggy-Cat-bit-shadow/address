@@ -47,14 +47,28 @@ for (const target of manifest.targets) {
 rows.sort((a, b) => (b.wallClockMs || b.targetElapsedMs) - (a.wallClockMs || a.targetElapsedMs) || a.targetId.localeCompare(b.targetId));
 const bytesByGroup = new Map();
 for (const row of rows) bytesByGroup.set(row.group, Math.max(bytesByGroup.get(row.group) || 0, row.sourceBytes || 0));
+const jobs = [...new Set(rows.map((row) => row.group))].map((group) => {
+  const members = rows.filter((row) => row.group === group);
+  return {
+    group,
+    targets: members.map((row) => row.targetId),
+    wallClockMs: Math.max(0, ...members.map((row) => Number(row.wallClockMs || 0))),
+    peakRssMiB: Math.max(0, ...members.map((row) => Number(row.peakRssMiB || 0)))
+  };
+});
 const summary = {
   schemaVersion: 1,
   generatedAt: new Date().toISOString(),
   targets: rows.length,
   matrixGroups: new Set(rows.map((row) => row.group)).size,
   staticAddresses: rows.reduce((sum, row) => sum + row.staticAddresses, 0),
+  shortageTargets: rows.filter((row) => row.staticAddresses < 3).length,
   totalSourceBytesReported: [...bytesByGroup.values()].reduce((sum, value) => sum + value, 0),
   maxPeakRssMiB: Math.max(0, ...rows.map((row) => row.peakRssMiB || 0)),
+  totalJobWallClockMs: jobs.reduce((sum, job) => sum + job.wallClockMs, 0),
+  top10SlowestJobs: [...jobs].sort((left, right) => right.wallClockMs - left.wallClockMs || left.group.localeCompare(right.group)).slice(0, 10),
+  top10PeakMemoryJobs: [...jobs].sort((left, right) => right.peakRssMiB - left.peakRssMiB || left.group.localeCompare(right.group)).slice(0, 10),
+  jobs,
   rows
 };
 await writeFile(resolve(metricsRoot, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');

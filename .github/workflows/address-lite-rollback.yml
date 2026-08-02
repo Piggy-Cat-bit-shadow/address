@@ -1,0 +1,77 @@
+name: Address Lite Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: previous or an explicit 12-character release SHA
+        required: true
+        default: previous
+        type: string
+
+concurrency:
+  group: address-lite-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.site'
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: address-lite-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Switch current to a retained release
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          REQUESTED_RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          [[ -n "$DEPLOY_HOST" && -n "$DEPLOY_USER" && -n "$DEPLOY_SSH_KEY" && -n "$DEPLOY_ROOT" && -n "$DEPLOY_KNOWN_HOSTS" ]] \
+            || { echo 'Required Production deployment configuration is incomplete.' >&2; exit 1; }
+          port="${DEPLOY_PORT:-22}"
+          credential_dir="$RUNNER_TEMP/address-lite-rollback-credentials"
+          private_key="$credential_dir/private-key"
+          known_hosts="$credential_dir/known_hosts"
+          cleanup_credentials() { rm -rf -- "$credential_dir"; }
+          trap cleanup_credentials EXIT
+          install -m 700 -d "$credential_dir"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts"
+          chmod 600 "$known_hosts"
+          ssh_options=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts")
+          result="$(ssh -p "$port" -i "$private_key" "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "ROOT='$DEPLOY_ROOT' REQUESTED='$REQUESTED_RELEASE' bash -s" < ops/address-lite/rollback.sh)"
+          echo "$result"
+          target="${result#ROLLBACK_RELEASE=}"
+          [[ "$target" =~ ^[0-9a-f]{12}$ ]]
+          current="$(ssh -p "$port" -i "$private_key" "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "basename \"\$(readlink '$DEPLOY_ROOT/current')\"")"
+          [[ "$current" == "$target" ]]
+          echo "### Address Lite rollback" >> "$GITHUB_STEP_SUMMARY"
+          echo "Current release: \`$current\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Public HTTPS smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in / /data/countries.json /build-info.json /manifest.webmanifest /apple-touch-icon.png; do
+            passed=false
+            for attempt in 1 2 3; do
+              if curl -fsS --connect-timeout 10 --max-time 30 -o /dev/null "$ADDRESS_LITE_PUBLIC_URL$path"; then passed=true; break; fi
+              sleep $((attempt * 3))
+            done
+            [[ "$passed" == 'true' ]] || { echo "Rollback smoke test failed: $path" >&2; exit 1; }
+          done
