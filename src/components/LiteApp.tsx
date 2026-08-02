@@ -42,6 +42,19 @@ export const formatTaxReference = (tax: TaxMetadata, locale: Locale) => {
   return note ? `${reference} · ${note}` : reference;
 };
 
+type StructuredAddressFields = Pick<AddressItem, 'houseNumber' | 'street' | 'city' | 'locality' | 'postalLocality' | 'region' | 'regionCode' | 'postcode'>;
+
+export const formatLiteAddressLines = (address: StructuredAddressFields, countryName: string) => {
+  const clean = (value?: string) => value?.trim() || '';
+  const streetLine = [clean(address.houseNumber), clean(address.street)].filter(Boolean).join(' ');
+  const locality = [address.city, address.locality, address.postalLocality].map(clean).find(Boolean) || '';
+  const region = clean(address.regionCode) || clean(address.region);
+  const localityRegion = [...new Set([locality, region].filter(Boolean))].join(', ');
+  const locationLine = [localityRegion, clean(address.postcode)].filter(Boolean).join(' ');
+  const lines = [streetLine, locationLine, clean(countryName)].filter(Boolean);
+  return { streetLine, locationLine, countryLine: clean(countryName), lines, copyText: lines.join('\n') };
+};
+
 const copyText = async (value: string) => navigator.clipboard?.writeText(value);
 const randomItem = <T,>(values: T[]): T | undefined => {
   if (!values.length) return undefined;
@@ -54,18 +67,18 @@ const randomItem = <T,>(values: T[]): T | undefined => {
 };
 const strings = {
   en: {
-    title: 'Address Lite', subtitle: 'Verified residential addresses · static data · no server API', country: 'Country / region', category: 'Address group',
+    title: 'Address Lite', subtitle: 'Verified residential addresses · static data · no server API', mobileSubtitle: 'Verified residential address lookup', country: 'Country / region', category: 'Address group',
     low: 'Low-tax / tax-free', cities: 'Major cities', target: 'Target area', region: 'Region', city: 'City / locality', postcode: 'Postcode',
     any: 'Any', generate: 'Generate address', another: 'Another one', copy: 'Copy', copied: 'Copied', verified: 'Residential evidence verified',
     noData: 'No verified residential address is available for this selection.', loading: 'Loading static address data…', source: 'Source', updated: 'Data build',
-    addresses: 'addresses', postcodes: 'postcode groups', taxType: 'Tax type', taxReference: 'Tax reference', location: 'Coordinates', unavailable: 'This group is not configured for the selected country.'
+    addresses: 'addresses', mobileAddresses: 'residential addresses', mobileCountries: 'countries / regions', postcodes: 'postcode groups', taxType: 'Tax type', taxReference: 'Tax reference', location: 'Coordinates', unavailable: 'This group is not configured for the selected country.'
   },
   'zh-CN': {
-    title: 'Address Lite', subtitle: '真实住宅证据验证 · 全静态数据 · 不需要服务器 API', country: '国家 / 地区', category: '地址分类',
-    low: '低税 / 免税地区', cities: '主要城市', target: '目标地区', region: 'Region', city: 'City / Locality', postcode: 'Postcode',
+    title: 'Address Lite', subtitle: '真实住宅证据验证 · 全静态数据 · 不需要服务器 API', mobileSubtitle: '真实住宅地址查询', country: '国家 / 地区', category: '地址分类',
+    low: '低税 / 免税地区', cities: '主要城市', target: '目标地区', region: '州 / 地区', city: '城市 / 地区', postcode: '邮政编码',
     any: '任意', generate: '随机生成地址', another: '换一个', copy: '复制', copied: '已复制', verified: '已通过住宅证据验证',
     noData: '当前筛选条件没有可用的已验证住宅地址。', loading: '正在加载静态地址数据…', source: '数据来源', updated: '数据构建时间',
-    addresses: '条地址', postcodes: '个邮编组', taxType: '低税类型', taxReference: '税率参考', location: '坐标', unavailable: '当前国家没有配置这一分类。'
+    addresses: '条地址', mobileAddresses: '条住宅地址', mobileCountries: '个国家 / 地区', postcodes: '个邮编组', taxType: '低税类型', taxReference: '税率参考', location: '坐标', unavailable: '当前国家没有配置这一分类。'
   }
 } as const;
 
@@ -142,16 +155,15 @@ export default function LiteApp({ locale }: { locale: Locale }) {
     return nodes.flatMap((entry) => entry.addresses);
   }, [city, postcode]);
   const generate = () => { setResult(randomItem(candidates)); setCopied(false); };
-  const resultAddress = result
-    ? locale === 'zh-CN' && result.formattedAddressZh ? result.formattedAddressZh
-      : locale === 'en' && result.formattedAddressEn ? result.formattedAddressEn
-        : result.formattedAddress
-    : '';
+  const countryName = country ? locale === 'zh-CN' ? country.nameZh : country.name : '';
+  const resultAddress = result ? formatLiteAddressLines(result, countryName) : undefined;
 
   if (!index && !error) return <main className="lite-shell"><div className="lite-card lite-loading">{t.loading}</div></main>;
   return <main className="lite-shell">
     <section className="lite-hero">
-      <div><span className="lite-kicker">ULTRA LITE</span><h1>{t.title}</h1><p>{t.subtitle}</p></div>
+      <div><span className="lite-kicker">ULTRA LITE</span><h1>{t.title}</h1><p className="lite-subtitle">{t.subtitle}</p><p className="lite-mobile-subtitle">{t.mobileSubtitle}</p>
+        {index && <p className="lite-mobile-stats"><strong>{index.totalAddresses.toLocaleString(locale)}</strong> {t.mobileAddresses} · <strong>{index.countries.length.toLocaleString(locale)}</strong> {t.mobileCountries}</p>}
+      </div>
       {index && <div className="lite-build"><strong>{index.totalAddresses.toLocaleString()}</strong><span>{t.addresses}</span><small>{new Date(index.generatedAt).toLocaleString(locale)}</small></div>}
     </section>
 
@@ -193,12 +205,12 @@ export default function LiteApp({ locale }: { locale: Locale }) {
 
     {result ? <section className="lite-card lite-result">
       <div className="lite-result-head"><span className="lite-verified">✓ {t.verified}</span><span>{Math.round(result.qualityScore * 100)}%</span></div>
-      <h2>{resultAddress}</h2>
+      <div className="lite-address-heading"><h2>{resultAddress?.lines[0] || '—'}</h2>{resultAddress?.lines.slice(1).map((line, index) => <p key={`${index}-${line}`}>{line}</p>)}</div>
       <dl>
         <div><dt>{t.region}</dt><dd>{result.region || '—'}</dd></div><div><dt>{t.city}</dt><dd>{result.city || result.locality || '—'}</dd></div>
         <div><dt>{t.postcode}</dt><dd>{result.postcode || '—'}</dd></div><div><dt>{t.location}</dt><dd>{result.latitude.toFixed(6)}, {result.longitude.toFixed(6)}</dd></div>
       </dl>
-      <div className="lite-actions"><button onClick={async () => { await copyText(resultAddress); setCopied(true); }}>{copied ? t.copied : t.copy}</button></div>
+      <div className="lite-actions"><button onClick={async () => { await copyText(resultAddress?.copyText || ''); setCopied(true); }}>{copied ? t.copied : t.copy}</button></div>
       <footer><span>{t.source}: {result.source.name}</span>{result.source.license && <span>{result.source.license}</span>}<span>{t.updated}: {payload?.generatedAt ? new Date(payload.generatedAt).toLocaleDateString(locale) : '—'}</span></footer>
     </section> : payload && !candidates.length ? <section className="lite-card lite-empty">{t.noData}</section> : null}
   </main>;
