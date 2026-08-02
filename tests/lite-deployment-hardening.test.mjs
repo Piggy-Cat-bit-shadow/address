@@ -75,7 +75,7 @@ describe('Address Lite generic remote deployment', () => {
     expect(workflow).toMatch(/^  schedule:/mu);
     expect(workflow).toContain("if: ${{ github.event_name == 'schedule' || inputs.deploy == true }}");
     expect(workflow).toContain("default: false");
-    expect(workflow).toContain("cron: '17 3 * * 0'");
+    expect(workflow).toContain("cron: '17 3 1 * *'");
     expect(workflow).toContain('environment: address-lite-production');
   });
 
