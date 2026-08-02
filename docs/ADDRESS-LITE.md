@@ -236,7 +236,7 @@ Manual build:
 3. Leave `deploy=false` for a build-only test.
 4. Set `deploy=true` after the deployment secrets are configured.
 
-A weekly rebuild is configured for Sunday 03:17 UTC. Scheduled runs also attempt deployment when all required deployment secrets exist. Missing deployment secrets do not fail the build; the deployment step is skipped.
+An automatic rebuild is configured for 03:17 UTC on the first day of January, March, May, July, September, and November. Scheduled runs also attempt deployment when all required deployment secrets exist. Missing deployment secrets do not fail the build; the deployment step is skipped.
 
 ## Generic remote static deployment
 
