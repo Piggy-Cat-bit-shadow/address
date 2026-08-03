@@ -68,7 +68,7 @@ for (const path of staged) {
   }
 }
 
-const historyPatch = execFileSync('git', ['log', '--all', '--format=', '--no-ext-diff', '-p'], {
+const historyPatch = execFileSync('git', ['log', '--all', '--format=', '--no-ext-diff', '--no-textconv', '-p'], {
   encoding: 'utf8', maxBuffer: 128 * 1024 * 1024
 });
 scan('git-history', historyPatch, 'history');
