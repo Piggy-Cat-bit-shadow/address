@@ -1,18 +1,19 @@
 import { serve, type HttpBindings } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { chmod } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { Hono } from 'hono';
 import app from './index';
-import { openDatabase } from '../database/sqlite.mjs';
-import { initializeSqliteDatabase } from '../database/sqlite.mjs';
+import { openRuntimeDatabases } from '../database/runtime';
 import { masterKeyFrom } from '../control/security';
-import { ControlStore, credentialsFromEnvironment } from '../control/store';
+import { ControlStore, createServiceCredentialResolver, credentialsFromEnvironment, parseYoudaoSecret } from '../control/store';
 import {
   apiAuthorization, authorizeWebRequest, createAccessApi, createAdminApi,
   createAmapProxyRateLimiter, proxyAmapServiceRequest, requestClientAddress
 } from '../control/admin-api';
 import { ChinaDataService } from '../china/service';
+import { countries } from '../../src/domain/countries';
+import { DatabaseRandomAddressService } from './services/database-random-address';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -20,26 +21,64 @@ const integer = (value: string | undefined, fallback: number): number => {
   return parsed;
 };
 
-const databasePath = resolve(process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite');
-const database = openDatabase(databasePath);
-const controlDatabasePath = resolve(process.env.CONTROL_DATABASE_PATH || 'data/control.sqlite');
-const controlDatabase = openDatabase(controlDatabasePath, { migrate: false });
-await initializeSqliteDatabase(controlDatabase, new URL('../control/schema.sql', import.meta.url));
-await chmod(controlDatabasePath, 0o600);
-const control = new ControlStore(controlDatabase, masterKeyFrom(process.env.CONFIG_MASTER_KEY));
+const runtimeDatabases = await openRuntimeDatabases();
+const dataRoot = resolve(process.env.ADDRESS_DATA_ROOT || 'data');
+const database = runtimeDatabases.address;
+const controlDatabase = runtimeDatabases.control;
+const masterKey = masterKeyFrom(process.env.CONFIG_MASTER_KEY);
+const control = new ControlStore(controlDatabase, masterKey);
 await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD, process.env);
 await Promise.all(credentialsFromEnvironment(process.env).map((credential) => control.ensureCredential(credential)));
-const china = new ChinaDataService(database, control, dirname(databasePath));
-await china.initializeTargets();
+const china = new ChinaDataService(database, control, dataRoot, {
+  postgresUrl: runtimeDatabases.postgresUrl,
+  masterKey
+});
 const port = integer(process.env.API_PORT, 8787);
 const hostname = process.env.API_HOST || '0.0.0.0';
 const trustProxy = process.env.TRUST_PROXY === 'true';
 const staticRoot = resolve(process.env.STATIC_ROOT || 'dist');
 const syncControlUrl = process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791';
 const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
-const adminApi = createAdminApi({ control, china, addressDb: database, addressDatabasePath: databasePath, controlDatabasePath, trustProxy });
-const accessApi = createAccessApi(control, { trustProxy });
+const triggerCountrySync = async (countryCode: string): Promise<Record<string, unknown>> => {
+  const token = process.env.SYNC_ADMIN_TOKEN?.trim();
+  if (!token) throw new Error('SYNC_CONTROL_UNAVAILABLE');
+  const response = await fetch(new URL('/api/v1/sync/jobs', syncControlUrl), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'manual', shards: [countryCode] }),
+    signal: AbortSignal.timeout(15_000)
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (response.status === 409) return { ...body, running: true };
+  if (!response.ok) throw new Error('SYNC_CONTROL_UNAVAILABLE');
+  return body;
+};
+const adminApi = createAdminApi({
+  control, china, addressDb: database, trustProxy, triggerCountrySync,
+  warmReadModels: true
+});
+const chinaTargetCount = Number(await database.prepare('SELECT COUNT(*) AS total FROM cn_sync_targets').first('total') || 0);
+let chinaInitialization: Worker | undefined;
+if (chinaTargetCount === 0) {
+  await china.initializeTargets();
+} else {
+  chinaInitialization = new Worker(new URL('../china/initialization-worker.ts', import.meta.url), {
+    execArgv: ['--import', 'tsx'],
+    workerData: {
+      postgresUrl: runtimeDatabases.postgresUrl,
+      masterKey,
+      dataRoot
+    }
+  });
+  chinaInitialization.once('message', (message: { type?: string }) => {
+    if (message?.type === 'done') void china.wake(1_000).catch(() => undefined);
+  });
+  chinaInitialization.once('error', (error) => console.error(`China initialization worker failed: ${error instanceof Error ? error.message : String(error)}`));
+}
+const accessApi = createAccessApi(control, { trustProxy, addressDb: database });
 const amapProxyRateLimit = createAmapProxyRateLimiter();
+const randomAddressPool = new DatabaseRandomAddressService(database, countries.map(({ code }) => code));
+await randomAddressPool.start();
 const securityHeaders = (response: Response): Response => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
@@ -55,16 +94,17 @@ staticApp.get('*', serveStatic({ root: staticRoot, path: 'index.html' }));
 const environment = {
   ADDRESS_DB: database,
   LOCATION_DB: database,
+  RANDOM_ADDRESS_SERVICE: randomAddressPool,
   ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN || '*',
   AMAP_API_KEY: process.env.AMAP_API_KEY,
   GEOAPIFY_API_KEY: process.env.GEOAPIFY_API_KEY,
   GOOGLE_GEOCODING_API_KEY: process.env.GOOGLE_GEOCODING_API_KEY,
   GOOGLE_TRANSLATION_ENABLED: process.env.GOOGLE_TRANSLATION_ENABLED,
+  HOT_POOL_COUNTRIES: process.env.HOT_POOL_COUNTRIES,
+  HOT_POOL_MIN_PER_SLOT: process.env.HOT_POOL_MIN_PER_SLOT,
   IP_GEOLOCATION_API_URL: process.env.IP_GEOLOCATION_API_URL,
   IP_GEOLOCATION_FALLBACK_API_URL: process.env.IP_GEOLOCATION_FALLBACK_API_URL,
-  LIVE_API_MODES: process.env.LIVE_API_MODES,
   ONEMAP_ACCESS_TOKEN: process.env.ONEMAP_ACCESS_TOKEN,
-  OS_DATA_HUB_API_KEY: process.env.OS_DATA_HUB_API_KEY,
   OVERPASS_API_URL: process.env.OVERPASS_API_URL,
   PHOTON_API_URL: process.env.PHOTON_API_URL,
   TRUST_PROXY: process.env.TRUST_PROXY,
@@ -72,11 +112,33 @@ const environment = {
   YOUDAO_APP_SECRET: process.env.YOUDAO_APP_SECRET
 };
 
+// Service credentials live in the control store (admin console) with the
+// environment as fallback; the 60-second resolver cache keeps request latency flat.
+const serviceCredential = createServiceCredentialResolver(control, process.env);
+const requestEnvironment = async () => {
+  const youdao = parseYoudaoSecret(await serviceCredential('youdao'));
+  return {
+    ...environment,
+    GEOAPIFY_API_KEY: await serviceCredential('geoapify'),
+    GOOGLE_GEOCODING_API_KEY: await serviceCredential('google-geocoding'),
+    GOOGLE_TRANSLATION_ENABLED: Boolean(await control.setting('google_translation_enabled', true)),
+    YOUDAO_APP_KEY: youdao?.appKey,
+    YOUDAO_APP_SECRET: youdao?.appSecret,
+    SERVICE_CREDENTIALS: serviceCredential
+  };
+};
+
 await Promise.all([
+  ...countries.map(({ code }) => Promise.resolve(app.fetch(new Request(
+    `http://127.0.0.1/api/v1/generate?country=${code}&residential=false&strategy=instant&seed=startup-warmup-${code}&requestId=startup-warmup-${code}`
+  ), environment))),
+  Promise.resolve(app.fetch(new Request('http://127.0.0.1/api/v1/countries'), environment)),
   Promise.resolve(app.fetch(new Request(
-    'http://127.0.0.1/api/v1/generate?country=US&residential=true&strategy=instant&seed=startup-warmup&requestId=startup-warmup'
+    'http://127.0.0.1/api/v1/locations/search?country=US&field=region&residential=true&limit=200'
   ), environment)),
-  Promise.resolve(app.fetch(new Request('http://127.0.0.1/api/v1/countries'), environment))
+  Promise.resolve(app.fetch(new Request(
+    'http://127.0.0.1/api/v1/locations/search?country=CN&field=region&residential=true&limit=200'
+  ), environment))
 ]).catch(() => undefined);
 
 const server = serve({
@@ -96,7 +158,8 @@ const server = serve({
       }
       return securityHeaders(await proxyAmapServiceRequest(control, request, fetch, process.env.ALLOWED_ORIGIN));
     }
-    if (url.pathname.startsWith('/web-api/v1/auth/') || url.pathname === '/web-api/v1/config/maps') {
+    if (url.pathname.startsWith('/web-api/v1/auth/') || url.pathname.startsWith('/web-api/v1/config/')
+      || url.pathname === '/web-api/v1/public-monitor') {
       return securityHeaders(await accessApi.fetch(request, requestBindings));
     }
     if (url.pathname === '/sync-control' || url.pathname.startsWith('/sync-control/')) {
@@ -108,11 +171,7 @@ const server = serve({
       if (!await authorizeWebRequest(control, request)) return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401 }));
       const target = new URL(request.url);
       target.pathname = target.pathname.replace(/^\/web-api\/v1/u, '/api/v1');
-      const useLiveProvider = target.pathname === '/api/v1/generate' && target.searchParams.get('live') === 'true';
-      const amap = useLiveProvider ? await control.acquireCredential('amap') : null;
-      const response = await app.fetch(new Request(target, request), { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node });
-      if (amap) await control.reportCredential(amap.id, response.ok ? 'success' : 'network');
-      return securityHeaders(response);
+      return securityHeaders(await app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node }));
     }
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname !== '/api/v1/health') {
@@ -125,21 +184,18 @@ const server = serve({
           }));
         }
       }
-      const useLiveProvider = url.pathname === '/api/v1/generate' && url.searchParams.get('live') === 'true';
-      const amap = useLiveProvider ? await control.acquireCredential('amap') : null;
-      const response = await app.fetch(request, { ...environment, ...(amap ? { AMAP_API_KEY: amap.secret } : {}), ...node });
-      if (amap) await control.reportCredential(amap.id, response.ok ? 'success' : 'network');
-      return securityHeaders(response);
+      return securityHeaders(await app.fetch(request, { ...await requestEnvironment(), ...node }));
     }
-    const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access')
-      || url.pathname.startsWith('/_astro/') || /\.(?:css|js|svg|png|jpg|jpeg|webp|ico|woff2?)$/iu.test(url.pathname);
+    const localizedPublicPage = /^\/(?:en|zh-CN|zh-TW|ja|ko|de|fr|es|pt)\/(?:admin|access)(?:\/|$)/u.test(url.pathname);
+    const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access') || localizedPublicPage
+      || url.pathname.startsWith('/_astro/') || /\.(?:css|js|svg|png|jpg|jpeg|webp|ico|woff2?|geojson)$/iu.test(url.pathname);
     if (!publicStatic) {
-      const staticRequest = url.pathname === '/'
-        ? new Request(new URL(`/en/${url.search}`, request.url), request)
-        : request;
+      const requestedLocale = url.pathname.match(/^\/(en|zh-CN|zh-TW|ja|ko|de|fr|es|pt)(?:\/|$)/u)?.[1];
+      const accessUrl = new URL(requestedLocale ? `/${requestedLocale}/access/` : '/access/', request.url);
+      accessUrl.searchParams.set('next', `${url.pathname}${url.search}`);
       return securityHeaders(await authorizeWebRequest(control, request)
-        ? await staticApp.fetch(staticRequest, node)
-        : Response.redirect(new URL('/access/', request.url), 302));
+        ? await staticApp.fetch(request, node)
+        : Response.redirect(accessUrl, 302));
     }
     const response = await staticApp.fetch(request, node);
     if (url.pathname.startsWith('/_astro/')) response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
@@ -155,13 +211,17 @@ let stopping = false;
 const shutdown = (): void => {
   if (stopping) return;
   stopping = true;
+  if (chinaInitialization) void chinaInitialization.terminate().catch(() => undefined);
+  china.close();
   server.close((error) => {
-    database.close();
-    controlDatabase.close();
-    if (error) {
-      console.error(error);
-      process.exitCode = 1;
-    }
+    void randomAddressPool.close().finally(() => {
+      void runtimeDatabases.close().finally(() => {
+        if (error) {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      });
+    });
   });
 };
 

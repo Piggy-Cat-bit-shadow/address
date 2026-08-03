@@ -2,8 +2,10 @@ import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createSyncApi } from './api.mjs';
+import { createPostgresPool, initializePostgres, PostgresDatabase } from '../database/postgres.mjs';
 import { SyncCoordinator } from './coordinator.mjs';
-import { runAddressSync } from './run-address-sync.mjs';
+import { createSyncQueue } from './queue.mjs';
+import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync.mjs';
 import { startDailyScheduler, startInitialScheduler, triggerStartupSync } from './scheduler.mjs';
 
 const integer = (value, fallback, minimum, maximum) => {
@@ -13,6 +15,7 @@ const integer = (value, fallback, minimum, maximum) => {
   }
   return number;
 };
+const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
 
 const stripPrefix = (request) => {
   const url = new URL(request.url);
@@ -24,18 +27,36 @@ const stripPrefix = (request) => {
 export const createSyncRuntime = async ({
   environment = process.env,
   runSync = runAddressSync,
+  database: providedDatabase,
   stateDir = resolve(environment.SYNC_STATE_DIR || '.data-cache/sync-control'),
   utcHour = integer(environment.SYNC_UTC_HOUR, 3, 0, 23),
   now = () => new Date()
 } = {}) => {
+  let testDatabase;
+  if (!providedDatabase && environment.NODE_ENV === 'test' && environment.ADDRESS_TEST_DATABASE === 'memory') {
+    const { initializeTestDatabase, openTestDatabase } = await import('../../tests/helpers/postgres-test-database.mjs');
+    testDatabase = openTestDatabase(':memory:');
+    await initializeTestDatabase(testDatabase, new URL('../control/schema.sql', import.meta.url));
+    providedDatabase = testDatabase;
+  }
+  const postgresPool = providedDatabase ? undefined : createPostgresPool({
+    environment,
+    statement_timeout: syncPostgresStatementTimeout(environment),
+    application_name: 'address-sync'
+  });
+  if (postgresPool) await initializePostgres(postgresPool);
+  const database = providedDatabase || new PostgresDatabase(postgresPool);
+  const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   const initialStateFile = resolve(stateDir, 'initial-schedule.json');
   const coordinator = new SyncCoordinator({
     stateDir,
     now,
-    runSync: ({ id, trigger, shards }) => runSync({
+    jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 3 * 60 * 60_000, 60_000, 24 * 60 * 60_000),
+    runSync: ({ id, trigger, shards, signal }) => runSync({
       releaseId: id,
-      databasePath: resolve(environment.ADDRESS_DATABASE_PATH || 'data/address.sqlite'),
+      signal,
+      database,
       environment: {
         ...environment,
         ADDRESS_SYNC_JOB_ID: id,
@@ -45,19 +66,33 @@ export const createSyncRuntime = async ({
     })
   });
   await coordinator.initialize();
+  const queue = createSyncQueue({
+    environment,
+    coordinator,
+    stateDir,
+    now,
+    addressDatabase: queueDatabase,
+    controlDatabase: queueDatabase
+  });
   const handler = createSyncApi({
     coordinator,
+    queue,
     token: environment.SYNC_ADMIN_TOKEN,
     allowedOrigin: environment.SYNC_ADMIN_ORIGIN || ''
   });
   const api = (request) => handler(stripPrefix(request));
   let stopScheduler;
   let stopInitialScheduler;
+  let stopQueue;
   return {
     api,
+    database,
     coordinator,
+    queue,
     startScheduler: ({ startup = true } = {}) => {
+      if (!enabled(environment.SYNC_SCHEDULER_ENABLED)) return () => {};
       if (stopScheduler) return stopScheduler;
+      stopQueue = queue.start();
       stopScheduler = startDailyScheduler({ coordinator, stateFile: scheduleStateFile, utcHour, now });
       if (startup) {
         stopInitialScheduler = startInitialScheduler({
@@ -81,6 +116,8 @@ export const createSyncRuntime = async ({
         stopInitialScheduler = undefined;
         stopScheduler?.();
         stopScheduler = undefined;
+        stopQueue?.();
+        stopQueue = undefined;
       };
     },
     close: async () => {
@@ -88,7 +125,11 @@ export const createSyncRuntime = async ({
       stopScheduler = undefined;
       stopInitialScheduler?.();
       stopInitialScheduler = undefined;
+      stopQueue = undefined;
+      await queue.stop();
       await coordinator.waitForIdle();
+      testDatabase?.close();
+      await postgresPool?.end();
     }
   };
 };
@@ -132,11 +173,9 @@ if (invokedDirectly) {
   server.listen(port, host, () => console.log(`Address sync control listening on http://${host}:${port}`));
   let stopBackfill = () => {};
   if (/^(1|true|yes)$/iu.test(String(process.env.TRANSLATION_BACKFILL_ENABLED || ''))) {
-    const { openDatabase } = await import('../database/sqlite.mjs');
     const { startTranslationBackfill } = await import('./translation-backfill.mjs');
-    const backfillDb = openDatabase(resolve(process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite'));
     stopBackfill = startTranslationBackfill({
-      database: backfillDb,
+      database: runtime.database,
       isBusy: () => Boolean(runtime.coordinator.currentJob)
     });
     console.log('Translation backfill worker enabled');

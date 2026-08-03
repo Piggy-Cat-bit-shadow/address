@@ -1,12 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from '../server/api/repositories/address-pool-v2';
+import {
+  pickAddressPoolV2Address,
+  pickNearestAddressPoolV2Address,
+  repairHongKongNativeVariants
+} from '../server/api/repositories/address-pool-v2';
 
-describe('unified SQLite address schema', () => {
-  it('defines the runtime view, evidence model, RTree and synchronization state together', () => {
+describe('unified PostgreSQL address schema', () => {
+  it('defines the runtime view, evidence model, coordinate index and synchronization state together', () => {
     const schema = readFileSync('server/database/schema.sql', 'utf8');
-    expect(schema).toContain('CREATE VIEW IF NOT EXISTS address_pool_runtime');
-    expect(schema).toContain('CREATE VIRTUAL TABLE IF NOT EXISTS address_coordinate_index USING rtree');
+    expect(schema).toContain('DROP VIEW IF EXISTS address_pool_runtime');
+    expect(schema).toContain('CREATE VIEW address_pool_runtime');
+    expect(schema).toContain('WHERE address_pool.active = 1');
+    expect(schema).toContain('CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates');
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS address_pool_evidence');
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS sync_country_state');
     expect(schema).not.toContain('address_pool_meta');
@@ -14,18 +20,29 @@ describe('unified SQLite address schema', () => {
 });
 
 describe('ADDRESS_DB v2 repository', () => {
+  it('repairs legacy Hong Kong native variants from simplified Chinese instead of exposing English', () => {
+    const variants = {
+      native: { houseNumber: '33', street: 'OI SHUN ROAD', locality: 'EASTERN DISTRICT', postcode: '' },
+      en: { houseNumber: '33', street: 'OI SHUN ROAD', locality: 'EASTERN DISTRICT', postcode: '' },
+      'zh-CN': { houseNumber: '33', street: '爱信道', locality: '东区', postcode: '' }
+    };
+    const repaired = repairHongKongNativeVariants('HK', variants);
+    expect(repaired.native).toMatchObject({ street: '愛信道', locality: '東區' });
+    expect(repaired.en).toBe(variants.en);
+  });
+
   const row = {
     id: 'fixture-address', country_code: 'JP', admin1: '東京都', admin1_code: '13',
     locality: '杉並区', postal_locality: '杉並区', district: '永福', postcode: '168-0064',
-    street: '永福', house_number: '4-27-7', building_name: '', latitude: 35.676, longitude: 139.642,
+    street: '永福四丁目', house_number: '4-27-7', building_name: '', latitude: 35.676, longitude: 139.642,
     native_language: 'ja', property_type: 'residential', generation: 'fixture-2026-07', quality_score: 0.95,
     first_seen_at: '2026-07-16T00:00:00Z', expires_at: '2027-07-15T00:00:00Z',
     component_variants_json: JSON.stringify({
-      native: { houseNumber: '4-27-7', street: '永福', locality: '杉並区', postcode: '168-0064' },
+      native: { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', postcode: '168-0064' },
       en: { houseNumber: '4-27-7', street: 'Eifuku', locality: 'Suginami', postcode: '168-0064' },
       'zh-CN': { houseNumber: '4-27-7', street: '永福', locality: '杉并区', postcode: '168-0064' }
     }),
-    address_variants_json: JSON.stringify({ native: '東京都杉並区永福4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福4-27-7' }),
+    address_variants_json: JSON.stringify({ native: '東京都杉並区永福四丁目4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福四丁目4-27-7' }),
     source_id: 'fixture', source_name: 'Fixture Source', source_url: 'https://example.test/source',
     source_record_id: 'jp-1', record_url: 'https://example.test/source/jp-1', observed_at: '2026-07-15T00:00:00Z',
     evidence_type: 'address_existence', residential_evidence: 1,
@@ -60,7 +77,7 @@ describe('ADDRESS_DB v2 repository', () => {
       database, 'JP', false, { region: '13', city: '杉並区', postcode: '168-0064' }, target, 'seed', new Date('2026-07-20T00:00:00Z')
     );
     expect(address).toEqual(expect.objectContaining({
-      id: 'pool-v2-fixture-address', nativeLanguage: 'ja', nativeAddress: '東京都杉並区永福4-27-7',
+      id: 'pool-v2-fixture-address', nativeLanguage: 'ja', nativeAddress: '東京都杉並区永福四丁目4-27-7',
       formattedAddress: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', sourceVersion: 'fixture-dataset:2026-07-15'
     }));
     expect(address?.componentVariants['zh-CN'].locality).toBe('杉并区');
@@ -136,10 +153,10 @@ describe('ADDRESS_DB v2 repository', () => {
   });
 
   it('only treats a missing v2 runtime view as a compatibility miss', async () => {
-    const missing = { prepare() { throw new Error('no such table: address_pool_runtime'); } };
-    const broken = { prepare() { throw new Error('SQLITE_BUSY: database is locked'); } };
+    const missing = { prepare() { throw new Error('relation "address_pool_runtime" does not exist'); } };
+    const broken = { prepare() { throw new Error('connection terminated unexpectedly'); } };
     await expect(pickAddressPoolV2Address(missing, 'US', false, {}, undefined, 'seed')).resolves.toBeUndefined();
-    await expect(pickAddressPoolV2Address(broken, 'US', false, {}, undefined, 'seed')).rejects.toThrow('database is locked');
+    await expect(pickAddressPoolV2Address(broken, 'US', false, {}, undefined, 'seed')).rejects.toThrow('connection terminated');
   });
 
   it('skips a v2 US row whose state field contains Philadelphia', async () => {
@@ -181,7 +198,7 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[1]).toContain('WHERE id IN (?,?)');
   });
 
-  it('blocks missing ZIP rows and reclassifies legacy numeric building names as units', async () => {
+  it('blocks missing ZIP rows and drops legacy numeric building names', async () => {
     const components = {
       houseNumber: '2704', street: 'College Avenue', locality: 'Berkeley', postalLocality: 'Berkeley',
       admin1: 'California', admin1Code: 'CA', postcode: '94704', buildingName: '3'
@@ -189,7 +206,8 @@ describe('ADDRESS_DB v2 repository', () => {
     const valid = {
       ...row, id: 'legacy-unit', country_code: 'US', admin1: 'California', admin1_code: 'CA',
       locality: 'Berkeley', postal_locality: 'Berkeley', district: '', postcode: '94704',
-      street: 'College Avenue', house_number: '2704', building_name: '3', native_language: 'en',
+      street: 'College Avenue', house_number: '2704', building_name: '3', latitude: 37.86, longitude: -122.25,
+      native_language: 'en',
       component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
       address_variants_json: JSON.stringify({ native: '3, 2704 College Avenue, Berkeley, CA 94704', en: '3, 2704 College Avenue, Berkeley, CA 94704', 'zh-CN': '3, 2704 College Avenue' })
     };
@@ -209,8 +227,8 @@ describe('ADDRESS_DB v2 repository', () => {
       }
     };
     const address = await pickAddressPoolV2Address(database, 'US', false, {}, undefined, 'unit-seed');
-    expect(address).toMatchObject({ id: 'pool-v2-legacy-unit', unitStatus: 'verified', unitProvenance: 'source_tagged' });
-    expect(address?.components).toMatchObject({ unit: '3' });
+    expect(address).toMatchObject({ id: 'pool-v2-legacy-unit', unitStatus: 'not_present', unitProvenance: 'none' });
+    expect(address?.components).not.toHaveProperty('unit');
     expect(address?.components).not.toHaveProperty('buildingName');
     expect(address?.nativeAddress).not.toMatch(/^3,/u);
   });

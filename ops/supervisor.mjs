@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const app = '/root/address/app';
+const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runner = resolve(app, 'node_modules/tsx/dist/cli.mjs');
 const definitions = [
   ['api', resolve(app, 'server/api/server.ts')],
@@ -66,3 +67,24 @@ await retireLegacyInitialQueue();
 definitions.forEach(start);
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
+
+const apiPort = Number.parseInt(process.env.API_PORT || '8787', 10);
+let healthFailures = 0;
+const watchdog = setInterval(async () => {
+  if (stopping || !children.has('api')) { healthFailures = 0; return; }
+  try {
+    const response = await fetch(`http://127.0.0.1:${apiPort}/healthz`, { signal: AbortSignal.timeout(5_000) });
+    healthFailures = response.ok ? 0 : healthFailures + 1;
+  } catch {
+    healthFailures += 1;
+  }
+  if (healthFailures >= 4) {
+    healthFailures = 0;
+    const child = children.get('api');
+    if (child) {
+      console.error('api unresponsive for 4 consecutive health checks; force restarting');
+      signalTree(child, 'SIGKILL');
+    }
+  }
+}, 30_000);
+watchdog.unref();

@@ -1,19 +1,27 @@
-import { stat } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
-import type { SqliteDatabase } from '../database/sqlite.mjs';
+import type { Database } from '../database/database.mjs';
 import type { ChinaDataService } from '../china/service';
 import { providerFetcher, ProviderRequestError } from '../china/providers';
 import { safeEqual } from './security';
-import type { BrowserMapCredentialInput, BrowserMapCredentialUpdate, ControlStore, CredentialInput, CredentialProviderName, MapDisplayConfig, ProviderName, ProviderQuotaObservation } from './store';
+import {
+  credentialProviderNames, parseYoudaoSecret,
+  type BrowserMapCredentialInput, type BrowserMapCredentialUpdate, type ControlStore, type CredentialInput,
+  type CredentialProviderName, type MapDisplayConfig, type ProviderName, type ProviderQuotaObservation, type ServiceProviderName
+} from './store';
+import { translateYoudaoBatch } from '../api/services/youdao-translator.ts';
 import { listAddressCoverage } from './coverage';
+import { listAddressData } from './address-data';
 import { nonResidentialRules } from '../../src/domain/non-residential-rules.mjs';
+import { isCountryCode } from '../../src/domain/countries.ts';
 import { customBlacklistKeywords, replaceCustomBlacklist } from '../lib/custom-blacklist.mjs';
 import {
-  deleteNodePolicy, getRuntimePolicy, listCountryPolicies, listNodePolicies,
-  updateCountryPolicy, updateRuntimePolicy, upsertNodePolicy
+  deleteNodePolicy, deleteNodeTarget, getRuntimePolicy, listCountryNodeTargets, listCountryPolicies, listNodePolicies,
+  updateCountryPolicy, updateRuntimePolicy, upsertNodePolicy, upsertNodeTarget
 } from '../sync/address-policy.mjs';
+import { evaluateCountryGoals } from '../sync/country-goals.mjs';
+import { queryLocationCatalog, type CatalogField } from '../api/repositories/location-catalog';
 
 const adminCookie = 'address_admin_session';
 const adminCsrfCookie = 'address_admin_csrf';
@@ -77,6 +85,45 @@ export const testOneMapCredential = async (token: string, fetcher: typeof fetch 
 
 const isMapProvider = (provider: CredentialProviderName): provider is ProviderName =>
   provider === 'amap' || provider === 'baidu' || provider === 'tencent';
+
+export const testServiceCredential = async (
+  provider: ServiceProviderName,
+  secret: string,
+  fetcher: typeof fetch = fetch
+): Promise<{ success: boolean; resultCount: number }> => {
+  if (provider === 'youdao') {
+    const credentials = parseYoudaoSecret(secret);
+    if (!credentials) throw new ProviderRequestError('invalid', 'INVALID_PROVIDER_CREDENTIAL');
+    let translations: string[] | undefined;
+    try {
+      translations = await translateYoudaoBatch(['地址'], 'auto', 'en', credentials, fetcher);
+    } catch {
+      throw new ProviderRequestError('network', 'NETWORK_ERROR');
+    }
+    if (!translations?.length) throw new ProviderRequestError('auth', 'INVALID_RESPONSE');
+    return { success: true, resultCount: translations.length };
+  }
+  const url = new URL(provider === 'geoapify'
+    ? 'https://api.geoapify.com/v1/geocode/reverse?lat=51.50735&lon=-0.12776&limit=1&format=json'
+    : 'https://maps.googleapis.com/maps/api/geocode/json?address=London');
+  url.searchParams.set(provider === 'geoapify' ? 'apiKey' : 'key', secret);
+  let response: Response;
+  try {
+    response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+  } catch {
+    throw new ProviderRequestError('network', 'NETWORK_ERROR');
+  }
+  if (response.status === 429) throw new ProviderRequestError('qps', 'RATE_LIMITED');
+  if (response.status === 401 || response.status === 403) throw new ProviderRequestError('auth', `HTTP_${response.status}`);
+  if (!response.ok) throw new ProviderRequestError('network', `HTTP_${response.status}`);
+  if (provider === 'google-geocoding') {
+    const body = await response.json().catch(() => ({})) as { status?: string };
+    if (body.status === 'REQUEST_DENIED') throw new ProviderRequestError('auth', 'REQUEST_DENIED');
+    if (body.status === 'OVER_QUERY_LIMIT' || body.status === 'OVER_DAILY_LIMIT') throw new ProviderRequestError('quota', body.status);
+    if (body.status !== 'OK' && body.status !== 'ZERO_RESULTS') throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+  }
+  return { success: true, resultCount: 1 };
+};
 
 const amapServicePrefix = '/_AMapService';
 const allowedAmapResponseTypes = new Set([
@@ -164,18 +211,47 @@ export const proxyAmapServiceRequest = async (
 };
 
 export const createAdminApi = ({
-  control, china, addressDb, addressDatabasePath, controlDatabasePath, trustProxy = false
+  control, china, addressDb, trustProxy = false, triggerCountrySync, warmReadModels = false
 }: {
-  control: ControlStore; china: ChinaDataService; addressDb: SqliteDatabase; addressDatabasePath: string; controlDatabasePath: string; trustProxy?: boolean;
+  control: ControlStore; china: ChinaDataService; addressDb: Database; trustProxy?: boolean;
+  triggerCountrySync?: (countryCode: string) => Promise<Record<string, unknown>>;
+  warmReadModels?: boolean;
 }) => {
   const app = new Hono<{ Bindings: RequestBindings }>();
+  const wakeChina = async (): Promise<void> => {
+    if (typeof china.wake === 'function') await china.wake(0);
+  };
+  interface SyncQueueUpstream { generatedAt?: string; job?: unknown; entries?: Array<Record<string, unknown>> }
+  let syncQueueUpstreamSnapshot: { expiresAt: number; promise: Promise<SyncQueueUpstream | null> } | undefined;
+  const loadSyncQueueUpstream = async (): Promise<SyncQueueUpstream | null> => {
+    if (syncQueueUpstreamSnapshot && syncQueueUpstreamSnapshot.expiresAt > Date.now()) {
+      return syncQueueUpstreamSnapshot.promise;
+    }
+    const syncToken = process.env.SYNC_ADMIN_TOKEN?.trim();
+    if (!syncToken) return null;
+    const promise = (async () => {
+      try {
+        const response = await fetch(new URL('/api/v1/sync/queue', process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791'), {
+          headers: { Authorization: `Bearer ${syncToken}` }, signal: AbortSignal.timeout(2_000)
+        });
+        return response.ok ? ((await response.json()) as { data?: SyncQueueUpstream }).data || null : null;
+      } catch {
+        return null;
+      }
+    })();
+    syncQueueUpstreamSnapshot = { expiresAt: Number.POSITIVE_INFINITY, promise };
+    void promise.then(() => {
+      if (syncQueueUpstreamSnapshot?.promise === promise) syncQueueUpstreamSnapshot.expiresAt = Date.now() + 2_000;
+    });
+    return promise;
+  };
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
   const coverageMaxAgeMs = 5 * 60_000;
   let coverageRefresh: Promise<void> | undefined;
   const startCoverageRefresh = (): Promise<void> => {
     coverageRefresh ||= new Promise<void>((resolveRefresh, rejectRefresh) => {
       const worker = new Worker(new URL('./coverage-worker.ts', import.meta.url), {
-        execArgv: ['--import', 'tsx'], workerData: { databasePath: addressDatabasePath }
+        execArgv: ['--import', 'tsx'], workerData: { postgresUrl: process.env.POSTGRES_URL || process.env.DATABASE_URL }
       });
       let settled = false;
       const settle = (error?: Error): void => {
@@ -196,7 +272,7 @@ export const createAdminApi = ({
     const snapshot = await addressDb.prepare(`SELECT COUNT(*) AS total,MAX(updated_at) AS updated_at
       FROM admin_coverage_stats`).first<{ total: number; updated_at: string | null }>();
     if (!Number(snapshot?.total || 0)) {
-      await startCoverageRefresh();
+      void startCoverageRefresh().catch(() => undefined);
       return;
     }
     if (force) await startCoverageRefresh();
@@ -207,13 +283,112 @@ export const createAdminApi = ({
       }
     }
   };
+  type AddressDataValue = Awaited<ReturnType<typeof listAddressData>>;
+  let addressDataValue: AddressDataValue | undefined;
+  let syncQueueValue: Record<string, unknown> | undefined;
+  let addressDataSnapshot: { expiresAt: number; promise: Promise<AddressDataValue> } | undefined;
+  let syncQueueSnapshot: { expiresAt: number; promise: Promise<Record<string, unknown>> } | undefined;
+  const invalidateAdminReadModels = (): void => {
+    addressDataValue = undefined;
+    syncQueueValue = undefined;
+    addressDataSnapshot = undefined;
+    syncQueueSnapshot = undefined;
+    syncQueueUpstreamSnapshot = undefined;
+  };
+  const loadAddressDataSnapshot = (): ReturnType<typeof listAddressData> => {
+    if (addressDataSnapshot && addressDataSnapshot.expiresAt > Date.now()) return addressDataSnapshot.promise;
+    const stale = addressDataValue;
+    const promise = (async () => {
+      await ensureCoverage();
+      const [queue, chinaStatus] = await Promise.all([loadSyncQueueUpstream(), china.status()]);
+      const queueStates = new Map((queue?.entries || []).map((entry) => [String(entry.countryCode), String(entry.state)]));
+      return listAddressData(addressDb, chinaStatus, queueStates);
+    })();
+    addressDataSnapshot = { expiresAt: Number.POSITIVE_INFINITY, promise };
+    void promise.then((value) => {
+      addressDataValue = value;
+      if (addressDataSnapshot?.promise === promise) addressDataSnapshot.expiresAt = Date.now() + 10_000;
+    }, () => {
+      if (addressDataSnapshot?.promise === promise) addressDataSnapshot = undefined;
+    });
+    return stale === undefined ? promise : Promise.resolve(stale);
+  };
+  const loadSyncQueueSnapshot = (): Promise<Record<string, unknown>> => {
+    if (syncQueueSnapshot && syncQueueSnapshot.expiresAt > Date.now()) return syncQueueSnapshot.promise;
+    const stale = syncQueueValue;
+    const promise = (async () => {
+      const [upstream, chinaStatus, goals] = await Promise.all([
+        loadSyncQueueUpstream(),
+        china.status().catch((): Record<string, unknown> => ({})),
+        evaluateCountryGoals(addressDb).catch(() => new Map())
+      ]);
+      let chinaEntry: Record<string, unknown> | null = null;
+      const goal = goals.get('CN');
+      if (goal?.enabled) {
+        const syncState = String(chinaStatus.syncState || '');
+        const state = syncState === 'running' ? 'running'
+          : syncState === 'quota_wait' || syncState === 'cooldown_wait' ? 'waiting_quota'
+            : syncState === 'source_limited' ? 'source_limited'
+              : goal.complete ? 'done' : 'queued';
+        chinaEntry = {
+          countryCode: 'CN', state, deficit: goal.deficit, target: goal.target, current: goal.current,
+          unmetRules: goal.unmetRules, rules: goal.rules,
+          position: null,
+          nextAttemptAt: (chinaStatus.nextAttemptAt as string | null) ?? null,
+          reason: (chinaStatus.waitReason as string | null) || (state === 'queued' ? 'china_worker' : null),
+          engine: 'china-worker'
+        };
+      }
+      const genericEntries: Array<Record<string, unknown>> = (upstream?.entries || []).map((entry): Record<string, unknown> => {
+        const countryGoal = goals.get(String(entry.countryCode));
+        return countryGoal ? {
+          ...entry,
+          current: countryGoal.current,
+          target: countryGoal.target,
+          deficit: countryGoal.deficit,
+          unmetRules: countryGoal.unmetRules,
+          rules: countryGoal.rules
+        } : entry;
+      });
+      const entries: Array<Record<string, unknown>> = [...(chinaEntry ? [chinaEntry] : []), ...genericEntries]
+        .filter((entry) => !['done', 'source_limited'].includes(String(entry.state)))
+        .sort((left, right) => {
+          const countryPriority = Number(String(left.countryCode) !== 'CN') - Number(String(right.countryCode) !== 'CN');
+          if (countryPriority) return countryPriority;
+          const ranks: Record<string, number> = { running: 0, queued: 1, waiting_quota: 2 };
+          return (ranks[String(left.state)] ?? 9) - (ranks[String(right.state)] ?? 9)
+            || Number(left.position ?? Number.MAX_SAFE_INTEGER) - Number(right.position ?? Number.MAX_SAFE_INTEGER)
+            || String(left.countryCode).localeCompare(String(right.countryCode));
+        });
+      let position = 0;
+      for (const entry of entries) if (entry.state === 'queued') entry.position = ++position;
+      return {
+        available: Boolean(upstream),
+        generatedAt: upstream?.generatedAt || new Date().toISOString(),
+        job: upstream?.job ?? null,
+        entries
+      };
+    })();
+    syncQueueSnapshot = { expiresAt: Number.POSITIVE_INFINITY, promise };
+    void promise.then((value) => {
+      syncQueueValue = value;
+      if (syncQueueSnapshot?.promise === promise) syncQueueSnapshot.expiresAt = Date.now() + 10_000;
+    }, () => {
+      if (syncQueueSnapshot?.promise === promise) syncQueueSnapshot = undefined;
+    });
+    return stale === undefined ? promise : Promise.resolve(stale);
+  };
+
+  if (warmReadModels) queueMicrotask(() => {
+    void Promise.all([loadAddressDataSnapshot(), loadSyncQueueSnapshot()]).catch(() => undefined);
+  });
 
   app.onError((error, context) => {
     context.header('Cache-Control', 'no-store');
     const code = error.message || 'INTERNAL_ERROR';
     const clientError = /^(?:INVALID_|PASSWORD_LENGTH|PASSWORD_CONFIRM_MISMATCH|FRONTEND_PASSWORD_REQUIRED|TOKEN_NAME_REQUIRED|TOKEN_ALREADY_EXISTS|API_TOKEN_|AREACITY_SOURCE_|AREACITY_DATA_|SOURCE_AND_VERSION_REQUIRED|POLICY_)/u.test(code);
     const status = ['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY', 'BROWSER_MAP_CREDENTIAL_EXISTS', 'TOKEN_ALREADY_EXISTS'].includes(code) ? 409
-      : ['CREDENTIAL_NOT_FOUND', 'BROWSER_MAP_CREDENTIAL_NOT_FOUND', 'API_TOKEN_NOT_FOUND'].includes(code) ? 404
+      : ['CREDENTIAL_NOT_FOUND', 'BROWSER_MAP_CREDENTIAL_NOT_FOUND', 'API_TOKEN_NOT_FOUND', 'POLICY_NODE_NOT_FOUND'].includes(code) ? 404
         : ['API_TOKEN_SECRET_UNAVAILABLE'].includes(code) ? 409 : clientError ? 400 : 500;
     return context.json({ error: status < 500 ? code : 'INTERNAL_ERROR' }, status);
   });
@@ -262,14 +437,17 @@ export const createAdminApi = ({
   });
 
   app.get('/admin/api/dashboard', async (context) => {
-    const [addressCount, chinaStatus, credentials, runs] = await Promise.all([
+    const [addressCount, chinaStatus, credentials, runs, addressBytes, controlBytes] = await Promise.all([
       addressDb.prepare('SELECT COUNT(*) AS total FROM address_pool WHERE active=1').first<number>('total'),
-      china.status(), control.listCredentials(), control.runs(10)
+      china.status(), control.listCredentials(), control.runs(10),
+      addressDb.prepare(`SELECT COALESCE(SUM(pg_total_relation_size((schemaname||'.'||tablename)::regclass)),0) AS total
+        FROM pg_tables WHERE schemaname='address'`).first<number>('total'),
+      addressDb.prepare(`SELECT COALESCE(SUM(pg_total_relation_size((schemaname||'.'||tablename)::regclass)),0) AS total
+        FROM pg_tables WHERE schemaname='control'`).first<number>('total')
     ]);
-    const size = async (path: string) => { try { return (await stat(path)).size; } catch { return 0; } };
     return context.json({ data: {
       addressCount: Number(addressCount || 0), china: chinaStatus, credentials, runs,
-      storage: { addressBytes: await size(addressDatabasePath), controlBytes: await size(controlDatabasePath) }
+      storage: { addressBytes: Number(addressBytes || 0), controlBytes: Number(controlBytes || 0) }
     } });
   });
   app.get('/admin/api/dashboard/coverage', async (context) => {
@@ -277,6 +455,40 @@ export const createAdminApi = ({
     if (parent.length > 512) return context.json({ error: 'INVALID_COVERAGE_PARENT' }, 400);
     await ensureCoverage(context.req.query('refresh') === 'true');
     return context.json({ data: await listAddressCoverage(addressDb, parent) });
+  });
+  app.get('/admin/api/dashboard/overview', async (context) => {
+    const parent = String(context.req.query('parent') || '');
+    if (parent.length > 512) return context.json({ error: 'INVALID_COVERAGE_PARENT' }, 400);
+    await ensureCoverage(context.req.query('refresh') === 'true');
+    const [nodes, todayUpdates, lastUpdatedAt, apiRequestsToday, databaseBytes] = await Promise.all([
+      listAddressCoverage(addressDb, parent),
+      addressDb.prepare(`SELECT COALESCE(SUM(active_count),0) AS total FROM address_datasets
+        WHERE status='active' AND CAST(SUBSTR(imported_at,1,10) AS date)=CURRENT_DATE`).first<number>('total'),
+      addressDb.prepare(`SELECT MAX(last_success_at) AS updated_at FROM sync_country_state
+        WHERE status='ready'`).first<string>('updated_at'),
+      control.providerRequestsToday(),
+      addressDb.prepare('SELECT pg_database_size(current_database()) AS total').first<number>('total')
+    ]);
+    const countryNodes = parent ? await listAddressCoverage(addressDb) : nodes.filter((node) => node.level === 0);
+    const lowestLevels = countryNodes.map((node) => node.coverageLevels?.at(-1)).filter(Boolean);
+    const coveredLowest = lowestLevels.reduce((total, level) => total + Number(level?.covered || 0), 0);
+    const totalLowest = lowestLevels.reduce((total, level) => total + Number(level?.total || 0), 0);
+    return context.json({ data: {
+      nodes,
+      countries: countryNodes,
+      metrics: {
+        countryCount: countryNodes.length,
+        residentialTotal: countryNodes.reduce((total, node) => total + node.residentialCount, 0),
+        coveredLowest,
+        totalLowest,
+        coverageRate: totalLowest ? coveredLowest / totalLowest : 0,
+        todayUpdates: Number(todayUpdates || 0),
+        apiRequestsToday,
+        databaseBytes: Number(databaseBytes || 0),
+        lastUpdatedAt: lastUpdatedAt || null,
+        serviceHealthy: true
+      }
+    } });
   });
 
   app.get('/admin/api/sync/policies', async (context) => {
@@ -294,8 +506,18 @@ export const createAdminApi = ({
   app.put('/admin/api/sync/policies/countries/:country', async (context) => {
     const countryCode = context.req.param('country').toUpperCase();
     const value = await updateCountryPolicy(addressDb, countryCode, await context.req.json<Record<string, unknown>>());
+    invalidateAdminReadModels();
     await control.audit('admin', 'sync_policy.country.update', countryCode, value);
-    return context.json({ data: value });
+    let sync: Record<string, unknown> = { accepted: false, reason: value.enabled ? 'unavailable' : 'disabled' };
+    if (value.enabled) {
+      if (countryCode === 'CN') {
+        await wakeChina();
+        sync = { accepted: true };
+      } else if (triggerCountrySync) {
+        sync = await triggerCountrySync(countryCode).catch(() => ({ accepted: false, reason: 'unavailable' }));
+      }
+    }
+    return context.json({ data: { ...value, sync } });
   });
   app.get('/admin/api/sync/policies/nodes', async (context) => {
     const parent = String(context.req.query('parent') || '');
@@ -307,6 +529,7 @@ export const createAdminApi = ({
     const input = await context.req.json<{ key?: string; targetCount?: number }>();
     if (!input.key || input.key.length > 512) return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
     const value = await upsertNodePolicy(addressDb, input.key, input.targetCount);
+    invalidateAdminReadModels();
     await control.audit('admin', 'sync_policy.node.update', input.key, { targetCount: input.targetCount });
     return context.json({ data: value });
   });
@@ -314,9 +537,40 @@ export const createAdminApi = ({
     const key = String(context.req.query('key') || '');
     if (!key || key.length > 512) return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
     await deleteNodePolicy(addressDb, key);
+    invalidateAdminReadModels();
     await control.audit('admin', 'sync_policy.node.delete', key);
     return context.json({ data: { success: true } });
   });
+  app.get('/admin/api/sync/policies/countries/:country/nodes', async (context) => {
+    await ensureCoverage();
+    return context.json({ data: await listCountryNodeTargets(addressDb, context.req.param('country').toUpperCase()) });
+  });
+  app.put('/admin/api/sync/policies/countries/:country/nodes/:nodeKey', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    const nodeKey = context.req.param('nodeKey');
+    if (!nodeKey || nodeKey.length > 512 || !nodeKey.startsWith(`${countryCode}:`)) {
+      return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
+    }
+    const input = await context.req.json<{ minCount?: number }>();
+    const value = await upsertNodeTarget(addressDb, nodeKey, input.minCount);
+    invalidateAdminReadModels();
+    await control.audit('admin', 'sync_policy.node_target.update', nodeKey, { minCount: value.minCount });
+    if (countryCode === 'CN') await wakeChina();
+    return context.json({ data: value });
+  });
+  app.delete('/admin/api/sync/policies/countries/:country/nodes/:nodeKey', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    const nodeKey = context.req.param('nodeKey');
+    if (!nodeKey || nodeKey.length > 512 || !nodeKey.startsWith(`${countryCode}:`)) {
+      return context.json({ error: 'INVALID_POLICY_NODE' }, 400);
+    }
+    await deleteNodeTarget(addressDb, nodeKey);
+    invalidateAdminReadModels();
+    await control.audit('admin', 'sync_policy.node_target.delete', nodeKey);
+    return context.json({ data: { success: true } });
+  });
+
+  app.get('/admin/api/sync/queue', async (context) => context.json({ data: await loadSyncQueueSnapshot() }));
 
   app.get('/admin/api/settings/access', async (context) => context.json({ data: await control.status() }));
   app.get('/admin/api/settings/blacklist', (context) => context.json({ data: {
@@ -337,8 +591,75 @@ export const createAdminApi = ({
       frontendPasswordEnabled?: boolean; frontendPassword?: string; frontendPasswordConfirmation?: string;
       apiAuthEnabled?: boolean; adminPassword?: string; adminPasswordConfirmation?: string;
     }>();
+    delete input.apiAuthEnabled;
     await control.updateAccessSettings(input, getCookie(context, adminCookie) || '');
     return context.json({ data: await control.status() });
+  });
+
+  app.get('/admin/api/settings/country-shortcuts', async (context) => {
+    return context.json({ data: await control.countryShortcutAdminSettings() });
+  });
+  app.get('/admin/api/settings/country-shortcuts/:country/options', async (context) => {
+    const country = context.req.param('country').toUpperCase();
+    const field = context.req.query('field') as CatalogField;
+    if (!isCountryCode(country)) return context.json({ error: 'INVALID_COUNTRY' }, 400);
+    if (!['region', 'city', 'postcode'].includes(field)) return context.json({ error: 'INVALID_FIELD' }, 400);
+    const query = (context.req.query('q') || '').trim().slice(0, 100);
+    const catalog = await queryLocationCatalog(addressDb, {
+      country,
+      field,
+      query,
+      residential: true,
+      cursor: context.req.query('cursor') || undefined,
+      limit: 100
+    });
+    return context.json({ data: catalog });
+  });
+  app.put('/admin/api/settings/country-shortcuts/:country', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    if (!isCountryCode(countryCode)) return context.json({ error: 'INVALID_COUNTRY' }, 400);
+    const input = await context.req.json<unknown>().catch(() => undefined);
+    try {
+      const value = await control.updateCountryShortcuts(countryCode, input);
+      await control.audit('admin', 'settings.country_shortcuts.update', countryCode, {
+        popularCities: value.popularCities.length,
+        adminShortcuts: value.adminShortcuts.length,
+        specialAreas: value.specialAreas.length
+      });
+      return context.json({ data: { ...value, customized: true } });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'INVALID_COUNTRY_SHORTCUTS';
+      if (code === 'INVALID_COUNTRY_SHORTCUTS' || code === 'DUPLICATE_COUNTRY_SHORTCUT') {
+        return context.json({ error: code }, 400);
+      }
+      throw error;
+    }
+  });
+  app.delete('/admin/api/settings/country-shortcuts/:country', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    if (!isCountryCode(countryCode)) return context.json({ error: 'INVALID_COUNTRY' }, 400);
+    const value = await control.resetCountryShortcuts(countryCode);
+    await control.audit('admin', 'settings.country_shortcuts.reset', countryCode);
+    return context.json({ data: { ...value, customized: false } });
+  });
+
+  app.get('/admin/api/settings/translation', async (context) => context.json({ data: {
+    googleTranslationEnabled: Boolean(await control.setting('google_translation_enabled', true))
+  } }));
+  app.put('/admin/api/settings/translation', async (context) => {
+    const input = await context.req.json<{ googleTranslationEnabled?: unknown }>();
+    if (typeof input.googleTranslationEnabled !== 'boolean') return context.json({ error: 'INVALID_TRANSLATION_CONFIG' }, 400);
+    await control.setSetting('google_translation_enabled', input.googleTranslationEnabled);
+    await control.audit('admin', 'settings.translation.update', 'translation', { googleTranslationEnabled: input.googleTranslationEnabled });
+    return context.json({ data: { googleTranslationEnabled: input.googleTranslationEnabled } });
+  });
+
+  app.get('/admin/api/settings/youdao', async (context) => context.json({ data: await control.youdaoCredentialStatus() }));
+  app.put('/admin/api/settings/youdao', async (context) => {
+    const input = await context.req.json<{ appKey?: string; appSecret?: string }>();
+    await control.upsertYoudaoCredential(String(input.appKey || ''), String(input.appSecret || ''));
+    await control.audit('admin', 'settings.youdao.update', 'youdao');
+    return context.json({ data: await control.youdaoCredentialStatus() });
   });
 
   app.get('/admin/api/settings/maps', async (context) => context.json({ data: {
@@ -408,16 +729,19 @@ export const createAdminApi = ({
     const input = await context.req.json<CredentialInput>();
     const id = await control.addCredential(input);
     await control.audit('admin', 'provider_key.create', id, { provider: input.provider });
+    if (isMapProvider(input.provider)) await wakeChina();
     return context.json({ data: { id } }, 201);
   });
   app.put('/admin/api/providers/:id', async (context) => {
     await control.updateCredential(context.req.param('id'), await context.req.json<Record<string, unknown>>());
     await control.audit('admin', 'provider_key.update', context.req.param('id'));
+    await wakeChina();
     return context.json({ data: { success: true } });
   });
   app.delete('/admin/api/providers/:id', async (context) => {
     await control.deleteCredential(context.req.param('id'));
     await control.audit('admin', 'provider_key.delete', context.req.param('id'));
+    await wakeChina();
     return context.json({ data: { success: true } });
   });
   app.post('/admin/api/providers/:id/reveal', async (context) => {
@@ -426,7 +750,7 @@ export const createAdminApi = ({
   app.post('/admin/api/providers/:credential/test', async (context) => {
     const value = context.req.param('credential');
     const provider = value as CredentialProviderName;
-    const credential = ['amap', 'baidu', 'tencent', 'onemap'].includes(provider)
+    const credential = (credentialProviderNames as readonly string[]).includes(provider)
       ? await control.acquireCredential(provider)
       : await control.acquireCredentialById(value);
     if (!credential) return context.json({ error: 'NO_AVAILABLE_KEY' }, 409);
@@ -437,17 +761,62 @@ export const createAdminApi = ({
         let quota: ProviderQuotaObservation | undefined;
         const result = await providerFetcher[credential.provider]('北京市', 1, credential.secret, fetch, (value) => { quota = value; });
         resolved = { success: true, resultCount: result.candidates.length, quota };
-      } else resolved = { success: false, resultCount: 0 };
+      } else resolved = await testServiceCredential(credential.provider, credential.secret);
       await control.reportCredential(credential.id, 'success', 'quota' in resolved ? resolved.quota : undefined);
+      if (isMapProvider(credential.provider)) await wakeChina();
       return context.json({ data: resolved });
     } catch (error) {
       const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
-      await control.reportCredential(credential.id, outcome);
+      await control.reportCredential(credential.id, outcome, error instanceof ProviderRequestError
+        ? { retryAt: error.retryAt } : undefined);
+      if (isMapProvider(credential.provider)) await wakeChina();
       return context.json({ error: 'PROVIDER_TEST_FAILED', outcome }, 502);
     }
   });
 
   app.get('/admin/api/china/status', async (context) => context.json({ data: await china.status() }));
+  app.get('/admin/api/address-data', async (context) => {
+    return context.json({ data: await loadAddressDataSnapshot() });
+  });
+  app.post('/admin/api/address-data/:country/sync', async (context) => {
+    const countryCode = context.req.param('country').toUpperCase();
+    const policy = (await listCountryPolicies(addressDb)).find((value) => value.countryCode === countryCode);
+    if (!policy) return context.json({ error: 'INVALID_POLICY_COUNTRY' }, 400);
+    if (!policy.enabled) return context.json({ error: 'POLICY_COUNTRY_DISABLED' }, 409);
+    let result: Record<string, unknown>;
+    if (countryCode === 'CN') {
+      await wakeChina();
+      result = { accepted: true, countryCode };
+    } else {
+      if (!triggerCountrySync) return context.json({ error: 'SYNC_CONTROL_UNAVAILABLE' }, 503);
+      result = await triggerCountrySync(countryCode);
+    }
+    invalidateAdminReadModels();
+    await control.audit('admin', 'address_data.sync.start', countryCode);
+    return context.json({ data: result }, 202);
+  });
+  app.get('/admin/api/china/areas', async (context) => {
+    const readAdcode = (name: string): string | undefined => {
+      const value = String(context.req.query(name) || '').trim();
+      if (!value) return undefined;
+      if (!/^\d{6}$/u.test(value)) throw new Error('INVALID_CHINA_ADCODE');
+      return value;
+    };
+    const page = Number(context.req.query('page') || 1);
+    const pageSize = Number(context.req.query('pageSize') || 25);
+    if (!Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      return context.json({ error: 'INVALID_PAGINATION' }, 400);
+    }
+    try {
+      return context.json({ data: await china.listAreas({
+        provinceAdcode: readAdcode('provinceAdcode'), cityAdcode: readAdcode('cityAdcode'),
+        districtAdcode: readAdcode('districtAdcode'), page, pageSize
+      }) });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'INVALID_CHINA_ADCODE') return context.json({ error: error.message }, 400);
+      throw error;
+    }
+  });
   app.post('/admin/api/china/sync', async (context) => {
     const input = await context.req.json<{ cities?: string[]; providers?: ProviderName[]; maxPages?: number }>().catch(() => ({}));
     const id = await china.start(input);
@@ -471,9 +840,68 @@ export const createAdminApi = ({
   return app;
 };
 
-export const createAccessApi = (control: ControlStore, { trustProxy = false }: { trustProxy?: boolean } = {}) => {
+export const createAccessApi = (control: ControlStore, {
+  trustProxy = false, addressDb
+}: { trustProxy?: boolean; addressDb?: Database } = {}) => {
   const app = new Hono<{ Bindings: RequestBindings }>();
   const attempts = new Map<string, { count: number; resetAt: number }>();
+  const monitorRequests = new Map<string, { count: number; resetAt: number }>();
+  const monitorCache = new Map<string, { expiresAt: number; data: unknown }>();
+  app.get('/web-api/v1/config/country-shortcuts', async (context) => {
+    if (!await authorizeWebRequest(control, context.req.raw)) {
+      return context.json({ error: 'FRONTEND_AUTH_REQUIRED' }, 401, { 'Cache-Control': 'no-store' });
+    }
+    context.header('Cache-Control', 'no-store');
+    return context.json({ data: await control.countryShortcuts() });
+  });
+  app.get('/web-api/v1/public-monitor', async (context) => {
+    if (!await authorizeWebRequest(control, context.req.raw)) {
+      return context.json({ error: 'FRONTEND_AUTH_REQUIRED' }, 401, { 'Cache-Control': 'no-store' });
+    }
+    if (!addressDb) return context.json({ error: 'MONITOR_UNAVAILABLE' }, 503);
+    const ip = requestClientAddress(context.req.raw, context.env?.remoteAddress, trustProxy);
+    const requestState = monitorRequests.get(ip);
+    if (requestState && requestState.resetAt > Date.now() && requestState.count >= 90) {
+      return context.json({ error: 'RATE_LIMITED' }, 429, { 'Cache-Control': 'no-store', 'Retry-After': '60' });
+    }
+    monitorRequests.set(ip, {
+      count: requestState?.resetAt && requestState.resetAt > Date.now() ? requestState.count + 1 : 1,
+      resetAt: requestState?.resetAt && requestState.resetAt > Date.now() ? requestState.resetAt : Date.now() + 60_000
+    });
+    if (monitorRequests.size > 5000) monitorRequests.clear();
+    const parent = String(context.req.query('parent') || '');
+    if (parent.length > 512) return context.json({ error: 'INVALID_COVERAGE_PARENT' }, 400);
+    const cached = monitorCache.get(parent);
+    if (cached && cached.expiresAt > Date.now()) {
+      context.header('Cache-Control', 'private, max-age=60');
+      return context.json({ data: cached.data });
+    }
+    const [nodes, rootNodes, lastUpdatedAt] = await Promise.all([
+      listAddressCoverage(addressDb, parent),
+      parent ? listAddressCoverage(addressDb) : Promise.resolve(undefined),
+      addressDb.prepare('SELECT MAX(updated_at) AS updated_at FROM admin_coverage_stats').first<string>('updated_at')
+    ]);
+    const countries = (rootNodes || nodes).filter((node) => node.level === 0);
+    const lowestLevels = countries.map((node) => node.coverageLevels?.at(-1)).filter(Boolean);
+    const coveredLowest = lowestLevels.reduce((total, level) => total + Number(level?.covered || 0), 0);
+    const totalLowest = lowestLevels.reduce((total, level) => total + Number(level?.total || 0), 0);
+    const data = {
+      nodes,
+      countries,
+      metrics: {
+        countryCount: countries.filter((node) => node.residentialCount > 0).length,
+        residentialTotal: countries.reduce((total, node) => total + node.residentialCount, 0),
+        coveredLowest,
+        totalLowest,
+        coverageRate: totalLowest ? coveredLowest / totalLowest : 0,
+        lastUpdatedAt: lastUpdatedAt || null
+      }
+    };
+    monitorCache.set(parent, { expiresAt: Date.now() + 60_000, data });
+    if (monitorCache.size > 500) monitorCache.clear();
+    context.header('Cache-Control', 'private, max-age=60');
+    return context.json({ data });
+  });
   app.get('/web-api/v1/config/maps', async (context) => {
     if (!await authorizeWebRequest(control, context.req.raw)) {
       return context.json({ error: 'FRONTEND_AUTH_REQUIRED' }, 401, { 'Cache-Control': 'no-store' });
@@ -536,10 +964,10 @@ export const authorizeWebRequest = async (control: ControlStore, request: Reques
 
 export const authorizeApiRequest = async (control: ControlStore, request: Request): Promise<boolean> => {
   const value = bearer(request.headers.get('authorization') || undefined);
-  return (await control.authorizeApiTokenDetailed(value, request.url.includes('/generate') ? 'generate' : 'read')).status === 'authorized';
+  return (await control.authorizeApiTokenDetailed(value, new URL(request.url).pathname.endsWith('/generate') ? 'generate' : 'read')).status === 'authorized';
 };
 
 export const apiAuthorization = async (control: ControlStore, request: Request) => {
   const value = bearer(request.headers.get('authorization') || undefined);
-  return control.authorizeApiTokenDetailed(value, request.url.includes('/generate') ? 'generate' : 'read');
+  return control.authorizeApiTokenDetailed(value, new URL(request.url).pathname.endsWith('/generate') ? 'generate' : 'read');
 };

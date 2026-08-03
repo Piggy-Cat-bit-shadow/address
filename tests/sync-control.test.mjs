@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSyncApi } from '../server/sync/api.mjs';
 import { SyncCoordinator } from '../server/sync/coordinator.mjs';
 import { createSyncRuntime } from '../server/sync/index.mjs';
-import { runAddressSync } from '../server/sync/run-address-sync.mjs';
+import {
+  acquireSyncLease, assertSyncMemory, runAddressSync, syncPostgresStatementTimeout
+} from '../server/sync/run-address-sync.mjs';
 import { nextRunAt, triggerDailySync, triggerInitialSync, triggerStartupSync } from '../server/sync/scheduler.mjs';
+import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 
 const testDirectories = [];
 const testStateDir = () => {
@@ -71,6 +74,22 @@ describe('address sync coordinator', () => {
     });
   });
 
+  it('aborts and fails a job that exceeds its hard deadline', async () => {
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(),
+      idFactory: () => 'job-timeout',
+      jobTimeoutMs: 20,
+      runSync: ({ signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      })
+    });
+    const result = await coordinator.trigger('manual');
+    await coordinator.waitForIdle();
+    await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
+      status: 'failed', phase: 'failed', error: 'Synchronization exceeded 20ms'
+    });
+  });
+
   it('recovers an orphaned job and removes its dead process lock on startup', async () => {
     const stateDir = testStateDir();
     const jobsDir = resolve(stateDir, 'jobs');
@@ -100,14 +119,18 @@ describe('address sync coordinator', () => {
 
 describe('sync management API', () => {
   it('serves health under the /sync-control prefix', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
     const runtime = await createSyncRuntime({
       environment: { SYNC_ADMIN_TOKEN: 'fixture-token' },
+      database,
       stateDir: testStateDir(),
       runSync: async ({ releaseId }) => ({ releaseId, changed: false })
     });
     const response = await runtime.api(new Request('http://localhost/sync-control/healthz'));
     expect(response.status).toBe(200);
     await runtime.close();
+    await database.close();
   });
 
   it('requires a bearer token and returns a queryable task ID', async () => {
@@ -157,9 +180,46 @@ describe('sync management API', () => {
     expect(coordinator.trigger).toHaveBeenCalledWith('initial', { shards: ['all'] });
   });
 
+  it('clears source terminal states before a forced synchronization job', async () => {
+    const coordinator = { trigger: vi.fn(async (trigger, { shards }) => ({
+      accepted: true,
+      job: { id: 'sync-force', trigger, shards, status: 'queued' }
+    })) };
+    const queue = { force: vi.fn(async () => undefined) };
+    const api = createSyncApi({ coordinator, queue, token: 'test-token' });
+    const response = await api(new Request('http://sync.test/api/v1/sync/jobs', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'force', shards: ['CN', 'PH'] })
+    }));
+    expect(response.status).toBe(202);
+    expect(queue.force).toHaveBeenCalledWith(['CN', 'PH']);
+    expect(coordinator.trigger).toHaveBeenCalledWith('force', { shards: ['CN', 'PH'] });
+  });
+
 });
 
 describe('atomic address release command', () => {
+  it('gives offline PostgreSQL imports a bounded timeout independent from API queries', () => {
+    expect(syncPostgresStatementTimeout({})).toBe(900_000);
+    expect(syncPostgresStatementTimeout({ ADDRESS_SYNC_POSTGRES_STATEMENT_TIMEOUT_MS: '1200000' })).toBe(1_200_000);
+    expect(syncPostgresStatementTimeout({ ADDRESS_SYNC_POSTGRES_STATEMENT_TIMEOUT_MS: '0' })).toBe(900_000);
+  });
+
+  it('rejects a synchronization process before materialization when free memory is below the configured floor', () => {
+    expect(() => assertSyncMemory(512, 1024)).toThrow(/requires 1024 free bytes/u);
+    expect(() => assertSyncMemory(1024, 1024)).not.toThrow();
+  });
+  it('prevents concurrent ETL processes and removes the lease after completion', async () => {
+    const directory = testStateDir();
+    const lockFile = resolve(directory, 'address.postgres.sync.lock');
+    const release = await acquireSyncLease(lockFile);
+    await expect(acquireSyncLease(lockFile)).rejects.toMatchObject({ code: 'ADDRESS_SYNC_ALREADY_RUNNING' });
+    await release();
+    const releaseAgain = await acquireSyncLease(lockFile);
+    await releaseAgain();
+  });
+
   it('forces a metadata check for a manual shard sync', async () => {
     let options;
     await runAddressSync({
@@ -173,7 +233,20 @@ describe('atomic address release command', () => {
     expect(options).toMatchObject({ requestedShards: ['HK'], force: true });
   });
 
-  it('publishes only through a successful SQLite ETL transaction', async () => {
+  it('passes multiple requested countries to ETL as separate shards', async () => {
+    let options;
+    await runAddressSync({
+      releaseId: 'multi-country',
+      environment: { ADDRESS_SYNC_TRIGGER: 'manual', ADDRESS_SYNC_SHARDS: 'HK, US' },
+      runEtl: async (value) => {
+        options = value;
+        return { dryRun: true, changed: false };
+      }
+    });
+    expect(options.requestedShards).toEqual(['HK', 'US']);
+  });
+
+  it('publishes only through a successful PostgreSQL ETL transaction', async () => {
     const result = await runAddressSync({
       releaseId: 'release-ok',
       runEtl: async () => ({ changed: true, releaseTargets: [{ countryCode: 'US' }] })
@@ -181,11 +254,12 @@ describe('atomic address release command', () => {
     expect(result).toMatchObject({ releaseId: 'release-ok', changed: true });
   });
 
-  it('propagates an SQLite country transaction failure', async () => {
+  it('propagates a PostgreSQL country transaction failure', async () => {
     await expect(runAddressSync({
       releaseId: 'release-failed',
-      runEtl: async () => { throw new Error('SQLite transaction failed'); }
-    })).rejects.toThrow('SQLite transaction failed');
+      environment: { ADDRESS_SYNC_RETRY_ATTEMPTS: '1' },
+      runEtl: async () => { throw new Error('PostgreSQL transaction failed'); }
+    })).rejects.toThrow('PostgreSQL transaction failed');
   });
 
   it('retries a failed country synchronization with bounded exponential backoff', async () => {
@@ -204,6 +278,24 @@ describe('atomic address release command', () => {
     expect(result.changed).toBe(true);
     expect(calls).toBe(3);
     expect(waits).toEqual([7, 14]);
+  });
+
+  it('does not retry deterministic source quality failures', async () => {
+    const waits = [];
+    let calls = 0;
+    await expect(runAddressSync({
+      releaseId: 'release-quality-failed',
+      environment: { ADDRESS_SYNC_RETRY_ATTEMPTS: '3', ADDRESS_SYNC_RETRY_BASE_MS: '7' },
+      runEtl: async () => {
+        calls += 1;
+        throw new AggregateError([
+          Object.assign(new Error('degraded snapshot'), { code: 'SNAPSHOT_QUALITY_FAILED' })
+        ], 'Address sync failed');
+      },
+      wait: async (milliseconds) => waits.push(milliseconds)
+    })).rejects.toThrow('Address sync failed');
+    expect(calls).toBe(1);
+    expect(waits).toEqual([]);
   });
 });
 

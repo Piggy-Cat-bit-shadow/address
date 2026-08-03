@@ -137,7 +137,7 @@ describe('self-hosted client context API', () => {
     await expect(unavailable.json()).resolves.toMatchObject({ error: { code: 'IP_DATABASE_UNAVAILABLE' } });
   });
 
-  it('generates from the nearest local SQLite row for 162.141.137.231', async () => {
+  it('generates from the nearest local PostgreSQL row for 162.141.137.231', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => hongKongLookup()));
     const response = await app.request(
       '/api/v1/generate?mode=ip-region&ip=162.141.137.231&residential=true&seed=hk-nearby&requestId=hk-nearby',
@@ -149,7 +149,7 @@ describe('self-hosted client context API', () => {
     expect(response.status).toBe(200);
     expect(payload.data).toMatchObject({
       requestId: 'hk-nearby', country: 'HK', mode: 'ip-region', ipMatchLevel: 'coordinate',
-      sourcesTried: ['osm-overpass', 'address-pool-v2'],
+      sourcesTried: ['address-pool-v2'],
       ipRegion: { source: 'manual-database', precisionLevel: 'coordinates' }
     });
     expect(JSON.stringify(payload)).not.toContain('162.141.137.231');

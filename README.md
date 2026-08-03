@@ -1,246 +1,148 @@
-<p align="center">
-  <img src="public/favicon.svg" width="96" height="96" alt="Address logo" />
-</p>
-
+<p align="center"><img src="public/favicon.svg" width="88" height="88" alt="Address logo" /></p>
 <h1 align="center">Address</h1>
-
-<p align="center">A self-hosted verified residential-address and synthetic test-profile generator for 27 countries and regions.</p>
+<p align="center">Self-hosted residential-address and synthetic test-profile generation backed by PostgreSQL.</p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.zh-TW.md">繁體中文</a>
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/daimon3332/address/actions/workflows/ci.yml"><img src="https://github.com/daimon3332/address/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/daimon3332/address/releases"><img src="https://img.shields.io/github/v/release/daimon3332/address" alt="Release" /></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&amp;logoColor=white" alt="Node.js 24" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Code-MIT-blue.svg" alt="MIT License" /></a>
-  <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live_Demo-address.333186.xyz-0f766e" alt="Live Demo" /></a>
+  <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live-address.333186.xyz-1769e0" alt="Live demo" /></a>
 </p>
 
-Address publishes only records that pair source-backed address existence with independent residential-use evidence. Address components, including indoor fields, are never invented; absent values remain empty. It produces source-language, English, and Simplified-Chinese presentations plus coherent synthetic profile fields for form and software testing.
+Address reads a synchronized PostgreSQL address pool and returns a randomly selected eligible record together with a coherent synthetic profile. Public generation never downloads an upstream dataset or calls a map provider.
 
-> Generated records are test data. They do not prove deliverability, residency, identity, payment-account validity, or ownership.
+## Highlights
 
-## 🚀 Workflow
+- 27 configured countries and regions with country, administrative-area, city, district, and postcode filters where supported.
+- Strict filter semantics: an empty matching pool returns an error instead of silently switching to another location.
+- Fast database-backed random selection across the complete eligible scope; it does not repeatedly read the first rows.
+- Source/native, English, Simplified Chinese, Traditional Chinese, Japanese, Korean, German, French, Spanish, and Portuguese presentation paths.
+- Address and profile language choices persist independently in the browser; first use defaults to English.
+- Popular administrative areas, popular cities, and special areas are configurable per country. The United States includes states without statewide sales tax.
+- Public coverage monitor plus administrator dashboard, address-data rules, synchronization queue, quick-location editor, provider credentials, access control, blacklist, and API tokens.
+- PostgreSQL-only runtime with pooled connections, transactional publication, indexed location search, and prebuilt random-address indexes.
 
-Choose a country and location → generate a verified residential address and test profile → copy individual fields or export the result.
+## Supported scope
 
-## ✨ Features
-
-- Covers 27 countries and regions with region, city, and postcode filters.
-- Treats location filters as exact-or-empty; an uncovered selection returns `NO_POOL_COVERAGE` rather than a different place.
-- IP-region generation requires a coordinate or city match and never substitutes a region-wide or nationwide record.
-- Presents addresses in the source language, English, and Simplified Chinese.
-- Keeps every address component source-backed; missing house, building, unit, floor, room, or postcode values remain empty.
-- Generates coherent basic profile, sandbox card, employment, finance, and network fields.
-- Supports independently configurable Google and AMap previews for China and other countries; both can be disabled.
-- Hot-reloads a custom blacklist and preserves evidence/source attribution.
-- Supports resumable initial imports, daily country rotation, quality gates, and storage limits.
-
-## 🧭 Address Sources and Field Provenance
-
-The active pool uses the following source family for each country. Every public result must pass address-existence and residential-use gates. Live providers are optional inputs and their candidates pass the same gates before publication.
-
-**Quality over quantity:** if any country-required component in [Address formats](docs/address-formats.md) is missing, the entire record is rejected. “Remains empty” below applies only to explicitly optional fields such as a building name or source-tagged unit. Nearby postcodes, neighboring records, and random values never fill factual fields.
-
-| Country / region | Default source | Real/source-backed address fields | Generated address fields |
-|---|---|---|---|
-| United States (US) | [Overture Maps](https://overturemaps.org/) | House number, street, city, state, ZIP, source geometry | None; missing values remain empty |
-| Canada (CA) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postal code, source geometry | None; missing values remain empty |
-| Mexico (MX) | [Overture Maps](https://overturemaps.org/) | House number, street, municipality, state, postcode, source geometry | None; missing values remain empty |
-| United Kingdom (GB) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, town, postcode, source geometry | None; missing values remain empty |
-| Germany (DE) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
-| France (FR) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
-| Italy (IT) | [Overture Maps](https://overturemaps.org/) | House number, street, city, region, postcode, source geometry | None; missing values remain empty |
-| Spain (ES) | [Overture Maps](https://overturemaps.org/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
-| Netherlands (NL) | [Overture Maps](https://overturemaps.org/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
-| Russia (RU) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, federal subject, postcode, source geometry | None; missing values remain empty |
-| China (CN) | [AreaCity](https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov) + AMap/Baidu/Tencent POI | Province/municipality, city, district, township, registered community name/address, and provider coordinate | None; missing values remain empty |
-| Hong Kong (HK) | [Geofabrik OSM](https://download.geofabrik.de/) | Building/street, district, area, source geometry | None; missing values remain empty |
-| Taiwan (TW) | [Overture Maps](https://overturemaps.org/) | House number, street, city/county, district, postcode, source geometry | None; missing values remain empty |
-| Japan (JP) | [Overture Maps](https://overturemaps.org/) | Block/house number, street, municipality, prefecture, postcode, source geometry | None; missing values remain empty |
-| South Korea (KR) | [Geofabrik OSM](https://download.geofabrik.de/) | Road, building number, district, city/province, postcode, source geometry | None; missing values remain empty |
-| Singapore (SG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, locality, postcode, source geometry | None; missing values remain empty |
-| Vietnam (VN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, province, postcode, source geometry | None; missing values remain empty |
-| Thailand (TH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
-| Philippines (PH) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, barangay/district, city, region, postcode, source geometry | None; missing values remain empty |
-| Malaysia (MY) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None; missing values remain empty |
-| India (IN) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, district, city, state, postcode, source geometry | None; missing values remain empty |
-| Australia (AU) | [Overture Maps](https://overturemaps.org/) | House number, street, suburb, state, postcode, source geometry | None; missing values remain empty |
-| Türkiye (TR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, province, postcode, source geometry | None; missing values remain empty |
-| Saudi Arabia (SA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, postcode, source geometry | None; missing values remain empty |
-| Brazil (BR) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None; missing values remain empty |
-| Nigeria (NG) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, city, state, postcode, source geometry | None; missing values remain empty |
-| South Africa (ZA) | [Geofabrik OSM](https://download.geofabrik.de/) | House number, street, suburb, postcode, source geometry | None; missing values remain empty |
-
-`None` means the generator does not synthesize address components. A record missing a required address field never enters the random pool; an absent optional building name or source-tagged unit remains empty.
-
-### Address provenance and synthetic profile fields
-
-| Field | Provenance |
+| Region | Countries and regions |
 |---|---|
-| Country, region, city, district, and street | Source-backed and normalized from the same address record or an exact administrative relation; conflicts fail validation. |
-| House number | Keeps only a source/provider registration value; a missing value rejects the record. |
-| Postcode | Required outside China POI and Hong Kong; keeps a valid source value or exact authoritative relation, otherwise rejects the record. |
-| Coordinates | Copied from the source geometry. Depending on the source, this may be an address point, building point, or the centroid of an OSM way. |
-| Building or community | Uses only a source value tied to the address object. China publishes communities only after at least two independent map providers agree. |
-| Apartment, building, unit, floor, and room | Keeps only official or source-tagged values; missing indoor details remain empty in every country. |
-| Name, phone, email, employment, finance, network, and sandbox card | Synthetic test data. |
+| North America | US, CA, MX |
+| Europe | GB, DE, FR, IT, ES, NL, RU |
+| East Asia | CN, HK, TW, JP, KR |
+| Southeast Asia | SG, MY, TH, PH, VN |
+| South Asia | IN |
+| Oceania | AU |
+| Middle East | TR, SA |
+| South America | BR |
+| Africa | NG, ZA |
 
-China uses **AreaCity-validated administrative context plus a map-provider community, registered address, and coordinate that pass multi-provider consistency checks**. Other countries combine a source address object with independent residential building/use evidence. `verified` means the evidence and quality gates passed; it does not establish current occupancy or deliverability.
+## Architecture
 
-### Google Maps and AMap behavior
+```text
+Astro static pages + React UI
+             │
+             ▼
+       Hono Node.js API
+        ├─ PostgreSQL address and control data
+        ├─ in-memory random/filter indexes rebuilt from PostgreSQL
+        └─ local formatting, profile generation, and optional translation
 
-- **Google coordinate preview** opens `latitude,longitude` from the source geometry. It is a location preview, not a Google delivery or occupancy certificate.
-- **Google address search** uses source-backed address components only; absent indoor fields are omitted.
-- **AMap for China** converts the source WGS-84 coordinate to GCJ-02 before placing the marker. Overseas AMap display keeps the source coordinate and requires the AMap World Map capability.
-- Google and AMap have separate China/overseas switches. The default is Google enabled and AMap disabled for both regions; enabling or disabling one provider does not affect the other.
-- A map pin may represent an address point, building centroid, or way centroid rather than an entrance or room. The default generation path does not claim that a Google Geocoding result has independently verified every record.
+Synchronization supervisor
+        ├─ resumable bulk/API adapters
+        ├─ country-specific validation and residential evidence gates
+        ├─ transactional PostgreSQL publication
+        └─ coverage statistics and bounded queue state
+```
 
-AMap uses three separate values: server-only `AMAP_API_KEY` is the WebService credential for China POI synchronization; domain-restricted `AMAP_JS_API_KEY` is the dedicated browser loading key and is visible in browser network requests when AMap is enabled; `AMAP_JS_SECURITY_CODE` remains AES-GCM encrypted on the server and is applied only by the same-origin `/_AMapService` proxy. AMap's official documentation recommends the [proxy pattern](https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode), while overseas rendering additionally needs [World Map permission](https://lbs.amap.com/api/javascript-api-v2/guide/map/world-map). Every credential value shown in repository examples is a placeholder; no real key or token belongs in tracked files.
+## Automated synchronization
 
-For detailed field examples and source notes, see [address formats](docs/address-formats.md), [data sources](docs/data-sources.md), and the [API documentation](docs/API.md).
+A country is complete only when every enabled rule passes:
 
-## 🖼️ Webui Preview (Webui 预览)
+1. total eligible-record target;
+2. lowest administrative-level coverage and per-node minimums;
+3. level-1 and level-2 minimums where configured;
+4. every explicit node override.
 
-<details>
-<summary>View the complete United States and China WebUI preview</summary>
+Reaching only the total target does not mark a country complete. Conversely, a source proven to be exhausted is kept visible as incomplete but removed from active work until its source/version fingerprint changes.
 
-<br />
+The queue applies bounded retries, exponential backoff, cooldown/quota reset times, no-progress latching, and suspension after repeated failures. It cannot run the same unchanged no-progress source indefinitely. China receives the highest automatic priority while it remains eligible.
+
+## Screenshots
 
 <table>
+  <tr><th>United States generator</th><th>China generator</th></tr>
   <tr>
-    <th width="50%">United States</th>
-    <th width="50%">China</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-overview.png" alt="United States WebUI overview" /></td>
-    <td><img src="image/webui-cn-overview.png" alt="China WebUI overview" /></td>
-  </tr>
-  <tr>
-    <th>Generator</th>
-    <th>Generator</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-generator.png" alt="United States generator controls" /></td>
-    <td><img src="image/webui-cn-generator.png" alt="China generator controls" /></td>
-  </tr>
-  <tr>
-    <th>Address</th>
-    <th>Address</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-address.png" alt="Generated United States address" /></td>
-    <td><img src="image/webui-cn-address.png" alt="Generated China address" /></td>
-  </tr>
-  <tr>
-    <th>Basic profile</th>
-    <th>Basic profile</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-profile.png" alt="United States basic test profile" /></td>
-    <td><img src="image/webui-cn-profile.png" alt="China basic test profile" /></td>
-  </tr>
-  <tr>
-    <th>Sandbox card</th>
-    <th>Sandbox card</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-test-card.png" alt="United States sandbox card data" /></td>
-    <td><img src="image/webui-cn-test-card.png" alt="China sandbox card data" /></td>
-  </tr>
-  <tr>
-    <th>Employment</th>
-    <th>Employment</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-employment.png" alt="United States employment data" /></td>
-    <td><img src="image/webui-cn-employment.png" alt="China employment data" /></td>
-  </tr>
-  <tr>
-    <th>Finance</th>
-    <th>Finance</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-finance.png" alt="United States finance data" /></td>
-    <td><img src="image/webui-cn-finance.png" alt="China finance data" /></td>
-  </tr>
-  <tr>
-    <th>Network and extended fields</th>
-    <th>Network and extended fields</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-network.png" alt="United States network and extended data" /></td>
-    <td><img src="image/webui-cn-network.png" alt="China network and extended data" /></td>
-  </tr>
-  <tr>
-    <th>Google Maps</th>
-    <th>Google Maps</th>
-  </tr>
-  <tr>
-    <td><img src="image/webui-us-map.png" alt="United States Google Maps preview" /></td>
-    <td><img src="image/webui-cn-map.png" alt="China Google Maps preview" /></td>
+    <td><img src="image/webui-us-overview.png" alt="United States generator" /></td>
+    <td><img src="image/webui-cn-overview.png" alt="China generator" /></td>
   </tr>
 </table>
 
-</details>
+### Data monitor
 
-## 📚 Documentation
+<img src="image/webui-monitor.png" alt="Public address-count and administrative-coverage monitor" />
 
-| Document | Contents |
-|---|---|
-| [API documentation](docs/API.md) | Public endpoints, parameters, errors, sync management, CORS, and examples |
-| [Deployment documentation](docs/DEPLOYMENT.md) | API keys, private configuration, VPS, Nginx, synchronization, backup, and capacity |
-| [Development documentation](docs/DEVELOPMENT.md) | Architecture, local setup, data pipeline, extension points, tests, and release gates |
+### Administrator console
 
-## ⚡ Quick start
+<table>
+  <tr><th>Dashboard</th><th>Address data</th></tr>
+  <tr>
+    <td><img src="image/admin-dashboard.png" alt="Administrator dashboard" /></td>
+    <td><img src="image/admin-address-data.png" alt="Address data administration" /></td>
+  </tr>
+  <tr><th>Synchronization queue</th><th>Quick locations</th></tr>
+  <tr>
+    <td><img src="image/admin-sync-queue.png" alt="Synchronization queue and completion rules" /></td>
+    <td><img src="image/admin-quick-locations.png" alt="Quick locations with searchable availability counts" /></td>
+  </tr>
+</table>
 
-Node.js 24 or newer is required.
+<img src="image/admin-map-keys.png" alt="Masked map-key and quota administration" />
+
+## Quick start
+
+Requirements: Node.js 24+, Docker Compose, and enough disk space for the datasets you choose to import.
 
 ```bash
 git clone https://github.com/daimon3332/address.git
 cd address
+
+cd ops/postgresql
+POSTGRES_PASSWORD='REPLACE_WITH_A_STRONG_PASSWORD' docker compose up -d
+cd ../..
+
 cp .env.example .env
+# Set POSTGRES_URL, CONFIG_MASTER_KEY, and ADMIN_BOOTSTRAP_PASSWORD in .env.
 npm ci
 npm run db:migrate
-npm run dev
+npm run build
+npm start
 ```
 
-A new database contains schema only. Run `npm run data:address-pool:bootstrap` for the resumable 27-country import. See the [deployment guide](docs/DEPLOYMENT.md) before running a production VPS.
+The initial database contains schema only. Import only the countries and sources whose licenses, resource requirements, and strategy documents you have reviewed. Production deployment, service supervision, reverse proxy, backup, and restore procedures are in the [deployment guide](docs/DEPLOYMENT.md).
 
-## 🔑 Configuration summary
+## Configuration and API keys
 
-Offline runtime generation does not call map providers after synchronization. Configure multiple AMap, Baidu, and Tencent server keys in `/admin/`; they are encrypted in `control.sqlite` with the server-only `CONFIG_MASTER_KEY`. AMap browser display uses a separate domain-restricted JS API key and an encrypted server-side security code through `/_AMapService`. Put all real credentials only in ignored local/runtime configuration or encrypted administrator storage. Never add them to source, screenshots, issues, or CI logs.
+- Copy `.env.example`; never commit `.env`.
+- Provider keys are optional unless the selected synchronization strategy needs them.
+- Multiple credentials rotate independently. A failing key is cooled down while another available key is tried; when all keys are unavailable, work waits for the earliest reset.
+- Encrypted administrator credentials depend on a stable `CONFIG_MASTER_KEY`.
+- Follow the dedicated [API key configuration guide](docs/API_KEYS.md) for official application links, variable names, restrictions, and rotation behavior.
 
-## 💾 Database size
+## Documentation
 
-Measured after all 27 countries were synchronized on 2026-07-23 at commit `084805e`:
+| Document | Purpose |
+|---|---|
+| [API reference](docs/API.md) | Bearer authentication, generation, filtering, errors, and monitoring |
+| [API keys](docs/API_KEYS.md) | Provider registration, environment variables, encryption, rotation, and cooldown |
+| [Deployment](docs/DEPLOYMENT.md) | PostgreSQL, VPS layout, process control, Nginx, backup, restore, and upgrades |
+| [Development](docs/DEVELOPMENT.md) | Architecture, local checks, extension points, and release gates |
+| [Address formats](docs/address-formats.md) | Country formatting and field behavior |
+| [Country strategies](docs/strategies/) | Source, evidence, coordinates, deduplication, validation, and update policy |
 
-| Item | Measured size |
-|---|---:|
-| `address.sqlite` | 6.90 GiB |
-| Complete `data/` directory | 7.89 GiB |
-| Initial-import peak | About 11.2 GiB |
+## License
 
-Actual size varies with upstream releases and WAL activity. A production application volume of at least **60 GiB** is recommended for synchronization, backups, and recovery space.
-
-## 🌍 Coverage
-
-United States, Canada, Mexico, United Kingdom, Germany, France, Italy, Spain, Netherlands, Russia, China, Hong Kong, Taiwan, Japan, South Korea, Singapore, Vietnam, Thailand, Philippines, Malaysia, India, Australia, Turkey, Saudi Arabia, Brazil, Nigeria, and South Africa.
-
-## Data, privacy, and license
-
-- [Overture Maps](https://overturemaps.org/) provides selected address records with source-specific metadata and terms.
-- [OpenStreetMap](https://www.openstreetmap.org/copyright) and [Geofabrik](https://download.geofabrik.de/) provide other source data under ODbL 1.0.
-- Client IP is used only for a requested location lookup and is not written to the address database.
-- Address and indoor fields are source-backed; missing values remain empty. Profiles and card fields are synthetic test data.
-
-Project code is released under the [MIT License](LICENSE). Redistributed data remains subject to its source licenses, attribution, and share-alike terms. The repository and releases contain no production database or private credentials.
-
-## Community
-
-- [linux.do](https://linux.do): **Learn AI on L-Station!!!**
-- [Nodeseek.com](https://www.nodeseek.com): **Nodeseek is a place for people who love web development, hosting, vps / server and other geek things.**
+Project source code is licensed under [MIT](LICENSE). Upstream datasets retain their own licenses and attribution requirements.

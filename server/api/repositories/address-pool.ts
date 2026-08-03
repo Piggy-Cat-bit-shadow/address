@@ -1,10 +1,11 @@
 import { hashSeed } from '../../../src/domain/generator';
-import type { SqliteDatabase } from '../../database/sqlite.mjs';
+import type { Database } from '../../database/database.mjs';
 import {
   normalizeAddressComponents,
   validateAdministrativeHierarchy
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
+import { normalizeAddressFacts, validateAddressQuality } from '../../../src/domain/address-quality.mjs';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
 
@@ -49,7 +50,7 @@ const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefin
   if (!validateAdministrativeHierarchy({
     countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code
   }).valid) return undefined;
-  const components: AddressComponents = normalizeAddressComponents(row.country_code, {
+  const components: AddressComponents = normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, {
     houseNumber: row.house_number,
     street: row.street,
     ...(row.building_name ? { buildingName: row.building_name } : {}),
@@ -59,7 +60,10 @@ const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefin
     ...(row.admin1 ? { admin1: row.admin1 } : {}),
     ...(row.admin1_code ? { admin1Code: row.admin1_code } : {}),
     postcode: row.postcode
-  });
+  }));
+  if (!validateAddressQuality({
+    countryCode: row.country_code, components, latitude: row.latitude, longitude: row.longitude
+  }).valid) return undefined;
   const sourceUpdatedAt = row.source_updated_at || row.imported_at;
   const formatted = [row.house_number, row.street, components.postalLocality || components.locality, row.admin1_code || row.admin1, row.postcode]
     .filter(Boolean).join(', ');
@@ -120,7 +124,7 @@ const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefin
 };
 
 export const pickAddressPoolAddress = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   country: CountryCode,
   residential: boolean,
   filters: AddressFilters,

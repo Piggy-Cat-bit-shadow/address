@@ -7,46 +7,45 @@ This guide covers private configuration, initial data synchronization, VPS deplo
 ## Requirements
 
 - Linux VPS with AMD64 or ARM64 CPU
-- At least 4 GB RAM; 8 GB is recommended for the full initial import
+- 8 GB RAM for the full initial import (the Japan build peaks at roughly 6.5 GB RSS, and the sync runner refuses to start with less than 2 GiB free memory by default); 4 GB is enough for serving an already-initialized database
 - At least 60 GiB available on the application volume
-- `git`, `curl`, `ca-certificates`, `xz-utils`, Python 3, and `venv`
+- `git`, `curl`, `ca-certificates`, `xz-utils`, Python 3.10 or newer (3.12 is what production runs), and `venv`
 - A domain pointing to the VPS and an HTTPS-capable reverse proxy
 
 The installer downloads the project-pinned Node.js runtime. A system-wide Node.js installation is not required.
 
 ## Storage estimate
 
-Measured on 2026-07-23 after all 27 countries were synchronized at commit `084805e`:
+PostgreSQL production data is stored under `/root/postgresql/data`. Initial imports temporarily retain source files and intermediate artifacts under `/root/address/data/staging`, then remove them after publication. Reserve at least 60 GiB for the database, synchronization staging, backups, and recovery; actual use depends on upstream releases, address targets, and retained snapshots.
 
-| Item | Measured size |
-|---|---:|
-| `address.sqlite` | 6.90 GiB |
-| Active SQLite WAL | 0.68 GiB |
-| Complete `data/` directory | 7.89 GiB |
-| Active addresses | 722,950 records |
-| Legacy China residential subset | 174,327 records (historical measurement; not the new POI pool) |
-
-The new China POI pool grows after AMap, Baidu, or Tencent synchronization, so its final count and size depend on configured cities, page limits, and provider results. The initial import temporarily retains source downloads and intermediate files. The observed legacy peak was about 11.2 GiB. Upstream releases, WAL activity, and optional retention settings change the actual total. The 60 GiB recommendation leaves room for synchronization, backups, and recovery. Shadow expansion stops at 40 GiB, writes stop before 45 GiB, and the project keeps a 50 GiB absolute ceiling.
+The initial import is network- and CPU-bound: expect several hours up to more than a day on a typical VPS, and it is resumable — completed countries are skipped on restart. Korea additionally fills its postcode cache at up to 2,800 Geoapify requests per day, so KR reaches its full target over multiple daily runs after the initial gate passes.
 
 ## API keys and secrets
 
-Runtime generation reads only verified residential records from the active SQLite snapshot. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`; publication still requires multi-provider consistency.
+Runtime generation reads only verified residential records from the active PostgreSQL snapshot. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`; publication still requires multi-provider consistency.
 
 | Variable | Required | Feature | Where to obtain it |
 |---|---|---|---|
-| `CONFIG_MASTER_KEY` | Required | Encrypt provider credentials in `control.sqlite` | Generate with `openssl rand -base64 32`; keep it server-only. |
+| `CONFIG_MASTER_KEY` | Required | Encrypt provider credentials in PostgreSQL control tables | Generate with `openssl rand -base64 32`; keep it server-only. |
 | `ADMIN_BOOTSTRAP_PASSWORD` | Required initially | Create the first administrator identity | Generate a strong password; it is ignored after initialization. |
 | `AMAP_API_KEY` / additional AMap WebService keys | China sync, server-side only | Community POI ingestion | Create Web Service keys in the [AMap console](https://lbs.amap.com/api/webservice/guide/create-project/get-key), then import the first ignored runtime value or add keys in `/admin/`. Do not reuse a browser JS key. |
 | `AMAP_JS_API_KEY` | Optional initial import | Browser AMap rendering | Create a dedicated Web platform (JS API) key, restrict it to the production domain and local test origins, then import it through ignored runtime configuration or `/admin/`. |
 | `AMAP_JS_SECURITY_CODE` | Required with the JS key | Authenticate AMap JS service requests | Obtain it with the JS API key. Keep it server-only; the application encrypts it and applies it through `/_AMapService`. |
 | Baidu keys | China sync | Community POI ingestion and cross-validation | Create server-side Place API keys in the Baidu Maps console, then add them in `/admin/`. |
 | Tencent keys | China sync | Community POI ingestion and cross-validation | Create WebService API keys in the Tencent Location Service console, then add them in `/admin/`. |
-| `GEOAPIFY_API_KEY` | Optional | Live geocoding outside China and selected reverse localization | Create a project and key using the [Geoapify guide](https://www.geoapify.com/get-started-with-maps-api/). |
+| `GEOAPIFY_API_KEY` | Required for the KR initial import | K-apt reverse-postcode geocoding (records without a validated postcode are dropped); also used for live geocoding outside China | Create a project and key using the [Geoapify guide](https://www.geoapify.com/get-started-with-maps-api/). The free tier covers the 2,800 requests/day the exporter uses. |
 | `YOUDAO_APP_KEY`, `YOUDAO_APP_SECRET` | Optional pair | Backup online translation provider | Create a translation application at [Youdao AI](https://ai.youdao.com/). |
-| `ONEMAP_ACCESS_TOKEN` | Optional | Singapore address-existence, postcode, and coordinate verification | Follow the [OneMap authentication guide](https://www.onemap.gov.sg/apidocs/authentication). Tokens are valid for 3 days and require renewal; OneMap alone does not establish residential use. |
+| `ONEMAP_ACCESS_TOKEN` | Optional | Broadens SG HDB building matching plus address-existence, postcode, and coordinate verification | Follow the [OneMap authentication guide](https://www.onemap.gov.sg/apidocs/authentication). Tokens are valid for 3 days and require renewal; OneMap alone does not establish residential use. |
+| `GOOGLE_GEOCODING_API_KEY`, `OS_DATA_HUB_API_KEY` | Optional | Live lookup providers used by the API at runtime (not by the bulk import) | Google Cloud console and OS Data Hub respectively. |
 | `SYNC_ADMIN_TOKEN` | Required on a VPS | Protect sync-control mutations | Generate locally; this is not a third-party credential. |
 
-Keep `LIVE_API_MODES=ip-region` to restrict live providers to IP coordinate/city matching. Standard public generation uses the active residential SQLite pool, and every live candidate must pass the same address-existence and residential-evidence gates. IP mode reports no coverage instead of substituting a region-wide or nationwide address. Set `GOOGLE_TRANSLATION_ENABLED=false` unless online translation is explicitly needed.
+### Countries by credential requirement
+
+- Zero credentials (Overture, Geofabrik/OSM, and official open data): US, CA, MX, GB, DE, FR, IT, ES, NL, RU, JP, HK, TW, TH, PH, VN, MY, SA, IN, AU, TR, BR, NG, ZA, and SG (the HDB source works without a token; `ONEMAP_ACCESS_TOKEN` only broadens coverage).
+- KR: requires `GEOAPIFY_API_KEY`; without it the K-apt residential source cannot pass its quality gate and the initial import never completes.
+- CN: not part of the bulk ETL. China community data is synchronized by the API process using AMap (plus optional Baidu/Tencent cross-validation) server keys configured in `/admin/`.
+
+Public generation and IP-region generation use only the active residential PostgreSQL pool. Provider credentials are consumed by background synchronization; they are never injected into public generation requests. IP mode reports no coverage instead of substituting a region-wide or nationwide address. Set `GOOGLE_TRANSLATION_ENABLED=false` unless synchronization explicitly needs online translation.
 
 ## Secret handling
 
@@ -92,8 +91,8 @@ At minimum, replace `YOUR_DOMAIN.example`, generate `CONFIG_MASTER_KEY` and `SYN
 | `API_HOST` | `127.0.0.1` | Hono listen address |
 | `API_PORT` | `8787` | Hono listen port |
 | `STATIC_ROOT` | `/root/address/app/dist` | Built Astro site |
-| `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite database |
-| `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | Authentication, encrypted credentials, quotas, jobs, and audit database |
+| `POSTGRES_URL` | `postgresql://address:...@127.0.0.1:5432/address` | PostgreSQL connection string; keep it only in server runtime configuration |
+| `POSTGRES_POOL_MAX` / `POSTGRES_POOL_MIN` | `64` / `4` | Application connection-pool bounds |
 | `CONFIG_MASTER_KEY` | Generated server-only value | AES-256-GCM key for provider credentials and AMap JS security configuration |
 | `AMAP_JS_API_KEY` | Empty | Optional first-import value for the dedicated browser JS API key |
 | `AMAP_JS_SECURITY_CODE` | Empty | Optional first-import value for the server-only JS security code |
@@ -104,6 +103,7 @@ At minimum, replace `YOUR_DOMAIN.example`, generate `CONFIG_MASTER_KEY` and `SYN
 | `SYNC_HOST` | `127.0.0.1` | Sync-control listen address |
 | `SYNC_PORT` | `8791` | Sync-control port |
 | `SYNC_CONTROL_PUBLIC` | `false` | Keep sync management off the public API |
+| `SYNC_SCHEDULER_ENABLED` | `true` | Let the sync service auto-complete the initial import and run daily updates |
 | `SYNC_UTC_HOUR` | `3` | Daily scheduler check hour in UTC |
 
 Only enable `TRUST_PROXY` when a controlled reverse proxy overwrites forwarded IP headers. Keep port `8791` private.
@@ -146,16 +146,36 @@ cd /root/address/app
 npm run build
 ```
 
-### 4. Initialize all countries
+### 4. Seed the location catalog
+
+```bash
+export PATH=/root/address/runtime/node/bin:$PATH
+cd /root/address/app
+. ops/env.sh
+npm run data:catalog
+npm run data:catalog:import
+```
+
+`data:catalog` downloads open region/city/postcode reference data (countries-states-cities-database plus GeoNames, several hundred MB) into `.data-cache/catalog-seed.sql`; `data:catalog:import` writes it to the database selected by `POSTGRES_URL`. This step is required before the first address import: the ETL reverse-geocodes records against the catalog tables, and an empty catalog sharply lowers acceptance.
+
+### 5. Initialize all countries
+
+With `SYNC_SCHEDULER_ENABLED=true` (the template default), starting the services is enough — the sync service automatically runs the resumable initial import and retries failures with backoff:
+
+```bash
+/root/address/app/ops/start.sh
+```
+
+To run the initial import in the foreground first instead (the supervisor must be stopped), use:
 
 ```bash
 /root/address/app/ops/initial-sync.sh
 tail -f /root/address/logs/initial-sync.log
 ```
 
-The job runs in the background. Each country is validated and published independently, and completed cache entries are reusable after a restart. Runtime depends on VPS CPU, storage, network, and upstream availability. The API and scheduler start after a successful initial run.
+Each country is validated and published independently, and completed cache entries are reusable after a restart. Runtime depends on VPS CPU, storage, network, and upstream availability (typically several hours to more than a day). The API serves whatever countries are already published while the import continues.
 
-### 5. Verify the services
+### 6. Verify the services
 
 ```bash
 /root/address/app/ops/status.sh
@@ -187,8 +207,8 @@ Expose only HTTP/HTTPS in the firewall. Keep the API and sync-control listeners 
 
 ## Synchronization and operations
 
-- The initial job processes all 27 countries and resumes completed work.
-- The steady-state scheduler checks at 03:00 UTC and updates at most one due country per day.
+- The initial job covers the 26 ETL countries (China is synchronized separately by the API process) and resumes completed work.
+- The steady-state scheduler requires `SYNC_SCHEDULER_ENABLED=true`; it checks at 03:00 UTC and updates at most one due country per day.
 - Each successful country snapshot becomes due again after 30 days.
 - Failed snapshots never replace the current active data.
 - Raw source files are removed after publication unless retention is explicitly enabled.
@@ -199,14 +219,21 @@ Expose only HTTP/HTTPS in the firewall. Keep the API and sync-control listeners 
 /root/address/app/ops/stop.sh
 /root/address/app/ops/status.sh
 
-# Consistent SQLite backup
+# PostgreSQL custom-format backup
 /root/address/app/ops/backup.sh
 
 # Restore a backup stored under /root/address/backups
-/root/address/app/ops/restore.sh /root/address/backups/ADDRESS_BACKUP.sqlite
+/root/address/app/ops/restore.sh /root/address/backups/ADDRESS_BACKUP.dump
 ```
 
-The project supervisor is process-based and does not install systemd or cron entries. Connect `ops/start.sh` to the VPS's existing boot mechanism when automatic restart after a host reboot is required.
+Backup notes:
+
+- `backup.sh` uses `pg_dump --format=custom`; the restore script uses `pg_restore --clean --if-exists`.
+- Exclude `data/staging` (`ADDRESS_SYNC_CACHE_DIR`) from any backup: it holds only re-downloadable source artifacts and can be tens of GiB during an import.
+- A single backup contains address tables, control tables, encrypted credentials, synchronization state, and audit data. Keep files at mode `600` and verify them periodically with `pg_restore --list`.
+- PostgreSQL uses `max_connections=256`; the application pool defaults to maximum 64 and minimum 4, configurable through `POSTGRES_POOL_MAX` and `POSTGRES_POOL_MIN`.
+
+The project supervisor (`ops/supervisor.mjs`, started by `ops/start.sh`) runs and restarts two processes: the API server (`server/api/server.ts`, port `8787`) and the sync service (`server/sync/index.mjs`, port `8791`). It is process-based and does not install systemd or cron entries. Connect `ops/start.sh` to the VPS's existing boot mechanism when automatic restart after a host reboot is required.
 
 ## Deploy subsequent commits
 

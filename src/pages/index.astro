@@ -6,13 +6,14 @@ const fallback = '/en/';
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
-    <meta http-equiv="refresh" content={`0;url=${fallback}`} />
-    <title>Real Address Generator</title>
+    <title>Real Residential Address Generator</title>
   </head>
   <body>
     <a href={fallback}>Continue</a>
     <script is:inline>
-      const target = navigator.language.toLowerCase().startsWith('zh') ? '/zh-CN/' : '/en/';
+      const supported=['en','zh-CN','zh-TW','ja','ko','de','fr','es','pt'];
+      const resolve=(values)=>{for(const source of values){const tag=source.replace('_','-').toLowerCase();const exact=supported.find((value)=>value.toLowerCase()===tag);if(exact)return exact;if(/^zh-(hant|tw|hk|mo)/.test(tag))return 'zh-TW';if(tag.startsWith('zh'))return 'zh-CN';const base=supported.find((value)=>value.toLowerCase()===tag.split('-')[0]);if(base)return base;}return 'en'};
+      const target=`/${resolve(navigator.languages||[navigator.language])}/${location.search}${location.hash}`;
       location.replace(target);
     </script>
   </body>

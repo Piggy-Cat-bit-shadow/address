@@ -5,14 +5,13 @@
 //   admin1/street/houseNumber emptiness, script sanity (no Cyrillic in CN, no
 //   Han in RU, etc.). Fails (exit 1) when any country exceeds its defect ratio.
 //
-// Usage: node scripts/validate-address-quality.mjs [DB_PATH] [COUNTRY...]
+// Usage: node scripts/validate-address-quality.mjs [COUNTRY...]
 
-import { DatabaseSync } from 'node:sqlite';
+import { openPostgresDatabase } from '../server/database/postgres.mjs';
 import { CatalogReverseGeocoder } from '../server/sync/catalog-reverse-geocoder.mjs';
 import { postcodePatterns } from '../src/domain/postcode-patterns.mjs';
 
-const dbPath = process.argv[2] || process.env.ADDRESS_DB_PATH || 'data/address.sqlite';
-const requested = process.argv.slice(3).map((code) => code.toUpperCase());
+const requested = process.argv.slice(2).map((code) => code.toUpperCase());
 const anchoredCountries = ['CN'];
 const SAMPLE = 4000;
 const MAX_DEFECT_RATIO = 0.1;
@@ -29,22 +28,15 @@ const forbiddenStreetScript = {
   RU: han, DE: han, FR: han, IT: han, ES: han, NL: han, GB: han, US: han, CA: han, AU: han, BR: han
 };
 
-const wrap = (db) => ({
-  prepare(sql) {
-    const statement = db.prepare(sql);
-    return { bind(...args) { return { all() { return { results: statement.all(...args) }; } }; } };
-  }
-});
-
 const anchoredCheck = async (db, country) => {
-  const geocoder = await CatalogReverseGeocoder.load(wrap(db), country);
+  const geocoder = await CatalogReverseGeocoder.load(db, country);
   if (!geocoder.hierarchyReady) {
     console.log(`[${country}] catalog hierarchy not ready — anchored check skipped`);
     return false;
   }
   const cityNames = new Set(geocoder.cityTier.map((city) => String(city.native_name || '').trim()).filter(Boolean));
-  const rows = db.prepare(`SELECT admin1, locality, district FROM address_pool
-    WHERE country_code = ? AND active = 1 ORDER BY random_key LIMIT ${SAMPLE}`).all(country);
+  const rows = (await db.prepare(`SELECT admin1, locality, district FROM address_pool
+    WHERE country_code = ? AND active = 1 ORDER BY random_key LIMIT ${SAMPLE}`).bind(country).all()).results;
   let defects = 0;
   const samples = [];
   for (const row of rows) {
@@ -64,13 +56,13 @@ const anchoredCheck = async (db, country) => {
   return failed;
 };
 
-const generalCheck = (db, country) => {
+const generalCheck = async (db, country) => {
   // Sample only rows the read layer can serve (mirrors completenessClause), so
   // the gate measures user-visible quality rather than dead rows the API skips.
-  const rows = db.prepare(`SELECT admin1, locality, postal_locality, district, street, house_number, postcode
+  const rows = (await db.prepare(`SELECT admin1, locality, postal_locality, district, street, house_number, postcode
     FROM address_pool WHERE country_code = ? AND active = 1
       AND (locality <> '' OR (postal_locality <> '' AND postal_locality <> street) OR district <> '' OR country_code IN ('SG'))
-    ORDER BY random_key LIMIT ${SAMPLE}`).all(country);
+    ORDER BY random_key LIMIT ${SAMPLE}`).bind(country).all()).results;
   if (!rows.length) {
     console.log(`[${country}] general skip — no rows`);
     return false;
@@ -117,16 +109,16 @@ const generalCheck = (db, country) => {
 };
 
 const run = async () => {
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const db = await openPostgresDatabase({ migrate: false });
   const countries = requested.length ? requested : ALL_COUNTRIES;
   let failed = false;
   for (const country of countries) {
     if (anchoredCountries.includes(country)) {
       failed = (await anchoredCheck(db, country)) || failed;
     }
-    failed = generalCheck(db, country) || failed;
+    failed = (await generalCheck(db, country)) || failed;
   }
-  db.close();
+  await db.close();
   if (failed) process.exit(1);
 };
 

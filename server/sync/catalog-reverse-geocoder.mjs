@@ -9,6 +9,7 @@
 // mistaken for a city.
 
 const RADIANS = Math.PI / 180;
+const GRID_DEGREES = 1;
 
 import { pinyin } from 'pinyin-pro';
 
@@ -78,6 +79,17 @@ const ANCHOR_CONFIG = {
 };
 
 const finiteCoord = (entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude);
+const gridCell = (latitude, longitude) => `${Math.floor(latitude / GRID_DEGREES)}:${Math.floor(longitude / GRID_DEGREES)}`;
+const spatialIndex = (entries) => {
+  const index = new Map();
+  for (const entry of entries) {
+    const key = gridCell(entry.latitude, entry.longitude);
+    const bucket = index.get(key) || [];
+    bucket.push(entry);
+    index.set(key, bucket);
+  }
+  return index;
+};
 
 export class CatalogReverseGeocoder {
   constructor(countryCode, regions, cities) {
@@ -116,6 +128,12 @@ export class CatalogReverseGeocoder {
     this.cities = settlementPool;
     this.cityTier = settlementPool.filter((city) => cityTierTypes.has(String(city.type || '').toLowerCase()));
     this.districtTier = settlementPool.filter((city) => districtTierTypes.has(String(city.type || '').toLowerCase()));
+    this.spatialIndexes = new Map([
+      [this.regions, spatialIndex(this.regions)],
+      [this.cities, spatialIndex(this.cities)],
+      [this.cityTier, spatialIndex(this.cityTier)],
+      [this.districtTier, spatialIndex(this.districtTier)]
+    ]);
   }
 
   static async load(database, countryCode) {
@@ -140,11 +158,27 @@ export class CatalogReverseGeocoder {
     return this.cityTier.length > 0 && this.regions.length > 0;
   }
 
-  nearestFrom(pool, latitude, longitude, maxDegrees) {
+  nearestFrom(pool, latitude, longitude, maxDegrees, predicate) {
     if (!pool?.length) return null;
+    const index = this.spatialIndexes?.get(pool);
+    let candidates = pool;
+    if (index) {
+      candidates = [];
+      const latitudeCells = Math.ceil(maxDegrees / GRID_DEGREES) + 1;
+      const minimumCosine = Math.max(0.05, Math.cos(Math.min(89.9, Math.abs(latitude) + maxDegrees) * RADIANS));
+      const longitudeCells = Math.ceil(maxDegrees / minimumCosine / GRID_DEGREES) + 1;
+      const latitudeCell = Math.floor(latitude / GRID_DEGREES);
+      const longitudeCell = Math.floor(longitude / GRID_DEGREES);
+      for (let lat = latitudeCell - latitudeCells; lat <= latitudeCell + latitudeCells; lat += 1) {
+        for (let lon = longitudeCell - longitudeCells; lon <= longitudeCell + longitudeCells; lon += 1) {
+          candidates.push(...(index.get(`${lat}:${lon}`) || []));
+        }
+      }
+    }
     let best = null;
     let bestScore = Infinity;
-    for (const entry of pool) {
+    for (const entry of candidates) {
+      if (predicate && !predicate(entry)) continue;
       const score = distanceScore(latitude, longitude, entry.latitude, entry.longitude);
       if (score < bestScore) {
         bestScore = score;
@@ -199,13 +233,13 @@ export class CatalogReverseGeocoder {
     const municipal = String(region.type || '').toLowerCase() === 'municipality';
     const inRegion = (entry) => entry.region_id == null || entry.region_id === region.id;
     const namedDistrict = (entry) => inRegion(entry) && String(entry.native_name || '').trim() !== '';
-    const district = this.nearestFrom(this.districtTier.filter(namedDistrict), latitude, longitude, districtRadius);
+    const district = this.nearestFrom(this.districtTier, latitude, longitude, districtRadius, namedDistrict);
     // Municipality: the region itself is the city. Otherwise use the nearest
     // prefecture city that belongs to the resolved region.
     const namedCity = (entry) => inRegion(entry) && String(entry.native_name || '').trim() !== '';
     const city = municipal
       ? null
-      : (anchorCity && namedCity(anchorCity) ? anchorCity : this.nearestFrom(this.cityTier.filter(namedCity), latitude, longitude, cityRadius * 1.5));
+      : (anchorCity && namedCity(anchorCity) ? anchorCity : this.nearestFrom(this.cityTier, latitude, longitude, cityRadius * 1.5, namedCity));
     if (!municipal && !city) return null;
     return {
       admin1: region.native_name || region.name || '',

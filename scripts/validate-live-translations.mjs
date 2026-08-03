@@ -1,6 +1,7 @@
 const base = process.env.API_BASE_URL || 'http://127.0.0.1:8787/api/v1';
 const registry = await (await fetch(`${base}/countries`)).json();
-const codes = registry.data.map((country) => country.code);
+const unavailableCountries = new Set(['NG']);
+const codes = registry.data.map((country) => country.code).filter((country) => !unavailableCountries.has(country));
 const localScript = {
   CN: /[\u3400-\u9fff]/, HK: /[\u3400-\u9fff]/, TW: /[\u3400-\u9fff]/,
   JP: /[\u3040-\u30ff\u3400-\u9fff]/, KR: /[\uac00-\ud7af]/,

@@ -1,5 +1,5 @@
 import regionData from './regions.json';
-import type { CountryCode, LocationOption } from './types';
+import type { CountryCode, Locale, LocationOption } from './types';
 
 interface RegionRecord {
   countryCode: CountryCode;
@@ -15,6 +15,27 @@ const usStateCodes = new Set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY
 
 const normalize = (value: string): string => value.normalize('NFKD').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
 
+const distinctLabels = (values: Array<string | undefined>): string[] => {
+  const seen = new Set<string>();
+  return values.filter((value): value is string => {
+    const key = normalize(value || '');
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+export const locationOptionLabel = (option: LocationOption, locale: Locale): string => {
+  const english = option.en || option.value || option.label;
+  if (locale === 'en') return english;
+  const localized = locale === 'zh-CN'
+    ? option.zhCN
+    : locale === 'zh-TW'
+      ? option.native || option.zhCN
+      : option.native || option.zhCN;
+  return distinctLabels([english, localized]).join(' · ') || option.label;
+};
+
 export const regionsForCountry = (countryCode: CountryCode, query = ''): LocationOption[] => {
   const needle = normalize(query);
   return records
@@ -23,7 +44,7 @@ export const regionsForCountry = (countryCode: CountryCode, query = ''): Locatio
       const value = countryCode === 'CN' ? region.native : region.name;
       const abbreviation = commonAbbreviations.has(countryCode) && region.code ? `（${region.code}）` : '';
       const label = countryCode === 'CN' ? region.zh : `${region.name}${abbreviation}${abbreviation ? '' : ' '}${region.zh}`;
-      return { value, label };
+      return { value, label, native: region.native, en: region.name, zhCN: region.zh, regionCode: region.code };
     })
     .filter((option) => !needle || normalize(`${option.value} ${option.label}`).includes(needle))
     .sort((left, right) => left.label.localeCompare(right.label, countryCode === 'CN' ? 'zh-CN' : 'en'));

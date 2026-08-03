@@ -1,13 +1,13 @@
 import { hashSeed } from '../../../src/domain/generator';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
-import type { SqliteDatabase } from '../../database/sqlite.mjs';
+import type { Database } from '../../database/database.mjs';
 import type { VerifiedAddress } from '../../../src/domain/types';
 
 const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
 const toTraditionalHan = createTraditionalizer({ from: 'cn', to: 'tw' });
 const hanScript = /\p{Script=Han}/u;
-const adminSuffix = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區)$/u;
+const adminSuffix = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
 // Distinct Han script/suffix variants of a place name for cross-script catalog matching.
 const hanVariants = (value: string | undefined): string[] => {
   const trimmed = String(value || '').trim();
@@ -25,6 +25,7 @@ export interface AddressFilters {
   regionId?: string;
   city?: string;
   cityId?: string;
+  district?: string;
   postcode?: string;
   postcodeId?: string;
 }
@@ -156,7 +157,7 @@ const catalogId = (value: string | undefined): number | undefined => {
 };
 
 const findRegion = async (
-  db: SqliteDatabase,
+  db: Database,
   country: string,
   value: string | undefined,
   stableId: number | undefined
@@ -181,7 +182,7 @@ const findRegion = async (
 interface CityIdentity { id: number; region_id: number | null }
 
 const findCity = async (
-  db: SqliteDatabase,
+  db: Database,
   country: string,
   value: string | undefined,
   regionId: number | undefined,
@@ -211,7 +212,7 @@ const findCity = async (
 };
 
 const selectAtOffset = async (
-  db: SqliteDatabase,
+  db: Database,
   countSql: string,
   selectSql: string,
   bindings: unknown[],
@@ -243,7 +244,7 @@ const distanceKm = (
 };
 
 export const resolveNearestCatalogTarget = async (
-  db: SqliteDatabase,
+  db: Database,
   country: string,
   coordinates: { latitude: number; longitude: number }
 ): Promise<NearestCatalogTarget | undefined> => {
@@ -295,7 +296,7 @@ export const resolveNearestCatalogTarget = async (
 };
 
 export const resolveCatalogTarget = async (
-  db: SqliteDatabase,
+  db: Database,
   country: string,
   filters: AddressFilters,
   seed: string

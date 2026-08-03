@@ -8,17 +8,17 @@
 瀏覽器
   -> Astro 靜態頁面 + React WebUI
   -> Hono Node.js API
-       -> SQLite WAL 地址池
-       -> SQLite RTree 座標索引
+       -> PostgreSQL transactional 地址池
+       -> PostgreSQL coordinate 座標索引
        -> 本地格式化與本地化
-       -> 可選實時服務
+       -> 僅已同步住宅地址池
   -> 同步 supervisor
        -> DuckDB 讀取 Overture GeoParquet
        -> pyosmium 讀取 Geofabrik/OSM PBF
        -> 驗證並原子發佈國家快照
 ```
 
-公開生成只查詢 active SQLite 中通過證據門禁的真實住宅記錄。實時服務需要通過 `LIVE_API_MODES` 或請求參數 `live=true` 顯式開啟，其候選記錄也執行相同的地址存在性和住宅證據門禁。
+公開生成和 IP 區域生成只查詢 active PostgreSQL 中通過證據門禁的真實住宅記錄。第三方平台僅由後台同步調用，公開生成請求不會訪問這些平台。
 
 地圖渲染與地址真實性驗證相互隔離。Google 使用座標預覽；高德使用專用 JS API Key 和同源 `/_AMapService` 代理。高德 JS 安全密鑰只以密文保存在控制數據庫，不進入瀏覽器構建產物或地圖配置響應。
 
@@ -30,7 +30,7 @@
 | `src/domain/` | 國家元數據、生成、格式化、本地化、資料與導出規則 |
 | `src/pages/` | 本地化 WebUI 與 API 文檔的 Astro 路由 |
 | `server/api/` | Hono 應用、數據倉庫與外部服務適配器 |
-| `server/database/` | SQLite Schema 與遷移入口 |
+| `server/database/` | PostgreSQL Schema 與遷移入口 |
 | `server/sync/` | 數據源適配、ETL、調度、快照發布與同步管理 API |
 | `scripts/` | 目錄生成、驗證、線上探測與發佈審計 |
 | `ops/` | Linux VPS 安裝、進程、備份、恢復與部署腳本 |
@@ -38,7 +38,7 @@
 
 ## 本地環境
 
-要求 Node.js 24 或更新版本。只有源數據同步需要 Python 3 和 `venv`。
+要求 Node.js 24 或更新版本。只有源數據同步需要 Python 3.10+（3.12 已驗證）和 `venv`；先執行 `pip install -r server/sync/requirements.txt`，並用 `PYTHON_BIN` 指向該解釋器。
 
 ```bash
 git clone https://github.com/daimon3332/address.git
@@ -49,18 +49,22 @@ npm run db:migrate
 npm run dev
 ```
 
-Astro 開發服務器將 `/api` 代理到 `127.0.0.1:8787` 的 Hono，將 `/sync-control` 代理到 `127.0.0.1:8791` 的本地同步服務。新遷移的數據庫只有表結構，不包含地址池。
+`npm run dev` 先構建一次 WebUI，再由 `127.0.0.1:8787` 的 Hono API 提供服務。需要實時編輯 UI 時，同時運行 `npm run dev:api` 和 `npm run dev:web`：`127.0.0.1:4321` 的 Astro 開發服務器把 `/api` 代理到 Hono，把 `/sync-control` 代理到 `127.0.0.1:8791` 的本地同步服務。
+
+新遷移的數據庫只有表結構，不包含地址池。本地開發和測試套件基於空 Schema 加 `scripts/fixtures/`、`tests/fixtures/` 中的小型夾具運行；生產 PostgreSQL 數據 不會離開伺服器（`data/` 被 Git 忽略，部署腳本會保留伺服器數據庫）。需要本地真實數據時，先導入目錄（`npm run data:catalog` 加 `npm run data:catalog:import`），再導入一個小國家，例如 `npm run data:address-pool:etl -- --manual --shard SG`。
 
 常用命令：
 
 | 命令 | 用途 |
 |---|---|
-| `npm run dev` | 同時以監聽模式運行 Astro 和 Hono |
-| `npm run dev:web` | 只運行 Astro |
+| `npm run dev` | 構建一次 WebUI，再以監聽模式運行 Hono API |
+| `npm run dev:web` | 只運行 Astro（端口 4321，代理 `/api`） |
 | `npm run dev:api` | 只運行 Hono |
-| `npm run db:migrate` | 創建或遷移本地 SQLite Schema |
+| `npm test` | 運行 Vitest 測試套件 |
+| `npm run db:migrate` | 創建或遷移本地 PostgreSQL Schema |
 | `npm run data:regions` | 更新內置地區元數據 |
-| `npm run data:catalog` | 同步位置目錄 |
+| `npm run data:catalog` | 下載並生成位置目錄種子 |
+| `npm run data:catalog:import` | 把目錄種子導入本地數據庫（任何地址導入前必需） |
 | `npm run data:address-pool:estimate` | 估算同步計劃 |
 | `npm run data:address-pool:sync:dry-run` | 只驗證 ETL 計劃，不發佈數據 |
 | `npm run data:address-pool:bootstrap` | 執行支持斷點續跑的全部國家首次導入 |
@@ -70,11 +74,11 @@ Astro 開發服務器將 `/api` 代理到 `127.0.0.1:8787` 的 Hono，將 `/sync
 
 把 `.env.example` 複製為被忽略的 `.env`。密鑰始終留在服務端。只有明確用於 Astro 公開環境的變量才應進入瀏覽器構建；第三方服務 Key 和 `SYNC_ADMIN_TOKEN` 必須保留在 API 或同步進程環境中。`AMAP_API_KEY` 是伺服器端 WebService 憑據；`AMAP_JS_API_KEY` 是獨立且受域名限制的瀏覽器加載 Key；`AMAP_JS_SECURITY_CODE` 僅由 `/_AMapService` 在伺服器端使用。
 
-常規開發不需要第三方 API Key。可選實時服務參見[部署文檔](DEPLOYMENT.zh-TW.md)。
+常規開發不需要第三方 API Key。可選同步平台參見[部署文檔](DEPLOYMENT.zh-TW.md)。
 
 ## 數據庫與同步
 
-SQLite 使用 WAL 模式，保存地址、三語本地化、來源證據、國家狀態和 RTree 座標。國家發佈是事務性的：候選快照通過驗證後才替換 active 數據，失敗的候選不會影響舊快照。
+PostgreSQL 使用事务和连接池，保存地址、三語本地化、來源證據、國家狀態和 座標索引。國家發佈是事務性的：候選快照通過驗證後才替換 active 數據，失敗的候選不會影響舊快照。
 
 同步來源：
 
@@ -82,7 +86,7 @@ SQLite 使用 WAL 模式，保存地址、三語本地化、來源證據、國�
 - Geofabrik 提供的 OpenStreetMap：pyosmium 流式讀取預篩選後的 PBF node 和 way。
 - 本地地區與位置目錄：約束選擇器並驗證行政區一致性。
 
-管線會過濾機構和非地址要素、去重、檢查住宅證據、驗證本地化組件並執行容量門禁。API 或同步任務運行時不要手工修改 `data/address.sqlite`。
+管線會過濾機構和非地址要素、去重、檢查住宅證據、驗證本地化組件並執行容量門禁。API 或同步任務運行時不要手工修改 the production database。
 
 手工執行示例：
 

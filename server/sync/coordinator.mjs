@@ -19,6 +19,7 @@ export class SyncCoordinator {
     now = () => new Date(),
     idFactory = randomUUID,
     lockStaleMs = 5 * 60 * 1000,
+    jobTimeoutMs = 3 * 60 * 60_000,
     processIsAlive = (pid) => {
       try {
         process.kill(pid, 0);
@@ -35,6 +36,7 @@ export class SyncCoordinator {
     this.now = now;
     this.idFactory = idFactory;
     this.lockStaleMs = lockStaleMs;
+    this.jobTimeoutMs = jobTimeoutMs;
     this.processIsAlive = processIsAlive;
     this.currentJob = null;
     this.currentTask = null;
@@ -63,6 +65,8 @@ export class SyncCoordinator {
       startedAt: null,
       completedAt: null,
       releaseId: null,
+      heartbeatAt: null,
+      deadlineAt: null,
       shards: [...new Set(shards)],
       error: null
     };
@@ -90,14 +94,34 @@ export class SyncCoordinator {
   }
 
   async execute(job, lock) {
+    const abort = new AbortController();
+    let timeout;
     const heartbeat = setInterval(() => {
-      void this.writeLock(lock, job.id).catch(() => {});
-    }, 60_000);
+      job.heartbeatAt = this.now().toISOString();
+      void Promise.all([this.writeLock(lock, job.id), this.writeJob(job)]).catch(() => {});
+    }, 15_000);
     heartbeat.unref?.();
     try {
-      Object.assign(job, { status: 'running', phase: 'build-and-publish', startedAt: this.now().toISOString() });
+      const startedAt = this.now();
+      Object.assign(job, {
+        status: 'running',
+        phase: 'build-and-publish',
+        startedAt: startedAt.toISOString(),
+        heartbeatAt: startedAt.toISOString(),
+        deadlineAt: new Date(startedAt.getTime() + this.jobTimeoutMs).toISOString()
+      });
       await this.writeJob(job);
-      const result = await this.runSync({ id: job.id, trigger: job.trigger, shards: job.shards });
+      const timeoutTask = new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(Object.assign(new Error(`Synchronization exceeded ${this.jobTimeoutMs}ms`), { code: 'SYNC_JOB_TIMEOUT' }));
+          queueMicrotask(() => abort.abort());
+        }, this.jobTimeoutMs);
+        timeout.unref?.();
+      });
+      const result = await Promise.race([
+        this.runSync({ id: job.id, trigger: job.trigger, shards: job.shards, signal: abort.signal }),
+        timeoutTask
+      ]);
       Object.assign(job, {
         status: 'succeeded',
         phase: 'published',
@@ -113,6 +137,8 @@ export class SyncCoordinator {
       });
     } finally {
       clearInterval(heartbeat);
+      clearTimeout(timeout);
+      abort.abort();
       try {
         await this.writeJob(job);
       } finally {

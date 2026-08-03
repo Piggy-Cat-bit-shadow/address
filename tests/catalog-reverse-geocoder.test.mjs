@@ -39,6 +39,25 @@ describe('catalog reverse geocoder', () => {
     expect(filled).toEqual({});
   });
 
+  it('limits nearest-city distance checks to nearby spatial buckets', () => {
+    let coordinateReads = 0;
+    const entries = Array.from({ length: 5000 }, (_, index) => {
+      const latitude = -80 + (index % 160);
+      const longitude = -170 + (Math.floor(index / 160) % 340);
+      return {
+        name: `City ${index}`, native_name: `City ${index}`, zh_name: '', region_id: null, type: 'city',
+        get latitude() { coordinateReads += 1; return latitude; },
+        get longitude() { coordinateReads += 1; return longitude; }
+      };
+    });
+    entries.push({ name: 'Nearby', native_name: 'Nearby', zh_name: '', region_id: null, type: 'city', latitude: 10.1, longitude: 20.1 });
+    const geocoder = new CatalogReverseGeocoder('US', [], entries);
+    coordinateReads = 0;
+
+    expect(geocoder.nearestCity(10, 20)?.name).toBe('Nearby');
+    expect(coordinateReads).toBeLessThan(200);
+  });
+
   it('replaces a Latin-script city with the Chinese name for Chinese countries', () => {
     const geocoder = new CatalogReverseGeocoder('CN', regions, cities);
     const record = { latitude: 22.56, longitude: 113.9, components: { admin1: 'Guangdong', locality: 'Shenzhen', postalLocality: '' } };
@@ -76,6 +95,21 @@ describe('catalog reverse geocoder', () => {
 });
 
 describe('coordinate-anchored hierarchy', () => {
+  it('applies hierarchy filters only to nearby spatial candidates', () => {
+    let nativeNameReads = 0;
+    const districts = Array.from({ length: 5000 }, (_, index) => ({
+      name: `District ${index}`,
+      get native_name() { nativeNameReads += 1; return `District ${index}`; },
+      zh_name: '', region_id: 1, type: 'district',
+      latitude: -80 + (index % 160), longitude: -170 + (Math.floor(index / 160) % 340)
+    }));
+    const geocoder = new CatalogReverseGeocoder('CN', regions, [...cities, ...districts]);
+    nativeNameReads = 0;
+
+    expect(geocoder.resolveHierarchy(22.54, 114.06, { sourceAdmin1: '广东省' })?.city).toBe('深圳');
+    expect(nativeNameReads).toBeLessThan(200);
+  });
+
   it('anchors a district-level point to its prefecture city, not the district', () => {
     const geocoder = new CatalogReverseGeocoder('CN', regions, cities);
     // Point in Xiang'an district must resolve city=厦门 (prefecture), district=翔安.

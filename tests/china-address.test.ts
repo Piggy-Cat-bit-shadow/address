@@ -3,6 +3,7 @@ import { formatAddressPresentation } from '../src/domain/address-format';
 import { countryByCode } from '../src/domain/countries';
 import { generateBundle } from '../src/domain/generator';
 import type { AddressComponents, VerifiedAddress } from '../src/domain/types';
+import { normalizeChinaDeliveryAddress, normalizeChinaProviderAddress } from '../server/china/quality';
 
 const now = new Date('2026-07-20T00:00:00.000Z');
 
@@ -57,28 +58,49 @@ const chinaAddress = (municipality = false): VerifiedAddress => {
 };
 
 describe('China address domain rules', () => {
+  it('removes duplicated administrative prefixes and navigation distances from provider addresses', () => {
+    expect(normalizeChinaProviderAddress('河北省保定市定兴县昌盛大街199号', {
+      province: '河北省', city: '保定市', district: '定兴县'
+    })).toBe('昌盛大街199号');
+    expect(normalizeChinaProviderAddress('北京市怀柔区雁栖镇十八路30号', {
+      province: '北京市', city: '北京市', district: '怀柔区', township: '雁栖镇'
+    })).toBe('十八路30号');
+    expect(normalizeChinaDeliveryAddress('金融大街55号西北方向120米电力局生活小区')).toBe('金融大街55号电力局生活小区');
+  });
+
+  it('does not remove a normal road name without an exact administrative prefix', () => {
+    expect(normalizeChinaProviderAddress('河北大街199号', {
+      province: '河北省', city: '保定市', district: '定兴县'
+    })).toBe('河北大街199号');
+  });
+
   it('shows postcode as a standalone field but keeps it out of filters and the complete address', () => {
     const schema = countryByCode.get('CN')!.addressSchema;
-    expect(schema.filters).toEqual(['region', 'city']);
+    expect(schema.filters).toEqual(['region', 'city', 'district']);
     expect(schema.resultFields.map(({ field }) => field)).toContain('postcode');
     expect(schema.resultFields.map(({ field }) => field).slice(0, 2)).toEqual(['buildingName', 'street']);
   });
 
-  it('formats the complete verified hierarchy without inventing indoor components', () => {
+  it('formats the verified hierarchy with explicitly synthetic China indoor components', () => {
     const address = chinaAddress();
     const bundle = generateBundle(address, true, 'cn-hierarchy-seed', undefined, now);
-    expect(bundle.generatedUnit).toBeUndefined();
+    expect(bundle.generatedUnit).toMatchObject({ provenance: 'synthetic', unitProvenance: 'synthetic' });
+    expect(Number(bundle.generatedUnit?.components.building)).toBeGreaterThanOrEqual(1);
+    expect(Number(bundle.generatedUnit?.components.building)).toBeLessThanOrEqual(3);
+    expect(Number(bundle.generatedUnit?.components.unit)).toBeGreaterThanOrEqual(1);
+    expect(Number(bundle.generatedUnit?.components.unit)).toBeLessThanOrEqual(3);
+    expect(bundle.generatedUnit?.components.room).toMatch(/^[2-6]0[1-4]$/u);
     const presented = bundle.address.components;
     expect(presented).toEqual(address.components);
     expect(bundle.address.coordinates).toEqual(address.coordinates);
     expect(bundle.address.unitProvenance).toBe('none');
-    expect(bundle.addressFormats.native.singleLine).toBe('河北省唐山市丰润区丰润镇文化路18号光明小区');
-    expect(bundle.addressFormats['zh-CN'].singleLine).toBe('河北省唐山市丰润区丰润镇文化路18号光明小区');
+    expect(bundle.addressFormats.native.singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants.native}`);
+    expect(bundle.addressFormats['zh-CN'].singleLine).toBe(`河北省唐山市丰润区丰润镇文化路18号光明小区${bundle.generatedUnit?.variants['zh-CN']}`);
 
     const english = bundle.addressFormats.en.singleLine;
     const englishCommunity = 'Guangming Residential Community';
     const ordered = [
-      englishCommunity, '18 Wenhua Road', 'Fengrun Town',
+      bundle.generatedUnit!.variants.en, englishCommunity, '18 Wenhua Road', 'Fengrun Town',
       'Fengrun District', 'Tangshan City', 'Hebei Province', 'CHINA'
     ];
     for (let index = 1; index < ordered.length; index += 1) {
@@ -93,7 +115,7 @@ describe('China address domain rules', () => {
     expect(searchQuery).toContain('文化路');
     expect(searchQuery).toContain('光明小区');
     expect(bundle.googleMaps.amapUrl).toContain('uri.amap.com/marker');
-    expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).generatedUnit).toBeUndefined();
+    expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).generatedUnit).toEqual(bundle.generatedUnit);
     expect(generateBundle(address, true, 'cn-hierarchy-seed', undefined, now).address.components).toEqual(presented);
   });
 

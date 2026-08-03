@@ -2,6 +2,11 @@
 set -eu
 . /root/address/app/ops/env.sh
 
+if command -v systemctl >/dev/null 2>&1 && systemctl cat address.service >/dev/null 2>&1; then
+  systemctl start address.service
+  exit 0
+fi
+
 pid_file="$RUNTIME/pids/supervisor.pid"
 if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
   exit 0

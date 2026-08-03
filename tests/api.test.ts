@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GeneratedBundle, LocationOption } from '../src/domain/types';
 import app from '../server/api/index';
-import { openDatabase } from '../server/database/sqlite.mjs';
+import { openTestDatabase } from './helpers/postgres-test-database.mjs';
+import { eligibleAddresses } from './fixtures/catalog';
 
 const overpassMock = (country: string, city: string, index = 1) => JSON.stringify({ elements: [{
   type: 'way', id: Number(`${country.charCodeAt(0)}${country.charCodeAt(1)}${index}`),
@@ -43,10 +44,8 @@ describe('synchronized address registry', () => {
       addressCount: 8, residentialCount: 8, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
     expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM address_pool_runtime address');
-    expect(statements[0]).toContain('COUNT(DISTINCT address.id)');
-    expect(statements[0]).toContain("address.evidence_type='address_existence'");
-    expect(statements[0]).toContain('address.residential_evidence=1');
+    expect(statements[0]).toContain('FROM sync_country_state');
+    expect(statements[0]).not.toContain('address_pool_runtime');
     expect(statements[1]).toContain('cn_communities_v2');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
@@ -66,7 +65,7 @@ describe('synchronized address registry', () => {
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ residentialAvailable: true });
   });
 
-  it('aggregates v2 counts from the active address pool', async () => {
+  it('reads v2 counts from the synchronized country summary', async () => {
     const statements: string[] = [];
     const addressDb = {
       prepare: (sql: string) => {
@@ -83,8 +82,7 @@ describe('synchronized address registry', () => {
 
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 3, residentialCount: 3 });
     expect(statements).toHaveLength(2);
-    expect(statements[0]).toContain('FROM address_pool_runtime address');
-    expect(statements[0]).toContain('datetime(address.expires_at) IS NOT NULL');
+    expect(statements[0]).toContain('FROM sync_country_state');
     expect(statements[1]).toContain('cn_communities_v2');
   });
 
@@ -103,12 +101,13 @@ describe('synchronized address registry', () => {
     expect(statements[0]).toContain('sync_country_state');
     expect(statements[0]).toContain('residential_coverage');
     expect(statements[0]).toContain('address_datasets');
+    expect(statements[0]).toContain('HAVING MAX(count)>0');
     expect(statements[0]).not.toContain('address_pool_runtime');
     expect(response.headers.get('Cache-Control')).toContain('max-age=30');
   });
 
   it('counts each publishable residential runtime address once and rejects stale or invalid records', async () => {
-    const database = openDatabase(':memory:');
+    const database = openTestDatabase(':memory:');
     const observedAt = '2026-07-01T00:00:00Z';
     try {
       await database.prepare(`INSERT INTO address_sources VALUES
@@ -154,6 +153,19 @@ describe('synchronized address registry', () => {
       await insertAddress('invalid-date', 'not-a-date', true);
       await insertAddress('no-residential-evidence', null, false);
 
+      expect((await database.prepare(`SELECT id,residential_evidence FROM address_pool_runtime
+        ORDER BY id`).all()).results).toEqual([
+        { id: 'expired', residential_evidence: 1 },
+        { id: 'invalid-date', residential_evidence: 1 },
+        { id: 'no-residential-evidence', residential_evidence: 0 },
+        { id: 'valid', residential_evidence: 1 }
+      ]);
+      expect(await database.prepare(`SELECT id FROM address_pool_runtime WHERE id='valid'
+        AND expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+        AND expires_at::timestamptz > ?::timestamptz`).bind(new Date().toISOString()).first('id')).toBe('valid');
+      await database.prepare(`INSERT INTO sync_country_state(country_code,status,address_count,residential_count,updated_at)
+        VALUES ('US','ready',1,1,?) ON CONFLICT(country_code) DO UPDATE SET
+        status='ready',address_count=1,residential_count=1,updated_at=excluded.updated_at`).bind(observedAt).run();
       const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: database });
       const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number }> };
       expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({ addressCount: 1, residentialCount: 1 });
@@ -197,13 +209,37 @@ describe('synchronized address registry', () => {
     const regionPayload = await regions.json() as { data: { regions: LocationOption[] } };
     const cities = await app.request('/api/v1/locations/search?country=US&field=city', {}, { ALLOWED_ORIGIN: '*' });
     const cityPayload = await cities.json() as { data: { cities: LocationOption[] } };
-    expect(regionPayload.data.regions).toContainEqual({ value: 'California', label: 'California（CA）加利福尼亚州' });
+    expect(regionPayload.data.regions).toContainEqual(expect.objectContaining({
+      value: 'California', label: 'California（CA）加利福尼亚州', en: 'California', zhCN: '加利福尼亚州'
+    }));
     expect(cityPayload.data.cities.map((item) => item.value)).toContain('Los Angeles');
     expect(cityPayload.data.cities.map((item) => item.value)).toContain('Chicago');
   });
 });
 
 describe('pool-only and IP address generation', () => {
+  it('uses the unified database selector before legacy country-specific queries', async () => {
+    const address = eligibleAddresses('US', true, new Date('2026-01-01T00:00:00Z'))[0];
+    const pick = vi.fn(async () => ({
+      ready: true as const,
+      result: { address, source: 'address-pool-v2' as const, eligibleCount: 12_345 }
+    }));
+    const response = await app.request(
+      '/api/v1/generate?country=US&residential=true&seed=database-seed&requestId=database-request',
+      {},
+      { ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick } }
+    );
+    const payload = await response.json() as {
+      data: { eligibleCount: number; sourcesTried: string[]; result: GeneratedBundle }
+    };
+
+    expect(response.status).toBe(200);
+    expect(pick).toHaveBeenCalledWith(expect.objectContaining({ countryCode: 'US', seed: 'database-seed' }));
+    expect(payload.data.eligibleCount).toBe(12_345);
+    expect(payload.data.sourcesTried).toEqual(['address-pool-v2']);
+    expect(payload.data.result.address.id).toBe(address.id);
+  });
+
   it('does not enter an online provider when a regular synchronized pool misses', async () => {
     const response = await app.request('/api/v1/generate?country=US&residential=false&city=Chicago', {}, {
       ...mockBindings, OVERPASS_MOCK: overpassMock('US', 'Chicago')
@@ -213,28 +249,28 @@ describe('pool-only and IP address generation', () => {
     expect(payload.error.code).toBe('NO_POOL_COVERAGE');
   });
 
-  it('uses a live nearby provider only for an explicit IP-region request', async () => {
+  it('does not query a live address provider for an explicit IP-region request', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
       country_code: 'US', region: 'Dynamic Region', city: 'Chicago',
       latitude: 41.8781, longitude: -87.6298
     })));
-    const response = await app.request('/api/v1/generate?mode=ip-region&ip=8.8.8.8&residential=true&requestId=res-1', {}, {
+    const response = await app.request('/api/v1/generate?mode=ip-region&ip=8.8.8.8&residential=true&live=true&requestId=res-1', {}, {
       ...mockBindings, OVERPASS_MOCK: overpassMock('US', 'Chicago')
     });
-    const payload = await response.json() as { data: { requestId: string; mode: string; country: string; result: GeneratedBundle } };
-    expect(payload.data).toMatchObject({ requestId: 'res-1', mode: 'ip-region', country: 'US' });
-    expect(payload.data.result.address.evidence.some((item) => item.type === 'residential_use')).toBe(true);
+    const payload = await response.json() as { error: { code: string } };
+    expect(response.status).toBe(404);
+    expect(payload.error.code).toBe('IP_REGION_NO_RESULT');
   });
 
   it('returns prelocalized v2 rows without entering the localization network path', async () => {
-    const components = { houseNumber: '4-27-7', street: '永福', locality: '杉並区', admin1: '東京都', admin1Code: '13', postcode: '168-0064' };
+    const components = { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', admin1: '東京都', admin1Code: '13', postcode: '168-0064' };
     const row = {
       id: 'jp-hot', country_code: 'JP', admin1: '東京都', admin1_code: '13', locality: '杉並区', postal_locality: '杉並区',
-      district: '永福', postcode: '168-0064', street: '永福', house_number: '4-27-7', building_name: '', latitude: 35.676,
+      district: '永福', postcode: '168-0064', street: '永福四丁目', house_number: '4-27-7', building_name: '', latitude: 35.676,
       longitude: 139.642, native_language: 'ja', property_type: 'residential', generation: 'test', quality_score: 0.95,
       first_seen_at: '2026-07-15T00:00:00Z', expires_at: '2027-07-15T00:00:00Z',
       component_variants_json: JSON.stringify({ native: components, en: { ...components, street: 'Eifuku', locality: 'Suginami' }, 'zh-CN': { ...components, locality: '杉并区' } }),
-      address_variants_json: JSON.stringify({ native: '東京都杉並区永福4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福4-27-7' }),
+      address_variants_json: JSON.stringify({ native: '東京都杉並区永福四丁目4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福四丁目4-27-7' }),
       source_id: 'fixture', source_name: 'Fixture', source_url: 'https://example.test', source_record_id: 'jp-hot',
       observed_at: '2026-07-15T00:00:00Z', evidence_type: 'address_existence', dataset_id: 'fixture-v2', dataset_version: 'test',
       source_updated_at: '2026-07-15T00:00:00Z', imported_at: '2026-07-16T00:00:00Z', residential_evidence: 1

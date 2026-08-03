@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { runAddressEtl } from '../server/sync/address-etl.mjs';
 import { runAddressSync } from '../server/sync/run-address-sync.mjs';
 import { countryPlanStatus, planCountryShards } from '../server/sync/country-plan.mjs';
-import { SqliteCountryStateStore } from '../server/sync/sqlite-country-state.mjs';
-import { openDatabase } from '../server/database/sqlite.mjs';
+import { PostgresCountryStateStore } from '../server/sync/postgres-country-state.mjs';
+import { openTestDatabase } from './helpers/postgres-test-database.mjs';
 import {
   assertStorageBudget,
   evaluateStorageBudget,
@@ -120,13 +120,14 @@ describe('country sync planning', () => {
     directories.push(cacheDir);
     let persisted = { schemaVersion: 1, shards: {} };
     let materializations = 0;
+    let buildingAssets = [];
     const stateStore = {
       load: async () => structuredClone(persisted),
       save: async (value) => { persisted = structuredClone(value); }
     };
     const catalog = { schemaVersion: 1, shards: [{ ...shards[0], source: { id: 'fixture' } }] };
     const adapters = {
-      discover: async () => ({ adapter: 'overture', version: 'fixture-v1', sourceBytes: 0 }),
+      discover: async () => ({ adapter: 'overture', version: 'fixture-v1', sourceBytes: 0, buildingAssets }),
       materialize: async () => {
         materializations += 1;
         return { file: resolve(cacheDir, 'fixture.jsonl'), format: 'overture-jsonl', checksum: 'a'.repeat(64), cacheBytes: 0 };
@@ -135,7 +136,9 @@ describe('country sync planning', () => {
     const importer = {
       importShard: async ({ shard, discovery }) => {
         throw Object.assign(new Error(`Shard ${shard.id} produced no valid addresses`), {
-          code: 'SOURCE_QUALITY_FAILED', failureSignature: discovery.failureSignature
+          code: 'SOURCE_QUALITY_FAILED', failureSignature: discovery.failureSignature,
+          rejectionReasons: { missing_residential_evidence: 4 },
+          metrics: { candidateCount: 0, rejectedCount: 4, rejectionReasons: { missing_residential_evidence: 4 } }
         });
       }
     };
@@ -143,18 +146,57 @@ describe('country sync planning', () => {
     await expect(runAddressEtl({ cacheDir, dataRoot: cacheDir, catalog, adapters, importer, stateStore,
       syncMode: 'manual', measureStorage: async () => 0 })).rejects.toThrow('Address sync failed for 1 country shard');
     expect(persisted.shards['fixture-us']).toMatchObject({
-      errorCode: 'SOURCE_QUALITY_FAILED', failureSignature: expect.stringContaining('fixture-v1')
+      errorCode: 'SOURCE_QUALITY_FAILED',
+      failureSignature: expect.stringMatching(/fixture-v1:residential-buildings=0:building-assets=0:import=strict-residential-v22:policy=/u),
+      rejectionReasons: { missing_residential_evidence: 4 },
+      metrics: { candidateCount: 0, rejectedCount: 4 }
     });
 
     const repeated = await runAddressEtl({ cacheDir, dataRoot: cacheDir, catalog, adapters, importer, stateStore,
       syncMode: 'manual', measureStorage: async () => 0 });
     expect(materializations).toBe(1);
     expect(repeated.reports).toContainEqual(expect.objectContaining({ status: 'source-quality-failed', skipped: true }));
+
+    const unavailableSignature = persisted.shards['fixture-us'].failureSignature;
+    buildingAssets = ['https://example.test/buildings.parquet'];
+    await expect(runAddressEtl({ cacheDir, dataRoot: cacheDir, catalog, adapters, importer, stateStore,
+      syncMode: 'manual', measureStorage: async () => 0 })).rejects.toThrow('Address sync failed for 1 country shard');
+    expect(materializations).toBe(2);
+    expect(persisted.shards['fixture-us'].failureSignature).not.toBe(unavailableSignature);
+    expect(persisted.shards['fixture-us'].failureSignature).toContain('residential-buildings=1:building-assets=1');
   });
 
-  it('persists 30-day country state in SQLite without double-counting repeated failures', async () => {
-    const database = openDatabase(':memory:');
-    const store = new SqliteCountryStateStore({ database, shards });
+  it('retains snapshot rejection diagnostics in failed reports', async () => {
+    const cacheDir = resolve('.data-cache', 'country-plan-tests', randomUUID());
+    directories.push(cacheDir);
+    let persisted = { schemaVersion: 1, shards: {} };
+    const stateStore = {
+      load: async () => structuredClone(persisted),
+      save: async (value) => { persisted = structuredClone(value); }
+    };
+    const catalog = { schemaVersion: 1, shards: [{ ...shards[0], source: { id: 'fixture' } }] };
+    const metrics = { candidateCount: 1, previousCount: 10, rejectionReasons: { invalid_postcode: 3 } };
+    await expect(runAddressEtl({
+      cacheDir, dataRoot: cacheDir, catalog, stateStore, syncMode: 'manual', measureStorage: async () => 0,
+      adapters: {
+        discover: async () => ({ adapter: 'overture', version: 'fixture-v1', sourceBytes: 0, buildingAssets: ['building'] }),
+        materialize: async () => ({ file: resolve(cacheDir, 'fixture.jsonl'), format: 'overture-jsonl', checksum: 'a'.repeat(64), cacheBytes: 0 })
+      },
+      importer: { importShard: async ({ discovery }) => {
+        throw Object.assign(new Error('degraded snapshot'), {
+          code: 'SNAPSHOT_QUALITY_FAILED', failureSignature: discovery.failureSignature,
+          rejectionReasons: metrics.rejectionReasons, metrics
+        });
+      } }
+    })).rejects.toThrow('Address sync failed for 1 country shard');
+    expect(persisted.shards['fixture-us']).toMatchObject({
+      errorCode: 'SNAPSHOT_QUALITY_FAILED', rejectionReasons: { invalid_postcode: 3 }, metrics
+    });
+  });
+
+  it('persists 30-day country state in PostgreSQL without double-counting repeated failures', async () => {
+    const database = openTestDatabase(':memory:');
+    const store = new PostgresCountryStateStore({ database, shards });
     const failed = {
       schemaVersion: 1,
       shards: {
@@ -176,26 +218,41 @@ describe('country sync planning', () => {
     database.close();
   });
 
-  it('adds source-quality state columns to an existing database', async () => {
-    const database = openDatabase(':memory:', { migrate: false });
-    await database.exec(`CREATE TABLE sync_country_state (
-      country_code TEXT PRIMARY KEY,
-      status TEXT NOT NULL DEFAULT 'pending',
-      last_success_at TEXT,
-      next_sync_at TEXT,
-      active_dataset_id TEXT,
-      address_count INTEGER NOT NULL DEFAULT 0,
-      residential_count INTEGER NOT NULL DEFAULT 0,
-      failure_count INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      updated_at TEXT NOT NULL
-    )`);
-    const store = new SqliteCountryStateStore({ database, shards });
-    await expect(store.load()).resolves.toMatchObject({ shards: { 'fixture-us': { status: 'pending' } } });
-    const columns = (await database.prepare('PRAGMA table_info(sync_country_state)').all()).results.map(({ name }) => name);
-    expect(columns).toEqual(expect.arrayContaining(['source_version', 'failure_code', 'failure_signature']));
+  it('tracks multiple source shards for one country independently', async () => {
+    const database = openTestDatabase(':memory:');
+    const countryShards = [
+      { id: 'source-a-us', countryCode: 'US', intervalDays: 30 },
+      { id: 'source-b-us', countryCode: 'US', intervalDays: 30 }
+    ];
+    const store = new PostgresCountryStateStore({ database, shards: countryShards });
+    await store.save({ schemaVersion: 1, shards: {
+      'source-a-us': {
+        shardId: 'source-a-us', countryCode: 'US', intervalDays: 30, status: 'imported',
+        lastSuccessfulAt: '2026-07-01T00:00:00.000Z', lastChecked: '2026-07-01T00:00:00.000Z'
+      },
+      'source-b-us': {
+        shardId: 'source-b-us', countryCode: 'US', intervalDays: 30, status: 'failed',
+        lastChecked: '2026-07-02T00:00:00.000Z', error: 'fixture'
+      }
+    } });
+    expect((await store.load()).shards).toMatchObject({
+      'source-a-us': { status: 'imported' },
+      'source-b-us': { status: 'failed' }
+    });
+    expect(await database.prepare('SELECT status FROM sync_country_state WHERE country_code=?').bind('US').first('status'))
+      .toBe('failed');
+
+    await store.save({ schemaVersion: 1, shards: {
+      'source-b-us': {
+        shardId: 'source-b-us', countryCode: 'US', intervalDays: 30, status: 'imported',
+        lastSuccessfulAt: '2026-07-03T00:00:00.000Z', lastChecked: '2026-07-03T00:00:00.000Z'
+      }
+    } });
+    expect(await database.prepare('SELECT status FROM sync_country_state WHERE country_code=?').bind('US').first('status'))
+      .toBe('ready');
     database.close();
   });
+
 });
 
 describe('address storage budget', () => {
@@ -216,7 +273,7 @@ describe('address storage budget', () => {
       .toThrow(StorageBudgetExceededError);
   });
 
-  it('passes the soft-limit shadow policy into the SQLite-compatible importer contract', async () => {
+  it('passes the soft-limit shadow policy into the importer contract', async () => {
     const cacheDir = resolve('.data-cache', 'storage-budget-tests', randomUUID());
     directories.push(cacheDir);
     let receivedPolicy;

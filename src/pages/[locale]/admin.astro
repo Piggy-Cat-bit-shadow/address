@@ -1,0 +1,26 @@
+---
+import SyncAdmin from '../../components/SyncAdmin';
+import { localeStaticPaths } from '../../domain/locales';
+import type { Locale } from '../../domain/types';
+import '../../styles/admin.css';
+
+export const getStaticPaths = localeStaticPaths;
+const locale = Astro.params.locale as Locale;
+const titles: Record<Locale, string> = {
+  en: 'Address Admin Console', 'zh-CN': '地址管理系统', 'zh-TW': '地址管理系統', ja: 'Address 管理コンソール',
+  ko: 'Address 관리 콘솔', de: 'Address-Verwaltung', fr: "Console d’administration Address", es: 'Consola de administración Address', pt: 'Consola de administração Address'
+};
+---
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="robots" content="noindex,nofollow" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{titles[locale]}</title>
+  </head>
+  <body>
+    <SyncAdmin client:load locale={locale} />
+  </body>
+</html>

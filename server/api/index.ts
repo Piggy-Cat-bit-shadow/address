@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { SqliteDatabase } from '../database/sqlite.mjs';
+import type { Database } from '../database/database.mjs';
 import { countries, countryByCode, isCountryCode } from '../../src/domain/countries';
 import type { ClientContext } from '../../src/domain/client-context';
 import { DomainError, generateBundle } from '../../src/domain/generator';
@@ -15,25 +15,23 @@ import {
   type CatalogTarget,
   type AddressFilters
 } from './repositories/address-repository';
-import { completenessClause, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
-import { queryLocationCatalog } from './repositories/location-catalog';
-import { countChinaCommunities, pickChinaCommunityAddress } from './repositories/china-community';
-import { normalizeAddressFacts, validateAddressQuality } from '../../src/domain/address-quality.mjs';
-import { localizeAddress } from './services/address-localizer';
+import { loadAddressPoolV2AddressById, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
+import { queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
+import { countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
+import { isTranslatableLocale, translateAddressComponents } from './services/address-translation';
 import { clientContextFromRequest } from './services/client-context';
 import { lookupManualIpContext, ManualIpLookupError } from './services/ip-geolocation';
-import { fetchOverpassCandidates } from './services/overpass-provider';
-import { fetchExternalCandidates, type LocationField } from './services/external-providers';
+import type { RandomAddressService } from './services/random-address-service';
 
 interface Bindings {
-  LOCATION_DB?: SqliteDatabase;
-  ADDRESS_DB?: SqliteDatabase;
+  LOCATION_DB?: Database;
+  ADDRESS_DB?: Database;
+  RANDOM_ADDRESS_SERVICE?: RandomAddressService;
   IP_GEOLOCATION_API_URL?: string;
   IP_GEOLOCATION_FALLBACK_API_URL?: string;
   ALLOWED_ORIGIN?: string;
   HOT_POOL_COUNTRIES?: string;
   HOT_POOL_MIN_PER_SLOT?: string;
-  LIVE_API_MODES?: string;
   GOOGLE_GEOCODING_API_KEY?: string;
   GOOGLE_GEOCODING_MOCK?: string;
   OVERPASS_API_URL?: string;
@@ -51,20 +49,6 @@ interface Bindings {
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
-
-const qualityCandidates = (candidates: VerifiedAddress[]): VerifiedAddress[] => candidates.flatMap((candidate) => {
-  const quality = validateAddressQuality({ countryCode: candidate.countryCode, components: candidate.components });
-  if (!quality.valid) return [];
-  return [{
-    ...candidate,
-    components: quality.components,
-    componentVariants: {
-      native: normalizeAddressFacts(candidate.countryCode, candidate.componentVariants.native),
-      en: normalizeAddressFacts(candidate.countryCode, candidate.componentVariants.en),
-      'zh-CN': normalizeAddressFacts(candidate.countryCode, candidate.componentVariants['zh-CN'])
-    }
-  }];
-});
 
 const requestContext = (request: Request, env: Bindings): ClientContext => clientContextFromRequest(request, {
   socketIp: env.incoming?.socket?.remoteAddress,
@@ -89,9 +73,7 @@ const withRequestNetworkContext = (location: ClientContext, requestContext: Clie
   ...(requestContext.publicIp ? { publicIp: requestContext.publicIp } : {}),
   localDevelopment: requestContext.localDevelopment
 });
-const CACHE_SECONDS = 7 * 24 * 60 * 60;
 const LOCATION_CACHE_SECONDS = 30 * 24 * 60 * 60;
-const IP_LIVE_LOOKUP_TIMEOUT_MS = 20000;
 
 interface CacheEntry<T> { data: T; expiresAt: number }
 
@@ -123,7 +105,6 @@ class MemoryCache {
   }
 }
 
-const providerCache = new MemoryCache(500);
 const locationCache = new MemoryCache(2_000);
 const poolMetadataCache = new WeakMap<object, {
   expiresAt: number;
@@ -158,21 +139,6 @@ const serverTiming = (startedAt: number, timings: GenerateTimings): string => [
   ['localize', timings.localize]
 ].map(([name, duration]) => `${name};dur=${Number(duration).toFixed(1)}`).join(', ');
 
-const providerCacheKey = (country: string, residential: boolean, filters: AddressFilters, target?: CatalogTarget): string => {
-  const url = new URL('https://address.internal/provider-candidates');
-  url.searchParams.set('version', '8');
-  url.searchParams.set('country', country);
-  url.searchParams.set('residential', String(residential));
-  if (filters.q) url.searchParams.set('q', filters.q);
-  if (filters.region) url.searchParams.set('region', filters.region);
-  if (filters.city) url.searchParams.set('city', filters.city);
-  if (filters.postcode) url.searchParams.set('postcode', filters.postcode);
-  if (target) url.searchParams.set('target', target.bucket);
-  return url.href;
-};
-
-const readProviderCache = (key: string): VerifiedAddress[] | undefined => providerCache.get(key);
-
 export const filterProviderCandidates = (candidates: VerifiedAddress[]): VerifiedAddress[] =>
   candidates.filter((candidate) => !isVerifiedAddressNonResidential(candidate)
     && !matchesCustomBlacklist([
@@ -181,10 +147,6 @@ export const filterProviderCandidates = (candidates: VerifiedAddress[]): Verifie
       candidate.nativeAddress,
       candidate.components.street
     ]));
-
-const writeProviderCache = (key: string, candidates: VerifiedAddress[]): void => {
-  if (candidates.length) providerCache.set(key, candidates, CACHE_SECONDS);
-};
 
 const locationCacheKey = (country: string, field: string, residential: boolean, region: string | undefined, query: string): string => {
   const url = new URL('https://address.internal/location-options');
@@ -201,7 +163,7 @@ const readLocationCache = <T,>(key: string): T | undefined => locationCache.get(
 
 const writeLocationCache = (key: string, data: unknown): void => locationCache.set(key, data, LOCATION_CACHE_SECONDS);
 
-const addressPoolCounts = async (db: SqliteDatabase | undefined): Promise<Map<string, number>> => {
+const addressPoolCounts = async (db: Database | undefined): Promise<Map<string, number>> => {
   const counts = new Map<string, number>();
   if (!db) return counts;
   const cached = poolMetadataCache.get(db as object);
@@ -210,7 +172,9 @@ const addressPoolCounts = async (db: SqliteDatabase | undefined): Promise<Map<st
     const rows = await db.prepare('SELECT country_code, COUNT(*) AS total FROM address_pool WHERE active = 1 GROUP BY country_code')
       .all<{ country_code: string; total: number }>();
     for (const row of rows.results || []) counts.set(row.country_code, Number(row.total || 0));
-  } catch {}
+  } catch (error) {
+    if (process.env.NODE_ENV === 'test') throw error;
+  }
   poolMetadataCache.set(db as object, { ...poolMetadataCache.get(db as object), expiresAt: Date.now() + 30_000, v1: counts });
   return counts;
 };
@@ -244,24 +208,15 @@ interface HotPoolCoverage {
   lowWaterSlots: LowWaterSlotRow[];
 }
 
-const addressPoolV2Counts = async (db: SqliteDatabase | undefined): Promise<Map<string, AddressPoolV2Count>> => {
+const addressPoolV2Counts = async (db: Database | undefined): Promise<Map<string, AddressPoolV2Count>> => {
   const counts = new Map<string, AddressPoolV2Count>();
   if (!db) return counts;
   const cached = poolMetadataCache.get(db as object);
   if (cached?.v2 && cached.expiresAt > Date.now()) return cached.v2;
   try {
-    const rows = await db.prepare(`SELECT address.country_code,
-      COUNT(DISTINCT address.id) AS total, COUNT(DISTINCT address.id) AS residential
-      FROM address_pool_runtime address
-      WHERE address.evidence_type='address_existence' AND address.residential_evidence=1
-        AND address.active=1 AND address.property_type IN ('residential','apartment')
-        AND address.quality_score>=0.7
-        AND ${completenessClause('address.')}
-        AND (address.expires_at IS NULL OR (
-          datetime(address.expires_at) IS NOT NULL AND datetime(address.expires_at)>datetime(?)
-        ))
-      GROUP BY address.country_code`)
-      .bind(new Date().toISOString()).all<AddressPoolV2CountRow>();
+    const rows = await db.prepare(`SELECT country_code,address_count AS total,
+      residential_count AS residential FROM sync_country_state ORDER BY country_code`)
+      .all<AddressPoolV2CountRow>();
     for (const row of rows.results || []) {
       counts.set(row.country_code, { total: Number(row.total || 0), residential: Number(row.residential || 0) });
     }
@@ -271,7 +226,7 @@ const addressPoolV2Counts = async (db: SqliteDatabase | undefined): Promise<Map<
 };
 
 const hotPoolCoverage = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   requiredCountries: string[],
   minimumPerSlot: number,
   checkedAt: string
@@ -292,7 +247,8 @@ const hotPoolCoverage = async (
     const summary = await db.prepare(`${evaluated}
       SELECT country_code, COUNT(*) AS slot_count, SUM(active_count) AS active_count,
         SUM(CASE WHEN active_count >= minimum_count AND refresh_status = 'ready'
-          AND (expires_at IS NULL OR (datetime(expires_at) IS NOT NULL AND datetime(expires_at) > datetime(?))) THEN 1 ELSE 0 END) AS ready_slot_count
+          AND (expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+            THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END) THEN 1 ELSE 0 END) AS ready_slot_count
       FROM evaluated GROUP BY country_code ORDER BY country_code`)
       .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries, checkedAt).all<HotPoolCountryRow>();
     const lowWater = await db.prepare(`${evaluated}
@@ -300,7 +256,8 @@ const hotPoolCoverage = async (
         minimum_count, refresh_status, expires_at
       FROM evaluated
       WHERE active_count < minimum_count OR refresh_status <> 'ready'
-        OR (expires_at IS NOT NULL AND (datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime(?)))
+        OR (expires_at IS NOT NULL AND CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+          THEN expires_at::timestamptz <= ?::timestamptz ELSE TRUE END)
       ORDER BY (minimum_count - active_count) DESC, country_code, coverage_key LIMIT 100`)
       .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries, checkedAt).all<LowWaterSlotRow>();
     return {
@@ -313,37 +270,12 @@ const hotPoolCoverage = async (
   }
 };
 
-const loadDynamicCandidates = async (
-  country: NonNullable<ReturnType<typeof countryByCode.get>>,
-  residential: boolean,
-  filters: AddressFilters,
-  env: Bindings,
-  target?: CatalogTarget,
-  timeoutMs?: number,
-  useCache = true
-): Promise<{ candidates: VerifiedAddress[]; sources: string[] }> => {
-  const cacheKey = providerCacheKey(country.code, residential, filters, target);
-  if (useCache) {
-    const cached = filterProviderCandidates(readProviderCache(cacheKey) || []);
-    if (cached.length) return { candidates: cached, sources: ['edge-cache'] };
-  }
-  const external = await fetchExternalCandidates(country, residential, filters, {
-    amap: env.AMAP_API_KEY,
-    geoapify: env.GEOAPIFY_API_KEY,
-    oneMap: env.ONEMAP_ACCESS_TOKEN,
-    osDataHub: env.OS_DATA_HUB_API_KEY
-  }, undefined, undefined, target, timeoutMs);
-  const candidates = filterProviderCandidates(external.candidates);
-  if (useCache) writeProviderCache(cacheKey, candidates);
-  return { candidates, sources: external.sources };
-};
-
 app.use('*', async (context, next) => {
   if (context.req.method === 'OPTIONS') {
     return context.body(null, 204, {
       'Access-Control-Allow-Origin': context.env.ALLOWED_ORIGIN || '*',
-      'Access-Control-Allow-Methods': 'GET,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization,Content-Type'
     });
   }
   await next();
@@ -390,7 +322,7 @@ app.get('/api/v1/availability', async (context) => {
       SELECT country_code AS code,residential_count AS count FROM sync_country_state WHERE status='ready'
       UNION ALL SELECT country_code AS code,SUM(address_count) AS count FROM residential_coverage GROUP BY country_code
       UNION ALL SELECT country_code AS code,SUM(active_count) AS count FROM address_datasets WHERE status='active' GROUP BY country_code
-    ) GROUP BY code HAVING count>0 ORDER BY code`).all<{ code: string; count: number }>()).results;
+    ) GROUP BY code HAVING MAX(count)>0 ORDER BY code`).all<{ code: string; count: number }>()).results;
   context.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
   return context.json({ data: rows.map((row) => ({ code: row.code, residentialAvailable: Number(row.count) > 0 })) });
 });
@@ -414,8 +346,8 @@ app.get('/api/v1/locations/search', async (context) => {
   const config = countryByCode.get(country);
   if (!config) throw new DomainError('INVALID_COUNTRY', `Unknown country code: ${country}`);
   const fieldQuery = context.req.query('field') || 'city';
-  if (!['region', 'city', 'postcode'].includes(fieldQuery)) throw new DomainError('INVALID_FIELD', 'Unknown location field.');
-  const field = fieldQuery as LocationField;
+  if (!['region', 'city', 'district', 'postcode'].includes(fieldQuery)) throw new DomainError('INVALID_FIELD', 'Unknown location field.');
+  const field = fieldQuery as CatalogField;
   const query = context.req.query('q')?.trim() || '';
   const region = context.req.query('region') || undefined;
   const regionId = context.req.query('regionId') || undefined;
@@ -428,6 +360,7 @@ app.get('/api/v1/locations/search', async (context) => {
       country: config.code,
       field,
       query,
+      region,
       regionId,
       cityId,
       residential,
@@ -437,22 +370,24 @@ app.get('/api/v1/locations/search', async (context) => {
     const responseData = {
       regions: field === 'region' ? catalog.options : [],
       cities: field === 'city' ? catalog.options : [],
+      districts: field === 'district' ? catalog.options : [],
       postcodes: field === 'postcode' ? catalog.options : [],
       matches: catalog.options,
       total: catalog.total,
+      availableTotal: catalog.availableTotal,
       nextCursor: catalog.nextCursor,
       source: catalog.source
     };
-    context.header('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
+    context.header('Cache-Control', 'no-store');
     return context.json({ data: responseData });
   }
   if (field === 'region') {
     const regions = regionsForCountry(config.code, query);
     context.header('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
-    return context.json({ data: { regions, cities: [], postcodes: [], matches: regions } });
+    return context.json({ data: { regions, cities: [], districts: [], postcodes: [], matches: regions } });
   }
   const cacheKey = locationCacheKey(config.code, field, residential, region, query);
-  const cached = readLocationCache<{ regions: ReturnType<typeof locationOptions>; cities: ReturnType<typeof locationOptions>; postcodes: ReturnType<typeof locationOptions>; matches: ReturnType<typeof locationOptions> }>(cacheKey);
+  const cached = readLocationCache<{ regions: ReturnType<typeof locationOptions>; cities: ReturnType<typeof locationOptions>; districts: ReturnType<typeof locationOptions>; postcodes: ReturnType<typeof locationOptions>; matches: ReturnType<typeof locationOptions> }>(cacheKey);
   if (cached) {
     context.header('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
     return context.json({ data: cached });
@@ -467,6 +402,7 @@ app.get('/api/v1/locations/search', async (context) => {
   const responseData = {
     regions: locationOptions(data.regions),
     cities: locationOptions(data.cities),
+    districts: locationOptions([]),
     postcodes: locationOptions(data.postcodes),
     matches: locationOptions(data.matches)
   };
@@ -507,24 +443,24 @@ app.get('/api/v1/generate', async (context) => {
   const strategy = context.req.query('strategy') === 'instant' ? 'instant' : 'random';
   const requestId = context.req.query('requestId') || crypto.randomUUID();
   const mode = ipRegionMode ? 'ip-region' : residential ? 'residential' : 'address';
-  const liveApiModes = new Set(String(context.env.LIVE_API_MODES ?? 'ip-region')
-    .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
-  // Per-request opt-in via ?live=true always allows live lookup; otherwise the server-wide LIVE_API_MODES decides.
-  const liveRequested = ['true', '1'].includes((context.req.query('live') || '').toLowerCase());
-  const liveApiEnabled = (liveRequested || liveApiModes.has(mode)) && !(country.code === 'CN' && residential);
   const requestedFilters: AddressFilters = {
     q: context.req.query('q') || undefined,
     region: context.req.query('region') || undefined,
     regionId: context.req.query('regionId') || undefined,
     city: context.req.query('city') || undefined,
     cityId: context.req.query('cityId') || undefined,
+    district: context.req.query('district') || undefined,
     postcode: context.req.query('postcode') || undefined,
     postcodeId: context.req.query('postcodeId') || undefined
   };
+  if (requestedFilters.district && !country.addressSchema.filters.includes('district')) {
+    throw new DomainError('INVALID_LOCATION', `District filtering is not supported for ${countryCode}.`, 400);
+  }
   const filters: AddressFilters = ipRegionMode ? { q: requestedFilters.q } : requestedFilters;
 
   const hasLocationFilter = Boolean(
-    filters.region || filters.regionId || filters.city || filters.cityId || filters.postcode || filters.postcodeId
+    filters.region || filters.regionId || filters.city || filters.cityId
+    || filters.district || filters.postcode || filters.postcodeId
   );
   const ipCoordinates = ipContext?.latitude !== undefined && ipContext.longitude !== undefined
     ? { latitude: ipContext.latitude, longitude: ipContext.longitude }
@@ -563,98 +499,23 @@ app.get('/api/v1/generate', async (context) => {
   let filterMatchLevel: 'exact' | 'nearby' | 'region' | 'country' | undefined;
   let resolvedFilters = filters;
   let resolvedTarget = target;
-  if (ipRegionMode && ipCoordinates && liveApiEnabled) {
-    resolvedFilters = target?.city ? {
-      q: filters.q,
-      region: target.region,
-      city: target.city
-    } : target?.region ? {
-      q: filters.q,
-      region: target.region
-    } : ipLocationFilters;
-    const liveTarget: CatalogTarget | undefined = ipCoordinates ? {
-      ...(target || {
-        region: ipContext?.region,
-        regionCode: ipContext?.regionCode,
-        regionAliases: [ipContext?.region, ipContext?.regionCode].filter((value): value is string => Boolean(value)),
-        city: ipContext?.city,
-        cityAliases: [ipContext?.city].filter((value): value is string => Boolean(value)),
-        bucket: `ip-${country.code}`
-      }),
-      coordinates: ipCoordinates,
-      bucket: `ip-${country.code}-${ipCoordinates.latitude.toFixed(3)}-${ipCoordinates.longitude.toFixed(3)}`
-    } : target;
-    try {
-      const dynamic = await measureStage(timings, 'provider', () => loadDynamicCandidates(
-        country,
-        residential,
-        resolvedFilters,
-        context.env,
-        liveTarget,
-        IP_LIVE_LOOKUP_TIMEOUT_MS,
-        false
-      ));
-      candidates = qualityCandidates(dynamic.candidates);
-      sourcesTried.push(...dynamic.sources);
-      if (!candidates.length && ipCoordinates) {
-        sourcesTried.push('osm-overpass');
-        candidates = (await measureStage(timings, 'provider', () => fetchOverpassCandidates(
-          country,
-          residential,
-          resolvedFilters,
-          context.env.OVERPASS_API_URL,
-          context.env.PHOTON_API_URL,
-          context.env.OVERPASS_MOCK,
-          undefined,
-          undefined,
-          liveTarget,
-          IP_LIVE_LOOKUP_TIMEOUT_MS
-        )));
-        candidates = qualityCandidates(candidates);
-      }
-      if (candidates.length) {
-        ipMatchLevel = 'coordinate';
-        resolvedTarget = liveTarget;
-      }
-    } catch {
-      candidates = [];
-    }
-  }
-
-  if (!ipRegionMode && liveApiEnabled) {
-    try {
-      const dynamic = await measureStage(timings, 'provider', () => loadDynamicCandidates(
-        country,
-        residential,
+  let eligibleCount: number | undefined;
+  const pooled = await measureStage(timings, 'pool', async () => {
+    if (!ipRegionMode && context.env.RANDOM_ADDRESS_SERVICE) {
+      const indexed = await toleratePoolFailure(() => context.env.RANDOM_ADDRESS_SERVICE!.pick({
+        countryCode: country.code,
         filters,
-        context.env,
-        target
-      ));
-      candidates = qualityCandidates(dynamic.candidates);
-      sourcesTried.push(...dynamic.sources);
-    } catch {
-      candidates = [];
-    }
-  }
-
-  let liveCandidatesLocalized = false;
-  if (candidates.length) {
-    const localized: VerifiedAddress[] = [];
-    for (let attempt = 0; attempt < Math.min(12, candidates.length); attempt += 1) {
-      try {
-        localized.push(await measureStage(timings, 'localize', () =>
-          localizeAddress(orderedCandidate(candidates, seed, attempt), country, context.env)
-        ));
-        break;
-      } catch {
-        // A synchronized pool remains available when live localization infrastructure is degraded.
+        target,
+        seed
+      }));
+      if (indexed?.ready) {
+        if (!indexed.result) return undefined;
+        pooledSource = indexed.result.source;
+        filterMatchLevel = 'exact';
+        eligibleCount = indexed.result.eligibleCount;
+        return indexed.result.address;
       }
     }
-    candidates = localized;
-    liveCandidatesLocalized = localized.length > 0;
-  }
-
-  const pooled = candidates.length ? undefined : await measureStage(timings, 'pool', async () => {
     if (country.code === 'CN' && residential) {
       const community = await toleratePoolFailure(() => pickChinaCommunityAddress(
         context.env.ADDRESS_DB,
@@ -743,7 +604,7 @@ app.get('/api/v1/generate', async (context) => {
     throw new DomainError(
       ipRegionMode ? 'IP_REGION_NO_RESULT' : 'NO_POOL_COVERAGE',
       ipRegionMode
-        ? `No live or synchronized address is available for the IP region in ${countryCode}.`
+        ? `No synchronized address is available for the IP region in ${countryCode}.`
         : `No synchronized address is available for the selected area in ${countryCode}.`,
       404
     );
@@ -754,15 +615,12 @@ app.get('/api/v1/generate', async (context) => {
   const maxAttempts = Math.min(12, candidates.length);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const selected = orderedCandidate(candidates, seed, attempt);
-    const candidate = pooledSource || liveCandidatesLocalized
-      ? selected
-      : await measureStage(timings, 'localize', () => localizeAddress(selected, country, context.env));
-    result = generateBundle(candidate, residential, seed, undefined);
-    selectedCandidate = candidate;
+    result = generateBundle(selected, residential, seed, undefined);
+    selectedCandidate = selected;
     break;
   }
   if (!result) {
-    throw new DomainError('GOOGLE_ADDRESS_NOT_RESOLVED', 'No Google Maps result passed the exact address gate.', 404);
+    throw new DomainError('ADDRESS_NOT_RESOLVED', 'No synchronized address passed the publication gate.', 404);
   }
   context.header('Cache-Control', 'no-store');
   context.header('Server-Timing', serverTiming(startedAt, timings));
@@ -783,10 +641,47 @@ app.get('/api/v1/generate', async (context) => {
       residential,
       filters: resolvedFilters,
       sourcesTried,
+      ...(eligibleCount === undefined ? {} : { eligibleCount }),
       ...(ipRegionMode ? { ipMatchLevel, ipRegion } : { filterMatchLevel: filterMatchLevel || (candidates.length ? 'exact' : undefined) }),
       result
     }
   });
+});
+
+const TRANSLATION_RATE_LIMIT = 30;
+const translationRateBuckets = new Map<string, { count: number; resetAt: number }>();
+const translationRateLimited = (ip: string, now = Date.now()): boolean => {
+  const bucket = translationRateBuckets.get(ip);
+  if (!bucket || bucket.resetAt <= now) {
+    if (translationRateBuckets.size > 10_000) translationRateBuckets.clear();
+    translationRateBuckets.set(ip, { count: 1, resetAt: now + 60_000 });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > TRANSLATION_RATE_LIMIT;
+};
+
+app.post('/api/v1/address-translation', async (context) => {
+  const ip = requestContext(context.req.raw, context.env).publicIp || 'local';
+  if (translationRateLimited(ip)) {
+    context.header('Retry-After', '60');
+    return context.json({ error: { code: 'RATE_LIMITED', message: 'Too many translation requests.' } }, 429);
+  }
+  const body = await context.req.json().catch(() => undefined) as { addressId?: unknown; targetLocale?: unknown } | undefined;
+  const addressId = typeof body?.addressId === 'string' ? body.addressId.trim() : '';
+  const targetLocale = body?.targetLocale;
+  if (!addressId || addressId.length > 160 || !isTranslatableLocale(targetLocale)) {
+    throw new DomainError('INVALID_TRANSLATION_REQUEST', 'A pool addressId and a translatable targetLocale are required.', 400);
+  }
+  const address = await loadAddressPoolV2AddressById(context.env.ADDRESS_DB, addressId)
+    || await loadChinaCommunityAddressById(context.env.ADDRESS_DB, addressId);
+  if (!address) throw new DomainError('ADDRESS_NOT_FOUND', 'The address is not present in the synchronized pool.', 404);
+  const result = await translateAddressComponents(address, targetLocale, context.env, fetch);
+  context.header('Cache-Control', 'no-store');
+  if (result.status === 'translated') {
+    return context.json({ data: { components: result.components, lines: result.lines, singleLine: result.singleLine } });
+  }
+  return context.json({ data: result.status === 'unavailable' ? { unavailable: true } : { fallback: true } });
 });
 
 app.get('/api/v1/data-health', async (context) => {

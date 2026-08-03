@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v1.0
+        description: Release version, for example v2.0.0
         required: true
-        default: v1.0
+        default: v2.0.0
 
 permissions:
   contents: read
@@ -85,7 +85,7 @@ jobs:
           version='${{ steps.version.outputs.value }}'
           name="address-$version"
           mkdir -p "release/$name"
-          for path in .env.example LICENSE README.md README.zh-CN.md README.zh-TW.md astro.config.mjs package.json package-lock.json tsconfig.json config docs ops public scripts server src; do
+          for path in .env.example LICENSE README.md README.zh-CN.md README.zh-TW.md astro.config.mjs package.json package-lock.json tsconfig.json config docs image ops public scripts server src; do
             cp -a "$path" "release/$name/"
           done
           cp -a dist "release/$name/dist"
@@ -110,29 +110,30 @@ jobs:
       - name: Write bilingual release notes
         shell: bash
         run: |
-          cat > release/RELEASE_NOTES.md <<'NOTES'
-          ## Address v1.0
+          version='${{ steps.version.outputs.value }}'
+          cat > release/RELEASE_NOTES.md <<NOTES
+          ## Address $version
 
           ### New features
           - Self-hosted address and test-profile generation for 27 countries and regions.
-          - Source-language, English, and Simplified-Chinese address presentations.
-          - Evidence-backed residential mode, location filters, IP-nearby generation, and deterministic fallbacks.
-          - Resumable Overture/Geofabrik synchronization with SQLite WAL/RTree storage.
+          - Full-pool random selection, strict location filters, and persistent language preferences.
+          - Automated synchronization with multi-rule completion, bounded retries, and source-exhaustion handling.
+          - PostgreSQL storage, public coverage monitoring, and a complete administrator console.
 
           ### Quick start
-          Download either archive, verify it with `SHA256SUMS.txt`, then follow the VPS deployment section in the README. Address databases and private credentials are intentionally excluded.
+          Download either archive, verify it with \`SHA256SUMS.txt\`, then follow the deployment guide.
 
           ### 新功能
           - 支持 27 个国家和地区的自托管地址与测试资料生成。
-          - 提供原文、English、简体中文三种地址表示。
-          - 支持住宅证据、地区筛选、IP 就近生成和确定性回退。
-          - 使用 SQLite WAL/RTree，并支持 Overture/Geofabrik 断点续跑同步。
+          - 支持完整地址池随机选择、严格地区筛选和语言偏好记忆。
+          - 支持多规则完成判定、有限重试和来源耗尽处理的自动同步。
+          - 提供 PostgreSQL 存储、公开覆盖监控和完整管理员界面。
 
           ### 快速开始
-          下载任一压缩包，使用 `SHA256SUMS.txt` 校验，然后按照 README 的 VPS 部署章节操作。发布包不包含地址数据库或私人凭据。
+          下载任一压缩包，使用 \`SHA256SUMS.txt\` 校验，然后按照部署文档操作。
 
-          ### License and attribution / 许可证与来源
-          Project code is MIT-licensed. OpenStreetMap-derived data remains under ODbL and Overture records retain source-specific terms. No production database is included.
+          ### License / 许可证
+          Project source code is MIT-licensed. Upstream datasets retain their own licenses and attribution requirements.
           NOTES
       - name: Publish stable GitHub release
         shell: bash

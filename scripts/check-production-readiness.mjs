@@ -1,6 +1,4 @@
-import { existsSync, statSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
-import { resolve } from 'node:path';
+import { openPostgresDatabase } from '../server/database/postgres.mjs';
 import { parseArgs } from './lib/address-pool.mjs';
 
 const supportedCountries = [
@@ -15,7 +13,6 @@ const requiredTables = [
 ];
 const hardLimitBytes = 45 * 1024 ** 3;
 const args = parseArgs(process.argv.slice(2));
-const databasePath = resolve(String(args.database || process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite'));
 const countries = args.countries
   ? [...new Set(String(args.countries).split(',').map((value) => value.trim().toUpperCase()).filter(Boolean))]
   : supportedCountries;
@@ -28,7 +25,7 @@ const writeReport = ({ schemaVersion = 0, storageBytes = 0, perCountry = [], err
   console.log(JSON.stringify({
     status: errors.length ? 'degraded' : 'ready',
     checkedAt: new Date().toISOString(),
-    database: databasePath,
+    database: 'postgres',
     schemaVersion,
     storageBytes,
     hardLimitBytes,
@@ -38,40 +35,40 @@ const writeReport = ({ schemaVersion = 0, storageBytes = 0, perCountry = [], err
   if (errors.length) process.exitCode = 1;
 };
 
-if (!existsSync(databasePath)) {
-  writeReport({ errors: ['database file does not exist'] });
-} else {
-  let database;
-  try {
-    database = new DatabaseSync(databasePath, { readOnly: true });
-  const integrity = database.prepare('PRAGMA integrity_check').get()?.integrity_check;
-  const existingTables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(({ name }) => name));
+let database;
+try {
+  database = await openPostgresDatabase({ migrate: false });
+  const tables = await database.prepare(`SELECT table_name FROM information_schema.tables
+    WHERE table_schema='address'`).all();
+  const existingTables = new Set(tables.results.map(({ table_name }) => table_name));
   const missingTables = requiredTables.filter((table) => !existingTables.has(table));
-  const schemaVersion = missingTables.includes('schema_migrations')
-    ? 0
-    : Number(database.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get()?.version || 0);
-  const storageBytes = statSync(databasePath).size;
-  const perCountry = missingTables.includes('address_pool') || missingTables.includes('sync_country_state')
-    ? []
-    : countries.map((country) => {
-        const counts = database.prepare(`SELECT COUNT(*) AS total,
-          SUM(CASE WHEN property_type IN ('residential','apartment') AND residential_evidence=1 THEN 1 ELSE 0 END) AS residential
-          FROM address_pool_runtime WHERE country_code=?`).get(country);
-        const sync = database.prepare(`SELECT status,last_success_at,next_sync_at,failure_count,last_error
-          FROM sync_country_state WHERE country_code=?`).get(country);
-        return {
-          country,
-          total: Number(counts?.total || 0),
-          residential: Number(counts?.residential || 0),
-          syncStatus: sync?.status || 'pending',
-          lastSuccessAt: sync?.last_success_at || null,
-          nextSyncAt: sync?.next_sync_at || null,
-          failureCount: Number(sync?.failure_count || 0),
-          lastError: sync?.last_error || null
-        };
+  const schemaVersion = missingTables.includes('schema_migrations') ? 0 : Number(
+    await database.prepare('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations').first('version') || 0
+  );
+  const storageBytes = Number(await database.prepare(
+    'SELECT pg_database_size(current_database()) AS size'
+  ).first('size') || 0);
+  const perCountry = [];
+  if (!missingTables.includes('address_pool') && !missingTables.includes('sync_country_state')) {
+    for (const country of countries) {
+      const counts = await database.prepare(`SELECT COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE property_type IN ('residential','apartment') AND residential_evidence=1) AS residential
+        FROM address_pool_runtime WHERE country_code=?`).bind(country).first();
+      const sync = await database.prepare(`SELECT status,last_success_at,next_sync_at,failure_count,last_error
+        FROM sync_country_state WHERE country_code=?`).bind(country).first();
+      perCountry.push({
+        country,
+        total: Number(counts?.total || 0),
+        residential: Number(counts?.residential || 0),
+        syncStatus: sync?.status || 'pending',
+        lastSuccessAt: sync?.last_success_at || null,
+        nextSyncAt: sync?.next_sync_at || null,
+        failureCount: Number(sync?.failure_count || 0),
+        lastError: sync?.last_error || null
       });
+    }
+  }
   const errors = [
-    ...(integrity === 'ok' ? [] : [`SQLite integrity check returned ${String(integrity)}`]),
     ...missingTables.map((table) => `required table ${table} is missing`),
     ...(schemaVersion >= 1 ? [] : ['schema version is missing']),
     ...(storageBytes < hardLimitBytes ? [] : ['database reached the 45GB hard limit']),
@@ -82,10 +79,9 @@ if (!existsSync(databasePath)) {
     ...perCountry.filter(({ lastSuccessAt }) => !lastSuccessAt).map(({ country }) => `${country} has no successful synchronization timestamp`),
     ...perCountry.filter(({ nextSyncAt }) => !nextSyncAt).map(({ country }) => `${country} has no next synchronization timestamp`)
   ];
-    writeReport({ schemaVersion, storageBytes, perCountry, errors });
-  } catch (error) {
-    writeReport({ errors: [`database could not be checked: ${error instanceof Error ? error.message : String(error)}`] });
-  } finally {
-    database?.close();
-  }
+  writeReport({ schemaVersion, storageBytes, perCountry, errors });
+} catch (error) {
+  writeReport({ errors: [`database could not be checked: ${error instanceof Error ? error.message : String(error)}`] });
+} finally {
+  await database?.close();
 }

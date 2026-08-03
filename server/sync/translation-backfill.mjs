@@ -1,4 +1,4 @@
-import { translateValues, localizedFields, SqliteTranslationCache } from './address-etl.mjs';
+import { translateValues, localizedFields, PostgresTranslationCache } from './address-etl.mjs';
 
 const clean = (value) => String(value ?? '').replace(/\s+/gu, ' ').trim();
 const nonLatin = /[^\p{Script=Latin}\p{N}\p{P}\p{Z}]/u;
@@ -43,7 +43,7 @@ const pendingFields = (variants, nativeLanguage) => {
 
 // Scan cursor and failure backoff live per-process; a restart simply rescans
 // (already-translated rows are skipped quickly).
-const state = { cursor: 0, failedTicks: 0 };
+const state = { cursor: '', failedTicks: 0 };
 
 export const runTranslationBackfillBatch = async ({
   database,
@@ -58,20 +58,20 @@ export const runTranslationBackfillBatch = async ({
     state.failedTicks -= 1;
     return { scanned: 0, updated: 0, done: false, backoff: true };
   }
-  const cache = new SqliteTranslationCache(database);
+  const cache = new PostgresTranslationCache(database);
   const pending = [];
   let scanned = 0;
   while (pending.length < pendingLimit && scanned < scanLimit) {
-    const rows = (await database.prepare(`SELECT rowid AS rid, id, native_language, component_variants_json
-      FROM address_pool WHERE active = 1 AND native_language NOT LIKE 'en%' AND rowid > ? ORDER BY rowid LIMIT 500`)
+    const rows = (await database.prepare(`SELECT id, native_language, component_variants_json
+      FROM address_pool WHERE active = 1 AND native_language NOT LIKE 'en%' AND id > ? ORDER BY id LIMIT 500`)
       .bind(state.cursor).all()).results || [];
     if (!rows.length) {
       // End of table: restart from the top on the NEXT tick.
-      state.cursor = 0;
+      state.cursor = '';
       break;
     }
     for (const row of rows) {
-      state.cursor = row.rid;
+      state.cursor = row.id;
       scanned += 1;
       if (String(row.native_language || '').toLowerCase().startsWith('en')) continue;
       const variants = parseVariants(row.component_variants_json);

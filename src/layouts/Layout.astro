@@ -1,16 +1,30 @@
 ---
 import '../styles/global.css';
 import type { Locale } from '../domain/types';
+import { localeDefinitions } from '../domain/locales';
 
 interface Props {
   locale: Locale;
+  pagePath?: string;
+  title?: string;
+  description?: string;
 }
 
-const { locale } = Astro.props;
-const title = locale === 'en' ? 'Real Address Generator' : '真实地址生成器';
-const description = locale === 'en'
-  ? 'Generate source-backed addresses resolved by Google Maps in country-standard formats.'
-  : '生成带数据来源、经Google地图解析并符合各国标准格式的真实地址。';
+const { locale, pagePath = '', title: suppliedTitle, description: suppliedDescription } = Astro.props;
+const metadata: Record<Locale, { title: string; description: string }> = {
+  en: { title: 'Real Residential Address Generator', description: 'Generate source-backed addresses in country-standard formats.' },
+  'zh-CN': { title: '真实住宅地址生成器', description: '生成带数据来源并符合各国标准格式的真实地址。' },
+  'zh-TW': { title: '真實住宅地址產生器', description: '產生具有資料來源並符合各國標準格式的真實地址。' },
+  ja: { title: '実在住宅住所ジェネレーター', description: 'データソースに基づいた各国標準形式の住所を生成します。' },
+  ko: { title: '실제 주거 주소 생성기', description: '데이터 출처가 확인된 국가별 표준 형식의 주소를 생성합니다.' },
+  de: { title: 'Generator realer Wohnadressen', description: 'Erstellt quellenbasierte Adressen im landesüblichen Format.' },
+  fr: { title: "Générateur d'adresses résidentielles réelles", description: 'Générez des adresses fondées sur des sources dans le format du pays.' },
+  es: { title: 'Generador de direcciones residenciales reales', description: 'Genera direcciones respaldadas por fuentes con el formato habitual del país.' },
+  pt: { title: 'Gerador de endereços residenciais reais', description: 'Gere endereços baseados em fontes no formato habitual de cada país.' }
+};
+const title = suppliedTitle || metadata[locale].title;
+const description = suppliedDescription || metadata[locale].description;
+const localizedPath = (target: Locale) => `/${target}/${pagePath ? `${pagePath.replace(/^\/+|\/+$/gu, '')}/` : ''}`;
 ---
 <!doctype html>
 <html lang={locale}>
@@ -20,8 +34,9 @@ const description = locale === 'en'
     <meta name="description" content={description} />
     <meta name="theme-color" content="#f7f9ff" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="alternate" hreflang="en" href="/en/" />
-    <link rel="alternate" hreflang="zh-Hans" href="/zh-CN/" />
+    <link rel="canonical" href={localizedPath(locale)} />
+    {localeDefinitions.map((definition) => <link rel="alternate" hreflang={definition.hreflang} href={localizedPath(definition.code)} />)}
+    <link rel="alternate" hreflang="x-default" href={localizedPath('en')} />
     <title>{title}</title>
   </head>
   <body>

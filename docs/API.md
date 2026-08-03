@@ -29,6 +29,7 @@ Tokens are created in `/admin/`. The server stores both an irreversible authenti
 | `GET` | `/client-context` | Resolve the request IP or an explicit IP to a supported region |
 | `GET` | `/locations/search` | Search region, city, and postcode options |
 | `GET` | `/generate` | Generate a verified residential address and related test profile |
+| `POST` | `/address-translation` | Translate a generated address into a supported display locale |
 | `GET` | `/data-health` | Inspect synchronized pool coverage and readiness |
 
 ## Health
@@ -99,7 +100,6 @@ The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a c
 | `strategy` | `random` | Select an eligible verified record with `random` or `instant`; it never synthesizes address fields |
 | `seed` | generated UUID | Deterministic generation seed |
 | `requestId` | generated UUID | Caller correlation ID |
-| `live` | `false` | Per-request opt-in to configured live providers; candidates still need verified residential evidence |
 
 Verified residential generation:
 
@@ -119,9 +119,20 @@ IP-region generation:
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8"
 ```
 
-The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
+The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Normal generation also returns `eligibleCount`, the number of publication-gated database records in the exact selection scope. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
 
-Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. It does not create missing address components. Source synchronization can still change the selected residential pool over time.
+Normal requests select from the complete eligible database scope, without a fixed candidate window or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected residential pool over time.
+
+## Address translation
+
+`POST /address-translation` returns the semantic components (building, street, city, district, admin area) of a generated pool address in a display locale; digit identifiers (house number, unit, postcode) are always copied verbatim.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `addressId` | required | `result.address.id` returned by `/generate` |
+| `targetLocale` | required | `en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `de`, `fr`, `es`, or `pt` |
+
+The display chain is stored variant → on-demand translation → native original. A stored variant is served only when every semantic component already reads in the target script; otherwise the service applies local script conversion (OpenCC for Chinese targets, pinyin as the English last resort for Chinese sources) and the configured translation providers in order, validating each candidate for script and digit preservation. The response is always complete in a single language: when no step produces a valid result it reports `fallback` or `unavailable` and clients render the full native address — never a mixed one.
 
 ## WebUI map configuration
 
@@ -180,4 +191,4 @@ The main API hides `/sync-control/*` by default. Keep `SYNC_CONTROL_PUBLIC=false
 - Do not place API keys or `SYNC_ADMIN_TOKEN` in query strings, browser code, screenshots, or logs.
 - Use a dedicated, domain-restricted AMap JS API key for browser rendering. The JS key is necessarily visible in browser requests; the paired security code and all WebService synchronization keys remain server-only.
 - Generated profiles and card numbers are test fixtures. They do not identify a real person or payment account.
-- Public generation reads verified residential records from the active SQLite pool. Enabled live providers remain subject to the same address-existence and residential-evidence gates.
+- Public generation and IP-region generation read only verified residential records from the active PostgreSQL pool. Provider credentials are used by background synchronization, never by a public generation request.

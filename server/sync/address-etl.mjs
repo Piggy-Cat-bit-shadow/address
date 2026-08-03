@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDatabase } from '../database/sqlite.mjs';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { pinyin } from 'pinyin-pro';
 import { createSourceAdapters, loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
-import { ADDRESS_IMPORT_REVISION, SqliteAddressImporter } from './sqlite-address-importer.mjs';
-import { SqliteCountryStateStore } from './sqlite-country-state.mjs';
+import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
+import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
+import { PostgresCountryStateStore } from './postgres-country-state.mjs';
 import {
   assertStorageBudget,
   DEFAULT_HARD_LIMIT_BYTES,
@@ -39,13 +39,33 @@ const integer = (value, fallback, minimum = 1) => {
   return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : fallback;
 };
 const boolean = (value, fallback = false) => value === undefined ? fallback : /^(1|true|yes)$/iu.test(String(value));
-const sourceQualityFailureSignature = (shard, discovery) => [
-  shard.id,
-  discovery.adapter,
-  sourceAdapterRevisions[discovery.adapter] || 'external',
-  discovery.version,
-  ADDRESS_IMPORT_REVISION
-].join(':');
+const sourceQualityFailureSignature = (shard, discovery, policy) => {
+  const buildingAssets = Array.isArray(discovery.buildingAssets) ? discovery.buildingAssets.length : 0;
+  const residentialBuildingAvailable = discovery.residentialBuildingAvailable
+    ?? (discovery.adapter === 'geofabrik' || buildingAssets > 0);
+  const policyInputs = {
+    targetCount: policy.targetCount,
+    levelLimits: policy.levelLimits,
+    overrides: [...(policy.overrides || new Map())].sort(([left], [right]) => left.localeCompare(right)),
+    floors: {
+      level1Min: Number(policy.level1Min) || 0,
+      level2Min: Number(policy.level2Min) || 0,
+      minPerNode: Number(policy.minPerNode) || 0,
+      nodes: [...(policy.nodeFloors || new Map())].sort(([left], [right]) => left.localeCompare(right))
+    },
+    qualityGate: shard.qualityGate || {}
+  };
+  return [
+    shard.id,
+    discovery.adapter,
+    sourceAdapterRevisions[discovery.adapter] || 'external',
+    discovery.version,
+    `residential-buildings=${Number(Boolean(residentialBuildingAvailable))}`,
+    `building-assets=${buildingAssets}`,
+    `import=${ADDRESS_IMPORT_REVISION}`,
+    `policy=${JSON.stringify(policyInputs)}`
+  ].join(':');
+};
 
 export const mapConcurrent = async (values, concurrency, worker) => {
   const output = new Array(values.length);
@@ -271,7 +291,7 @@ export const localizeAddressRecords = async (records, {
   });
 };
 
-export class SqliteTranslationCache {
+export class PostgresTranslationCache {
   constructor(database) {
     this.database = database;
   }
@@ -321,6 +341,25 @@ const centroid = (geometry) => {
   return count ? [longitude / count, latitude / count] : null;
 };
 
+const normalizeTaiwanHierarchy = (levels, postalCity, fallbackAdmin1, fallbackLocality, fallbackDistrict) => {
+  const values = [...new Set(levels.map((value) => clean(value)).filter(Boolean))];
+  const preferredAdmin1 = clean(postalCity);
+  const adminIndex = preferredAdmin1 && /[縣市]$/u.test(preferredAdmin1)
+    ? values.findIndex((value) => value === preferredAdmin1)
+    : values.findIndex((value) => /[縣市]$/u.test(value));
+  if (adminIndex < 0) return {
+    admin1: fallbackAdmin1,
+    locality: fallbackLocality,
+    district: fallbackDistrict
+  };
+  const admin1 = values[adminIndex];
+  const localityIndex = values.findIndex((value, index) => index > adminIndex && /[區鄉鎮市]$/u.test(value));
+  if (localityIndex < 0) return { admin1, locality: '', district: '' };
+  const locality = values[localityIndex];
+  const district = values.find((value, index) => index > localityIndex && /[里村]$/u.test(value)) || '';
+  return { admin1, locality, district };
+};
+
 export const normalizeSourceRecord = (value, shard, format) => {
   let sourceRecordId;
   let admin1;
@@ -339,14 +378,34 @@ export const normalizeSourceRecord = (value, shard, format) => {
   let residentialSourceClass = '';
   let sourceDataset = shard.source.name;
   if (format === 'overture-jsonl') {
+    const addressLevels = (Array.isArray(value.address_levels) ? value.address_levels : [])
+      .map((level) => clean(typeof level === 'object' && level !== null ? level.value : level))
+      .filter(Boolean);
+    const postalCity = clean(value.postal_city);
     sourceRecordId = clean(value.source_record_id || value.id);
-    admin1 = clean(value.admin1);
-    locality = clean(value.locality);
-    postalLocality = clean(value.postal_city);
-    district = '';
+    admin1 = clean(value.admin1) || addressLevels[0] || '';
+    if (['JP', 'MX', 'TW'].includes(shard.countryCode)) {
+      locality = postalCity || (addressLevels.length >= 3 ? addressLevels.at(-2) : addressLevels.at(-1)) || '';
+      district = addressLevels.length >= 3 ? addressLevels.at(-1) : '';
+    } else if (shard.countryCode === 'IT') {
+      locality = postalCity || addressLevels.at(-1) || clean(value.locality);
+      district = addressLevels.length >= 2 ? addressLevels.at(-2) : '';
+    } else {
+      locality = clean(value.locality) || postalCity || addressLevels.at(-1) || '';
+      const candidateDistrict = clean(value.district) || (addressLevels.length >= 3 ? addressLevels.at(-1) : '');
+      district = candidateDistrict !== locality && candidateDistrict !== admin1 ? candidateDistrict : '';
+    }
+    if (shard.countryCode === 'TW') {
+      const hierarchy = normalizeTaiwanHierarchy(addressLevels, postalCity, admin1, locality, district);
+      ({ admin1, locality, district } = hierarchy);
+      postalLocality = locality;
+    } else {
+      postalLocality = postalCity;
+    }
     postcode = shard.countryCode === 'CN' ? '' : clean(value.postcode);
     street = clean(value.street);
     houseNumber = clean(value.number).normalize('NFKC');
+    buildingName = clean(value.building_name);
     unit = clean(value.unit);
     longitude = Number(value.longitude);
     latitude = Number(value.latitude);
@@ -364,9 +423,27 @@ export const normalizeSourceRecord = (value, shard, format) => {
     const point = centroid(value.geometry);
     sourceRecordId = clean(properties['@id'] || value.id);
     admin1 = clean(properties['addr:state'] || properties['addr:province']);
-    locality = clean(properties['addr:city'] || properties['addr:town'] || properties['addr:village'] || properties['addr:municipality']);
-    postalLocality = clean(properties['addr:place'] || locality);
+    const sourceLocality = clean(properties['addr:city'] || properties['addr:town']
+      || properties['addr:village'] || properties['addr:municipality']);
+    locality = sourceLocality;
     district = clean(properties['addr:district'] || properties['addr:suburb'] || properties['addr:county']);
+    if (shard.countryCode === 'TH') {
+      locality = clean(properties['addr:district']) || sourceLocality;
+      district = clean(properties['addr:subdistrict'] || properties['addr:suburb'] || properties['addr:county']);
+    } else if (shard.countryCode === 'PH') {
+      district = clean(properties['addr:barangay'] || properties['addr:district']
+        || properties['addr:suburb'] || properties['addr:county']);
+    } else if (shard.countryCode === 'VN') {
+      locality = clean(properties['addr:ward'] || properties['addr:commune']
+        || properties['addr:subdistrict']) || sourceLocality;
+      district = '';
+    }
+    postalLocality = locality;
+    if (shard.countryCode === 'TW') {
+      const hierarchy = normalizeTaiwanHierarchy([admin1, locality, district], locality, admin1, locality, district);
+      ({ admin1, locality, district } = hierarchy);
+      postalLocality = locality;
+    }
     postcode = shard.countryCode === 'CN' ? '' : clean(properties['addr:postcode']);
     street = clean(properties['addr:street'] || properties['addr:place']);
     houseNumber = clean(properties['addr:housenumber']).normalize('NFKC');
@@ -375,7 +452,14 @@ export const normalizeSourceRecord = (value, shard, format) => {
     longitude = Number(point?.[0]);
     latitude = Number(point?.[1]);
     const building = clean(properties.building).toLowerCase();
-    if (residentialBuildings.has(building)) {
+    const matchedBuildingId = clean(properties.residential_building_id);
+    const matchedBuildingClass = clean(properties.residential_building_class).toLowerCase();
+    if (matchedBuildingId && properties['@type'] === 'node') buildingName = '';
+    if (matchedBuildingId && residentialBuildings.has(matchedBuildingClass)) {
+      propertyType = matchedBuildingClass === 'apartments' ? 'apartment' : 'residential';
+      residentialSourceRecordId = matchedBuildingId;
+      residentialSourceClass = `building=${matchedBuildingClass}`;
+    } else if (residentialBuildings.has(building)) {
       propertyType = building === 'apartments' ? 'apartment' : 'residential';
       residentialSourceRecordId = sourceRecordId;
       residentialSourceClass = `building=${building}`;
@@ -499,10 +583,9 @@ const selectShards = (catalog, requested) => {
 };
 
 export const runAddressEtl = async ({
-  databasePath = resolve(process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite'),
   database: providedDatabase,
   cacheDir = process.env.ADDRESS_SYNC_CACHE_DIR || defaultCacheDir,
-  dataRoot = process.env.ADDRESS_DATA_ROOT || dirname(databasePath),
+  dataRoot = process.env.ADDRESS_DATA_ROOT || resolve('data'),
   requestedShards = process.env.ADDRESS_SYNC_SHARDS ? [process.env.ADDRESS_SYNC_SHARDS] : ['all'],
   dryRun = boolean(process.env.ADDRESS_SYNC_DRY_RUN),
   estimate = false,
@@ -515,8 +598,11 @@ export const runAddressEtl = async ({
   maxShardsPerRun = integer(process.env.ADDRESS_SYNC_MAX_SHARDS_PER_RUN, !estimate && syncMode === 'daily' ? 1 : Number.MAX_SAFE_INTEGER),
   requireResidential = boolean(process.env.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
   retainRaw = boolean(process.env.ADDRESS_SYNC_RETAIN_RAW),
-  prepareConcurrency = integer(process.env.ADDRESS_SYNC_PREPARE_CONCURRENCY, 10),
-  cpuConcurrency = integer(process.env.ADDRESS_SYNC_CPU_CONCURRENCY, 3),
+  prepareConcurrency = integer(process.env.ADDRESS_SYNC_PREPARE_CONCURRENCY, 1),
+  cpuConcurrency = integer(process.env.ADDRESS_SYNC_CPU_CONCURRENCY, 1),
+  maxPrepareConcurrency = integer(process.env.ADDRESS_SYNC_MAX_PREPARE_CONCURRENCY, 1),
+  maxCpuConcurrency = integer(process.env.ADDRESS_SYNC_MAX_CPU_CONCURRENCY, 1),
+  signal,
   now = () => new Date(),
   catalog: providedCatalog,
   adapters: providedAdapters,
@@ -529,21 +615,23 @@ export const runAddressEtl = async ({
   const requested = selectShards(catalog, requestedShards);
   const stateFile = resolve(cacheDir, 'manifest.json');
   const activeRun = !dryRun && !estimate;
-  const database = activeRun && !providedImporter ? providedDatabase || openDatabase(databasePath) : providedDatabase;
-  const ownsDatabase = activeRun && !providedImporter && !providedDatabase;
+  const database = providedDatabase;
+  if (activeRun && !providedImporter && !database) throw new Error('PostgreSQL database is required for address synchronization');
   const runtimePolicy = database && activeRun
     ? await getRuntimePolicy(database)
     : { prepareConcurrency: Math.min(10, prepareConcurrency), cpuConcurrency: Math.min(4, cpuConcurrency) };
-  const adapters = providedAdapters || createSourceAdapters({ processConcurrency: runtimePolicy.cpuConcurrency });
-  const importer = activeRun ? providedImporter || new SqliteAddressImporter({
+  runtimePolicy.prepareConcurrency = Math.min(runtimePolicy.prepareConcurrency, maxPrepareConcurrency);
+  runtimePolicy.cpuConcurrency = Math.min(runtimePolicy.cpuConcurrency, maxCpuConcurrency);
+  const adapters = providedAdapters || createSourceAdapters({ processConcurrency: runtimePolicy.cpuConcurrency, signal });
+  const importer = activeRun ? providedImporter || new PostgresAddressImporter({
     database,
     normalizeRecord: normalizeSourceRecord,
-    localizeRecords: (records) => localizeRecords(records, { cache: new SqliteTranslationCache(database) }),
+    localizeRecords: (records) => localizeRecords(records, { cache: new PostgresTranslationCache(database) }),
     hash: sha256,
     reverseGeocoder: (countryCode) => CatalogReverseGeocoder.load(database, countryCode),
     rebuildFormattedAddress: formattedAddress
   }) : null;
-  const stateStore = providedStateStore || (database && activeRun ? new SqliteCountryStateStore({ database, shards: catalog.shards, now }) : {
+  const stateStore = providedStateStore || (database && activeRun ? new PostgresCountryStateStore({ database, shards: catalog.shards, now }) : {
     load: () => loadState(stateFile),
     save: (value) => saveState(stateFile, value)
   });
@@ -584,11 +672,13 @@ export const runAddressEtl = async ({
     };
   });
   let changed = false;
+  const changedCountries = new Set();
   const plannedRawArtifacts = new Set();
   const disabledCountries = new Set();
   const syncErrors = [];
   const failureReport = (task, error) => {
     const errorCode = error?.code || (estimate ? 'SOURCE_ESTIMATE_FAILED' : 'SYNC_FAILED');
+    const qualityFailure = errorCode === 'SOURCE_QUALITY_FAILED' || errorCode === 'SNAPSHOT_QUALITY_FAILED';
     return {
       ...task.previous,
       shardId: task.shard.id,
@@ -602,9 +692,13 @@ export const runAddressEtl = async ({
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),
       errorCode,
-      failureSignature: errorCode === 'SOURCE_QUALITY_FAILED'
+      failureSignature: qualityFailure
         ? error?.failureSignature || task.discovery?.failureSignature || null
         : null,
+      rejectionReasons: qualityFailure
+        ? error?.rejectionReasons || error?.metrics?.rejectionReasons || task.previous?.rejectionReasons || {}
+        : null,
+      metrics: qualityFailure ? error?.metrics || task.previous?.metrics || null : null,
       errorUrl: error?.url || null,
       errorStatus: error?.status ?? null
     };
@@ -631,7 +725,10 @@ export const runAddressEtl = async ({
       const defaults = providedImporter || providedCatalog ? null : ADDRESS_POLICY_DEFAULTS[shard.countryCode];
       const policy = database && activeRun && !providedImporter
         ? await loadImportPolicy(database, shard.countryCode, maxRecords, perLocality)
-        : { enabled: true, targetCount: defaults?.target || maxRecords, levelLimits: defaults?.limits || [maxRecords, perLocality, perLocality, perLocality], overrides: new Map() };
+        : { enabled: true, targetCount: defaults?.target || maxRecords,
+          levelLimits: defaults?.limits || [maxRecords, perLocality, perLocality, perLocality],
+          overrides: new Map(), nodeFloors: new Map(), level1Min: defaults?.level1Min || 0,
+          level2Min: defaults?.level2Min || 0, minPerNode: defaults?.minPerNode || 0 };
       if (policy.enabled === false) {
         disabledCountries.add(shard.countryCode);
         reports.push({ shardId: shard.id, shardKey: shard.id, sourceId: shard.source.id, countryCode: shard.countryCode,
@@ -648,7 +745,7 @@ export const runAddressEtl = async ({
         const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir });
         const discovery = {
           ...discoveredSource,
-          failureSignature: sourceQualityFailureSignature(task.shard, discoveredSource)
+          failureSignature: sourceQualityFailureSignature(task.shard, discoveredSource, task.policy)
         };
         return { ...task, discovery };
       } catch (error) { return { ...task, error }; }
@@ -670,8 +767,9 @@ export const runAddressEtl = async ({
         });
         continue;
       }
-      const estimatedOutputBytes = task.policy.targetCount * 2048;
-      const estimatedDatabaseBytes = task.policy.targetCount * 2048;
+      const sourceTarget = integer(task.shard.maxRecords, maxRecords);
+      const estimatedOutputBytes = sourceTarget * 2048;
+      const estimatedDatabaseBytes = sourceTarget * 2048;
       const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.version || ''}`;
       const temporarySourceBytes = task.discovery.adapter === 'geofabrik' && !plannedRawArtifacts.has(rawKey)
         ? task.discovery.sourceBytes || 0 : 0;
@@ -691,7 +789,7 @@ export const runAddressEtl = async ({
         lastChecked: checkedAt.toISOString(), sourceVersion: task.discovery.version, sourceBytes: task.discovery.sourceBytes,
         estimatedPeakBytes: projectedCacheBytes, estimatedStoragePeakBytes: storageBudget.projectedBytes,
         estimatedDatabaseBytes, allowShadowExpansion: storageBudget.allowShadowExpansion,
-        estimateMethod: task.discovery.estimateMethod, targetCount: task.policy.targetCount,
+        estimateMethod: task.discovery.estimateMethod, targetCount: sourceTarget,
         status: dryRun || estimate ? 'planned' : 'discovered'
       };
       plannedCacheBytes += estimatedOutputBytes;
@@ -700,7 +798,41 @@ export const runAddressEtl = async ({
       else planned.push({ ...task, report, estimatedOutputBytes, estimatedDatabaseBytes, storageBudget });
     }
 
-    const prepared = [];
+    const importPreparedTask = async (task) => {
+      if (task.error) { await recordFailure(task, task.error); return; }
+      try {
+        const materializedStorageBytes = await measureStorage([dataRoot]);
+        storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
+        console.log(`[address-sync] ${task.shard.countryCode} import`);
+        const imported = await importer.importShard({
+          shard: task.shard, discovery: task.discovery, materialized: task.materialized,
+          maxRecords: task.policy.targetCount, sourceMaxRecords: task.report.targetCount, perLocality, policy: task.policy,
+          storagePolicy: { allowShadowExpansion: storageBudget.allowShadowExpansion, softLimitBytes, hardLimitBytes }
+        });
+        const storageBytesAfterImport = await measureStorage([dataRoot]);
+        storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
+        Object.assign(task.report, {
+          status: imported.skipped ? 'unchanged' : 'imported', checksumSha256: task.materialized.checksum,
+          sourceChecksumSha256: task.materialized.sourceChecksum || task.previous?.sourceChecksumSha256 || null,
+          cacheBytes: task.materialized.cacheBytes, cacheHit: task.materialized.cacheHit, datasetId: imported.datasetId,
+          acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
+          rejectionReasons: imported.rejectionReasons || {}, metrics: imported.metrics || null,
+          localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
+          deficit: Math.max(0, task.report.targetCount - imported.acceptedCount), storageBytesAfterImport,
+          allowShadowExpansion: storageBudget.allowShadowExpansion, lastSuccessfulAt: checkedAt.toISOString()
+        });
+        state.shards[task.shard.id] = task.report;
+        await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
+        await pruneShardCache(cacheDir, task.shard, task.materialized.file);
+        plannedCacheBytes = await directorySize(cacheDir);
+        plannedStorageBytes = await measureStorage([dataRoot]);
+        changed ||= !imported.skipped;
+        if (!imported.skipped) changedCountries.add(task.shard.countryCode);
+        reports.push(task.report);
+        console.log(`[address-sync] ${task.shard.countryCode} ready addresses=${imported.acceptedCount} target=${task.report.targetCount} deficit=${task.report.deficit}`);
+      } catch (error) { await recordFailure(task, error); }
+    };
+
     for (let offset = 0; offset < planned.length; offset += runtimePolicy.prepareConcurrency) {
       const wave = planned.slice(offset, offset + runtimePolicy.prepareConcurrency);
       const waveRaw = new Map();
@@ -722,10 +854,11 @@ export const runAddressEtl = async ({
         for (const task of wave) await recordFailure(task, error);
         continue;
       }
-      prepared.push(...await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
+      const preparedWave = await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
         try {
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
-          const candidateLimit = Math.min(300_000, Math.max(task.policy.targetCount + 1_000, task.policy.targetCount * 3));
+          const shardTarget = task.report.targetCount;
+          const candidateLimit = Math.min(300_000, Math.max(shardTarget + 1_000, shardTarget * 3));
           const candidatePerLocality = Math.max(perLocality, ...task.policy.levelLimits);
           const materialized = await adapters.materialize(task.shard, task.discovery, {
             cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
@@ -733,41 +866,15 @@ export const runAddressEtl = async ({
           });
           return { ...task, materialized };
         } catch (error) { return { ...task, error }; }
-      }));
+      });
       await adapters.cleanupSharedRaw?.().catch(() => {});
+      for (const task of preparedWave) await importPreparedTask(task);
     }
-
-    for (const task of prepared) {
-      if (task.error) { await recordFailure(task, task.error); continue; }
-      try {
-        const materializedStorageBytes = await measureStorage([dataRoot]);
-        storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
-        console.log(`[address-sync] ${task.shard.countryCode} import`);
-        const imported = await importer.importShard({
-          shard: task.shard, discovery: task.discovery, materialized: task.materialized,
-          maxRecords: task.policy.targetCount, perLocality, policy: task.policy,
-          storagePolicy: { allowShadowExpansion: storageBudget.allowShadowExpansion, softLimitBytes, hardLimitBytes }
-        });
-        const storageBytesAfterImport = await measureStorage([dataRoot]);
-        storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
-        Object.assign(task.report, {
-          status: imported.skipped ? 'unchanged' : 'imported', checksumSha256: task.materialized.checksum,
-          sourceChecksumSha256: task.materialized.sourceChecksum || task.previous?.sourceChecksumSha256 || null,
-          cacheBytes: task.materialized.cacheBytes, cacheHit: task.materialized.cacheHit, datasetId: imported.datasetId,
-          acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
-          localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
-          deficit: Math.max(0, task.policy.targetCount - imported.acceptedCount), storageBytesAfterImport,
-          allowShadowExpansion: storageBudget.allowShadowExpansion, lastSuccessfulAt: checkedAt.toISOString()
-        });
-        state.shards[task.shard.id] = task.report;
-        await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
-        await pruneShardCache(cacheDir, task.shard, task.materialized.file);
-        plannedCacheBytes = await directorySize(cacheDir);
-        plannedStorageBytes = await measureStorage([dataRoot]);
-        changed ||= !imported.skipped;
-        reports.push(task.report);
-        console.log(`[address-sync] ${task.shard.countryCode} ready addresses=${imported.acceptedCount} target=${task.policy.targetCount} deficit=${task.report.deficit}`);
-      } catch (error) { await recordFailure(task, error); }
+    if (database && activeRun && !providedImporter) {
+      for (const countryCode of changedCountries) {
+        const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString());
+        console.log(`[address-sync] ${countryCode} coverage mapped=${coverage.matchedAddresses} unmatched=${coverage.unmatchedAddresses}`);
+      }
     }
     if (syncErrors.length) throw new AggregateError(syncErrors, `Address sync failed for ${syncErrors.length} country shard(s)`);
     if (syncMode === 'initial' && requireResidential) {
@@ -780,7 +887,6 @@ export const runAddressEtl = async ({
   } finally {
     await adapters.cleanupSharedRaw?.().catch(() => {});
     if (!providedImporter) await importer?.close();
-    if (ownsDatabase) database.close();
   }
   return {
     changed,

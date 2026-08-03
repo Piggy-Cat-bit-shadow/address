@@ -15,5 +15,7 @@ export function normalizeAddressFacts<T extends object>(countryCode: string, inp
 export function validateAddressQuality<T extends object>(input?: {
   countryCode?: string;
   components?: T;
+  latitude?: unknown;
+  longitude?: unknown;
 }): AddressQualityResult<T>;
 export function addressQualitySqlClause(prefix?: string): string;

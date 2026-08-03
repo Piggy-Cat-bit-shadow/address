@@ -4,12 +4,14 @@ set -eu
 
 source_file=${1:-}
 case "$source_file" in
-  "$ROOT"/backups/*.sqlite) ;;
+  "$ROOT"/backups/*.dump) ;;
   *) echo "Backup must be under $ROOT/backups" >&2; exit 1 ;;
 esac
 test -f "$source_file"
 "$APP/ops/stop.sh"
-cp "$source_file" "$ADDRESS_DATABASE_PATH.restore"
-rm -f "$ADDRESS_DATABASE_PATH-wal" "$ADDRESS_DATABASE_PATH-shm"
-mv "$ADDRESS_DATABASE_PATH.restore" "$ADDRESS_DATABASE_PATH"
+set -a
+. /root/postgresql/.env
+set +a
+docker compose -f /root/postgresql/docker-compose.yml --env-file /root/postgresql/.env \
+  exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner <"$source_file"
 "$APP/ops/start.sh"

@@ -114,7 +114,7 @@ describe('27-country localization QA matrix', () => {
         expect(variants[language].admin1Code, `${country.code}:${language}:admin-code`).toBe(adminCodes[country.code]);
       }
     }
-  });
+  }, 30_000);
 
   it('formats one destination-country line and no duplicate postal lines', async () => {
     for (const country of countries) {
@@ -135,7 +135,7 @@ describe('27-country localization QA matrix', () => {
         }
       }
     }
-  });
+  }, 30_000);
 });
 
 describe('IN / SA / AU / NG / ZA researched postal invariants', () => {

@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS control_migrations (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -7,7 +5,7 @@ CREATE TABLE IF NOT EXISTS control_migrations (
 
 CREATE TABLE IF NOT EXISTS system_settings (
   key TEXT PRIMARY KEY,
-  value_json TEXT NOT NULL CHECK (json_valid(value_json)),
+  value_json TEXT NOT NULL CHECK (value_json IS JSON),
   updated_at TEXT NOT NULL
 );
 
@@ -38,7 +36,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   token_ciphertext TEXT,
   token_iv TEXT,
   token_tag TEXT,
-  scopes_json TEXT NOT NULL CHECK (json_valid(scopes_json)),
+  scopes_json TEXT NOT NULL CHECK (scopes_json IS JSON),
   rate_limit_per_minute INTEGER NOT NULL DEFAULT 60 CHECK (rate_limit_per_minute BETWEEN 1 AND 100000),
   expires_at TEXT,
   last_used_at TEXT,
@@ -48,7 +46,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 
 CREATE TABLE IF NOT EXISTS provider_credentials (
   id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap')),
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding')),
   label TEXT NOT NULL,
   secret_ciphertext TEXT NOT NULL,
   secret_iv TEXT NOT NULL,
@@ -110,9 +108,9 @@ CREATE TABLE IF NOT EXISTS browser_map_credentials (
 CREATE TABLE IF NOT EXISTS sync_runs (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
-  target_json TEXT NOT NULL CHECK (json_valid(target_json)),
+  target_json TEXT NOT NULL CHECK (target_json IS JSON),
   status TEXT NOT NULL CHECK (status IN ('queued','running','paused_quota','needs_review','succeeded','failed','cancelled')),
-  progress_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(progress_json)),
+  progress_json TEXT NOT NULL DEFAULT '{}' CHECK (progress_json IS JSON),
   error_code TEXT,
   error_message TEXT,
   created_at TEXT NOT NULL,
@@ -122,11 +120,11 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 );
 
 CREATE TABLE IF NOT EXISTS audit_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id BIGSERIAL PRIMARY KEY,
   actor TEXT NOT NULL,
   action TEXT NOT NULL,
   target TEXT NOT NULL,
-  details_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(details_json)),
+  details_json TEXT NOT NULL DEFAULT '{}' CHECK (details_json IS JSON),
   created_at TEXT NOT NULL
 );
 
@@ -141,6 +139,6 @@ CREATE INDEX IF NOT EXISTS idx_provider_credentials_pick ON provider_credentials
 CREATE INDEX IF NOT EXISTS idx_sync_runs_created ON sync_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 
-INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (1,datetime('now'));
-INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (3,datetime('now'));
-INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (4,datetime('now'));
+INSERT INTO control_migrations(version,applied_at)
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 8) AS version
+ON CONFLICT (version) DO NOTHING;

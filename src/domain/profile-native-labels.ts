@@ -1,7 +1,7 @@
 import type { CountryCode } from './types';
 
 // Language spoken natively per supported country (profile-value display only).
-const countryLanguage: Record<CountryCode, string> = {
+export const countryProfileLanguage: Record<CountryCode, string> = {
   US: 'en', CA: 'en', GB: 'en', AU: 'en', SG: 'en', NG: 'en', ZA: 'en', IN: 'en', PH: 'en',
   CN: 'zh', HK: 'zh', TW: 'zh',
   JP: 'ja', KR: 'ko', DE: 'de', FR: 'fr', IT: 'it', ES: 'es', MX: 'es', NL: 'nl',
@@ -50,10 +50,13 @@ const nativeLabels: Record<string, Record<string, string>> = {
 // Returns the native-language label for a stored profile enum value, or undefined
 // when no native translation exists (caller falls back to English/Chinese).
 export const nativeProfileLabel = (value: string, countryCode: CountryCode): string | undefined => {
-  const language = countryLanguage[countryCode];
+  const language = countryProfileLanguage[countryCode];
   if (!language || language === 'en' || language === 'zh') return undefined;
   return nativeLabels[value]?.[language];
 };
 
+export const profileLabelForLanguage = (value: string, language: string): string | undefined =>
+  nativeLabels[value]?.[language === 'pt-BR' ? 'pt' : language];
+
 export const isChineseNativeCountry = (countryCode: CountryCode): boolean =>
-  countryLanguage[countryCode] === 'zh';
+  countryProfileLanguage[countryCode] === 'zh';

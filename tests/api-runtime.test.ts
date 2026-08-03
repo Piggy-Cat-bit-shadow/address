@@ -13,7 +13,7 @@ import { fetchOverpassCandidates } from '../server/api/services/overpass-provide
 import { eligibleAddresses } from './fixtures/catalog';
 
 const current = new Date('2026-07-20T00:00:00Z');
-type SqliteDatabase = Parameters<typeof resolveCatalogTarget>[0];
+type Database = Parameters<typeof resolveCatalogTarget>[0];
 
 interface CityRow {
   id: number;
@@ -36,7 +36,7 @@ const cityRows: CityRow[] = [
   { id: 30, city_id: 30, postcode: null, city_name: 'Seattle', city_native: 'Seattle', city_zh: '西雅图', region_name: 'Washington', region_native: 'Washington', region_zh: '华盛顿州', region_code: 'WA', latitude: 47.6062, longitude: -122.3321 }
 ];
 
-const randomTargetDb = (): SqliteDatabase => ({
+const randomTargetDb = (): Database => ({
   prepare(sql: string) {
     let bindings: unknown[] = [];
     const statement = {
@@ -52,7 +52,7 @@ const randomTargetDb = (): SqliteDatabase => ({
     };
     return statement;
   }
-} as unknown as SqliteDatabase);
+} as unknown as Database);
 
 const withComponents = (
   source: VerifiedAddress,
@@ -146,7 +146,7 @@ describe('provider integrity and timeout behavior', () => {
   });
 });
 
-describe('local SQLite address pool', () => {
+describe('local PostgreSQL address pool', () => {
   it('selects a filtered residential record by random-key pivot and preserves provenance', async () => {
     const row = {
       id: 'fixture-address', country_code: 'US', admin1: 'California', admin1_code: 'CA',

@@ -1,7 +1,7 @@
 import { hashSeed } from '../../../src/domain/generator';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
-import type { SqliteDatabase } from '../../database/sqlite.mjs';
+import type { Database } from '../../database/database.mjs';
 import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
 import {
   addressQualitySqlClause,
@@ -83,8 +83,8 @@ const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
 const toTraditionalHan = createTraditionalizer({ from: 'cn', to: 'tw' });
 const hanScript = /\p{Script=Han}/u;
 
-const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區'];
-const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區)$/u;
+const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區', '都', '道', '府', '県'];
+const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
 
 const aliases = (values: Array<string | undefined>): string[] => [...new Set(values.flatMap((value) => {
   const normalized = normalize(value);
@@ -149,6 +149,21 @@ const parseVariants = <T>(value: string, fallback: T): Record<'native' | 'en' | 
   }
 };
 
+export const repairHongKongNativeVariants = (
+  country: CountryCode,
+  variants: Record<'native' | 'en' | 'zh-CN', AddressComponents>
+): Record<'native' | 'en' | 'zh-CN', AddressComponents> => {
+  if (country !== 'HK') return variants;
+  const nativeText = Object.values(variants.native).join(' ');
+  const simplifiedText = Object.values(variants['zh-CN']).join(' ');
+  if (hanScript.test(nativeText) || !hanScript.test(simplifiedText)) return variants;
+  const native = Object.fromEntries(Object.entries(variants['zh-CN']).map(([field, value]) => [
+    field,
+    typeof value === 'string' ? toTraditionalHan(value) : value
+  ])) as unknown as AddressComponents;
+  return { ...variants, native };
+};
+
 const storedAddress = (components: AddressComponents, country: CountryCode): string => [
   [components.houseNumber, components.street].filter(Boolean).join(' '),
   components.buildingName,
@@ -171,14 +186,22 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
   for (const language of ['native', 'en', 'zh-CN'] as const) {
     parsedComponents[language] = { ...fallback, ...parsedComponents[language] };
   }
-  const componentVariants = {
+  const componentVariants = repairHongKongNativeVariants(row.country_code, {
     native: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.native)),
     en: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.en)),
     'zh-CN': normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents['zh-CN']))
-  };
-  if (!validateAddressQuality({ countryCode: row.country_code, components: componentVariants.native }).valid) return undefined;
+  });
+  if (!validateAddressQuality({
+    countryCode: row.country_code, components: componentVariants.native,
+    latitude: row.latitude, longitude: row.longitude
+  }).valid) return undefined;
   const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
-  const addressVariants = /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
+  const addressVariants = row.country_code === 'HK' && hanScript.test(Object.values(componentVariants.native).join(' '))
+    ? {
+        ...parsedAddresses,
+        native: storedAddress(componentVariants.native, row.country_code)
+      }
+    : /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
     ? {
         native: storedAddress(componentVariants.native, row.country_code),
         en: storedAddress(componentVariants.en, row.country_code),
@@ -244,7 +267,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     countryCode: row.country_code,
     nativeAddress: addressVariants.native,
     formattedAddress: addressVariants.en,
-    nativeLanguage: row.native_language,
+    nativeLanguage: row.country_code === 'HK' ? 'zh-HK' : row.native_language,
     addressVariants,
     components: componentVariants.native,
     componentVariants,
@@ -266,7 +289,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
 
 const missingSchema = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
-  return /no such (?:table|view).*address_pool_runtime|does not exist.*address_pool_runtime/i.test(message);
+  return /no such (?:table|view).*address_pool_runtime|(?:does not exist.*address_pool_runtime|address_pool_runtime.*does not exist)/i.test(message);
 };
 
 interface RegionNameRow { code: string; name: string; native_name: string; zh_name: string }
@@ -274,7 +297,7 @@ interface RegionNameRow { code: string; name: string; native_name: string; zh_na
 const regionNameCaches = new WeakMap<object, Map<string, RegionNameRow | null>>();
 const cityZhCaches = new WeakMap<object, Map<string, string | null>>();
 const regionPresenceCaches = new WeakMap<object, Map<string, boolean>>();
-const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: SqliteDatabase): Map<string, T> => {
+const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: Database): Map<string, T> => {
   let cache = store.get(db as object);
   if (!cache) {
     cache = new Map();
@@ -288,7 +311,7 @@ const samePlaceKey = (value: string | undefined): string => (value || '')
   .normalize('NFKC').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
 
 const lookupRegionNames = async (
-  db: SqliteDatabase,
+  db: Database,
   country: CountryCode,
   admin1: string,
   admin1Code: string
@@ -314,7 +337,7 @@ const lookupRegionNames = async (
   return row;
 };
 
-const hasCatalogRegions = async (db: SqliteDatabase, country: CountryCode): Promise<boolean> => {
+const hasCatalogRegions = async (db: Database, country: CountryCode): Promise<boolean> => {
   const cache = cacheFor(regionPresenceCaches, db);
   if (cache.has(country)) return Boolean(cache.get(country));
   let present = false;
@@ -328,7 +351,7 @@ const hasCatalogRegions = async (db: SqliteDatabase, country: CountryCode): Prom
   return present;
 };
 
-const lookupCityZhName = async (db: SqliteDatabase, country: CountryCode, locality: string): Promise<string | null> => {
+const lookupCityZhName = async (db: Database, country: CountryCode, locality: string): Promise<string | null> => {
   const cache = cacheFor(cityZhCaches, db);
   const key = `${country}:${samePlaceKey(locality)}`;
   if (cache.has(key)) return cache.get(key) || null;
@@ -346,7 +369,7 @@ const lookupCityZhName = async (db: SqliteDatabase, country: CountryCode, locali
   return zhName;
 };
 
-export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedAddress): Promise<VerifiedAddress> => {
+export const enrichPickedAddress = async (db: Database, address: VerifiedAddress): Promise<VerifiedAddress> => {
   const variants = address.componentVariants;
   const updated: Record<'native' | 'en' | 'zh-CN', AddressComponents> = {
     native: { ...variants.native },
@@ -465,7 +488,7 @@ export interface NearestAddressPoolV2Result {
 }
 
 export const pickNearestAddressPoolV2Address = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   country: CountryCode,
   residential: boolean,
   coordinates: { latitude: number; longitude: number },
@@ -479,7 +502,8 @@ export const pickNearestAddressPoolV2Address = async (
     'active = 1',
     'quality_score >= 0.7',
     completenessClause(),
-    '(expires_at IS NULL OR (datetime(expires_at) IS NOT NULL AND datetime(expires_at) > datetime(?)))'
+    `(expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+      THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END)`
   ];
   const baseBindings: unknown[] = [country, now.toISOString()];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`, 'residential_evidence = 1');
@@ -490,17 +514,13 @@ export const pickNearestAddressPoolV2Address = async (
     for (const radiusKm of radii) {
       const latitudeRadius = radiusKm / 111.32;
       const longitudeRadius = Math.min(180, latitudeRadius / longitudeScale);
+      const coordinateFilter = 'latitude >= ? AND latitude <= ? AND longitude >= ? AND longitude <= ?';
       const result = await db.prepare(`SELECT *,
         ((latitude - ?) * (latitude - ?)) +
         ((longitude - ?) * (longitude - ?) * ? * ?) AS distance_score
         FROM address_pool_runtime
         WHERE ${clauses.join(' AND ')}
-          AND id IN (
-            SELECT address.id FROM address_coordinate_index coordinate
-            JOIN address_pool address ON address.rowid = coordinate.address_rowid
-            WHERE coordinate.min_latitude >= ? AND coordinate.max_latitude <= ?
-              AND coordinate.min_longitude >= ? AND coordinate.max_longitude <= ?
-          )
+          AND ${coordinateFilter}
         ORDER BY distance_score, random_key, id LIMIT 16`).bind(
         coordinates.latitude,
         coordinates.latitude,
@@ -531,8 +551,26 @@ export const pickNearestAddressPoolV2Address = async (
   }
 };
 
+export const loadAddressPoolV2AddressById = async (
+  db: Database | undefined,
+  addressId: string,
+  now = new Date()
+): Promise<VerifiedAddress | undefined> => {
+  if (!db || !addressId.startsWith('pool-v2-')) return undefined;
+  try {
+    const row = await db.prepare('SELECT * FROM address_pool_runtime WHERE id = ? AND active = 1 LIMIT 1')
+      .bind(addressId.slice('pool-v2-'.length).split(':')[0]).first<AddressPoolV2Row>();
+    if (!row) return undefined;
+    const address = rowToAddress(row, now);
+    return address ? enrichPickedAddress(db, address) : undefined;
+  } catch (error) {
+    if (missingSchema(error)) return undefined;
+    throw error;
+  }
+};
+
 export const pickAddressPoolV2Address = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   country: CountryCode,
   residential: boolean,
   filters: AddressFilters,
@@ -541,7 +579,7 @@ export const pickAddressPoolV2Address = async (
   now = new Date()
 ): Promise<VerifiedAddress | undefined> => {
   if (!db) return undefined;
-  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), '(expires_at IS NULL OR (datetime(expires_at) IS NOT NULL AND datetime(expires_at) > datetime(?)))'];
+  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), `(expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END)`];
   const bindings: unknown[] = [country, now.toISOString()];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`);
 

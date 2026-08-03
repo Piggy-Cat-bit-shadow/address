@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -19,7 +17,7 @@ CREATE TABLE IF NOT EXISTS address_sources (
   share_alike INTEGER NOT NULL CHECK (share_alike IN (0, 1)),
   notice_required INTEGER NOT NULL CHECK (notice_required IN (0, 1)),
   redistribution_allowed INTEGER NOT NULL CHECK (redistribution_allowed IN (0, 1)),
-  metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+  metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (metadata_json IS JSON),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -65,8 +63,8 @@ CREATE TABLE IF NOT EXISTS address_pool (
   latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
   longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
   native_language TEXT NOT NULL,
-  component_variants_json TEXT NOT NULL CHECK (json_valid(component_variants_json)),
-  address_variants_json TEXT NOT NULL CHECK (json_valid(address_variants_json)),
+  component_variants_json TEXT NOT NULL CHECK (component_variants_json IS JSON),
+  address_variants_json TEXT NOT NULL CHECK (address_variants_json IS JSON),
   admin1_key TEXT NOT NULL DEFAULT '',
   admin1_code_key TEXT NOT NULL DEFAULT '',
   locality_key TEXT NOT NULL DEFAULT '',
@@ -86,27 +84,6 @@ CREATE TABLE IF NOT EXISTS address_pool (
   retired_at TEXT,
   CHECK (active = 1 OR retired_at IS NOT NULL)
 );
-
-CREATE VIRTUAL TABLE IF NOT EXISTS address_coordinate_index USING rtree(
-  address_rowid,
-  min_latitude, max_latitude,
-  min_longitude, max_longitude
-);
-
-CREATE TRIGGER IF NOT EXISTS address_coordinate_insert AFTER INSERT ON address_pool BEGIN
-  INSERT INTO address_coordinate_index VALUES (new.rowid, new.latitude, new.latitude, new.longitude, new.longitude);
-END;
-
-CREATE TRIGGER IF NOT EXISTS address_coordinate_update AFTER UPDATE OF latitude, longitude ON address_pool BEGIN
-  UPDATE address_coordinate_index
-  SET min_latitude = new.latitude, max_latitude = new.latitude,
-      min_longitude = new.longitude, max_longitude = new.longitude
-  WHERE address_rowid = old.rowid;
-END;
-
-CREATE TRIGGER IF NOT EXISTS address_coordinate_delete AFTER DELETE ON address_pool BEGIN
-  DELETE FROM address_coordinate_index WHERE address_rowid = old.rowid;
-END;
 
 CREATE TABLE IF NOT EXISTS address_pool_evidence (
   id TEXT PRIMARY KEY,
@@ -223,6 +200,34 @@ CREATE TABLE IF NOT EXISTS sync_country_state (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_country_runtime (
+  country_code TEXT PRIMARY KEY CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  goal_state TEXT NOT NULL CHECK (goal_state IN ('complete', 'incomplete', 'disabled')),
+  execution_state TEXT NOT NULL CHECK (execution_state IN (
+    'ready', 'below_target', 'running', 'cooldown_wait', 'quota_wait', 'source_limited', 'blocked', 'failed'
+  )),
+  next_attempt_at TEXT,
+  reason TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_shard_state (
+  shard_id TEXT PRIMARY KEY,
+  country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'ready', 'failed')),
+  last_success_at TEXT,
+  next_sync_at TEXT,
+  active_dataset_id TEXT REFERENCES address_datasets(id) ON UPDATE CASCADE ON DELETE SET NULL,
+  address_count INTEGER NOT NULL DEFAULT 0 CHECK (address_count >= 0),
+  residential_count INTEGER NOT NULL DEFAULT 0 CHECK (residential_count >= 0),
+  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+  last_error TEXT,
+  source_version TEXT,
+  failure_code TEXT,
+  failure_signature TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cn_admin_areas (
   adcode TEXT PRIMARY KEY,
   parent_adcode TEXT REFERENCES cn_admin_areas(adcode),
@@ -269,6 +274,32 @@ CREATE TABLE IF NOT EXISTS cn_community_sources (
   PRIMARY KEY (provider, provider_poi_id)
 );
 
+CREATE TABLE IF NOT EXISTS cn_ingest_candidates (
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent')),
+  provider_poi_id TEXT NOT NULL,
+  target_adcode TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  address TEXT NOT NULL DEFAULT '',
+  province TEXT NOT NULL DEFAULT '',
+  city TEXT NOT NULL DEFAULT '',
+  district TEXT NOT NULL DEFAULT '',
+  township TEXT NOT NULL DEFAULT '',
+  longitude REAL NOT NULL,
+  latitude REAL NOT NULL,
+  raw_longitude REAL NOT NULL,
+  raw_latitude REAL NOT NULL,
+  raw_crs TEXT NOT NULL CHECK (raw_crs IN ('GCJ-02','BD-09')),
+  typecode TEXT NOT NULL DEFAULT '',
+  adcode TEXT NOT NULL DEFAULT '',
+  response_hash TEXT NOT NULL,
+  decision TEXT NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','accepted','rejected')),
+  rejection_reason TEXT NOT NULL DEFAULT '',
+  strategy_version TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (provider, provider_poi_id)
+);
+
 CREATE TABLE IF NOT EXISTS cn_sync_targets (
   city TEXT PRIMARY KEY,
   province TEXT NOT NULL DEFAULT '',
@@ -296,7 +327,7 @@ CREATE TABLE IF NOT EXISTS cn_sync_area_targets (
   city TEXT NOT NULL,
   district TEXT NOT NULL,
   query TEXT NOT NULL,
-  target_count INTEGER NOT NULL DEFAULT 10 CHECK (target_count >= 1),
+  target_count INTEGER NOT NULL DEFAULT 5 CHECK (target_count >= 1),
   priority INTEGER NOT NULL DEFAULT 100,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   updated_at TEXT NOT NULL
@@ -340,6 +371,10 @@ CREATE TABLE IF NOT EXISTS sync_country_policies (
   level2_limit INTEGER NOT NULL CHECK (level2_limit >= 0),
   level3_limit INTEGER NOT NULL CHECK (level3_limit >= 0),
   level4_limit INTEGER NOT NULL CHECK (level4_limit >= 0),
+  min_per_node INTEGER NOT NULL DEFAULT 5 CHECK (min_per_node BETWEEN 1 AND 100),
+  coverage_ratio REAL NOT NULL DEFAULT 1.0 CHECK (coverage_ratio BETWEEN 0 AND 1),
+  level1_min INTEGER NOT NULL DEFAULT 0 CHECK (level1_min BETWEEN 0 AND 50000),
+  level2_min INTEGER NOT NULL DEFAULT 0 CHECK (level2_min BETWEEN 0 AND 50000),
   updated_at TEXT NOT NULL
 );
 
@@ -347,14 +382,15 @@ CREATE TABLE IF NOT EXISTS sync_node_overrides (
   node_key TEXT PRIMARY KEY,
   country_code TEXT NOT NULL REFERENCES sync_country_policies(country_code) ON UPDATE CASCADE ON DELETE CASCADE,
   level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 4),
-  target_count INTEGER NOT NULL CHECK (target_count >= 0),
+  target_count INTEGER CHECK (target_count IS NULL OR target_count >= 0),
+  min_count INTEGER CHECK (min_count IS NULL OR min_count BETWEEN 0 AND 50000),
   updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_runtime_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   prepare_concurrency INTEGER NOT NULL DEFAULT 10 CHECK (prepare_concurrency BETWEEN 1 AND 10),
-  cpu_concurrency INTEGER NOT NULL DEFAULT 3 CHECK (cpu_concurrency BETWEEN 1 AND 4),
+  cpu_concurrency INTEGER NOT NULL DEFAULT 4 CHECK (cpu_concurrency BETWEEN 1 AND 4),
   updated_at TEXT NOT NULL
 );
 
@@ -371,31 +407,44 @@ CREATE INDEX IF NOT EXISTS idx_address_pool_generation ON address_pool(generatio
 CREATE INDEX IF NOT EXISTS idx_address_pool_coverage ON address_pool(coverage, active, property_type);
 CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_address ON address_pool_evidence(address_id, is_current, is_primary);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_address_pool_evidence_source_record
-  ON address_pool_evidence(dataset_id, source_record_id, evidence_type) WHERE source_record_id <> '';
+  ON address_pool_evidence(dataset_id, address_id, source_record_id, evidence_type) WHERE source_record_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_address_pool_primary_current
   ON address_pool_evidence(address_id) WHERE is_primary = 1 AND is_current = 1;
 CREATE INDEX IF NOT EXISTS idx_pool_coverage_country ON pool_coverage(country_code, refresh_status, active_count);
 CREATE INDEX IF NOT EXISTS idx_regions_country_name ON catalog_regions(country_code, name);
 CREATE INDEX IF NOT EXISTS idx_regions_country_native ON catalog_regions(country_code, native_name);
+CREATE INDEX IF NOT EXISTS idx_regions_country_code_lower ON catalog_regions(country_code, lower(code));
+CREATE INDEX IF NOT EXISTS idx_regions_country_name_lower ON catalog_regions(country_code, lower(name));
+CREATE INDEX IF NOT EXISTS idx_regions_country_native_lower ON catalog_regions(country_code, lower(native_name));
 CREATE INDEX IF NOT EXISTS idx_regions_parent ON catalog_regions(parent_id);
 CREATE INDEX IF NOT EXISTS idx_cities_country_region_name ON catalog_cities(country_code, region_id, name);
 CREATE INDEX IF NOT EXISTS idx_cities_country_population ON catalog_cities(country_code, population DESC);
+CREATE INDEX IF NOT EXISTS idx_cities_country_name_lower ON catalog_cities(country_code, lower(name), population DESC);
+CREATE INDEX IF NOT EXISTS idx_cities_country_native_lower ON catalog_cities(country_code, lower(native_name), population DESC);
 CREATE INDEX IF NOT EXISTS idx_postcodes_country_region_city_code ON catalog_postcodes(country_code, region_id, city_id, code);
 CREATE INDEX IF NOT EXISTS idx_postcodes_country_code ON catalog_postcodes(country_code, code);
 CREATE INDEX IF NOT EXISTS idx_residential_country_region_city ON residential_coverage(country_code, region_name, city_name);
 CREATE INDEX IF NOT EXISTS idx_residential_region_id ON residential_coverage(country_code, region_id);
 CREATE INDEX IF NOT EXISTS idx_residential_city_id ON residential_coverage(country_code, city_id);
 CREATE INDEX IF NOT EXISTS idx_sync_country_due ON sync_country_state(status, next_sync_at, country_code);
+CREATE INDEX IF NOT EXISTS idx_sync_shard_due ON sync_shard_state(status, next_sync_at, country_code, shard_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_country_created ON sync_jobs(country_code, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,level,name);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_publication_location ON cn_communities_v2(active,province,city,district,last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_generation ON cn_communities_v2(active,source_count DESC,id);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(latitude,longitude);
 CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
+CREATE INDEX IF NOT EXISTS idx_cn_ingest_decision ON cn_ingest_candidates(decision,provider,adcode,last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_cn_ingest_location ON cn_ingest_candidates(city,district,decision);
 CREATE INDEX IF NOT EXISTS idx_cn_sync_area_priority ON cn_sync_area_targets(enabled,priority,adcode);
 CREATE INDEX IF NOT EXISTS idx_admin_coverage_parent ON admin_coverage_stats(parent_key,country_code,region_name);
 CREATE INDEX IF NOT EXISTS idx_sync_node_overrides_country ON sync_node_overrides(country_code,level,node_key);
+CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates
+  ON address_pool(country_code,latitude,longitude) WHERE active=1;
 
-CREATE VIEW IF NOT EXISTS address_pool_runtime AS
+DROP VIEW IF EXISTS address_pool_runtime;
+CREATE VIEW address_pool_runtime AS
 SELECT
   address_pool.*,
   address_pool_evidence.id AS evidence_id,
@@ -403,7 +452,7 @@ SELECT
   address_pool_evidence.record_url,
   address_pool_evidence.observed_at,
   address_pool_evidence.evidence_type,
-  EXISTS (
+  CASE WHEN EXISTS (
     SELECT 1 FROM address_pool_evidence residential_evidence
     JOIN address_datasets residential_dataset ON residential_dataset.id = residential_evidence.dataset_id
       AND residential_dataset.status = 'active' AND residential_dataset.redistribution_allowed = 1
@@ -412,7 +461,7 @@ SELECT
     WHERE residential_evidence.address_id = address_pool.id
       AND residential_evidence.evidence_type = 'residential_use'
       AND residential_evidence.is_current = 1
-  ) AS residential_evidence,
+  ) THEN 1 ELSE 0 END AS residential_evidence,
   address_datasets.id AS dataset_id,
   address_datasets.version AS dataset_version,
   address_datasets.published_at AS source_updated_at,
@@ -433,8 +482,9 @@ JOIN address_datasets ON address_datasets.id = address_pool_evidence.dataset_id
   AND address_datasets.status = 'active'
   AND address_datasets.redistribution_allowed = 1
 JOIN address_sources ON address_sources.id = address_datasets.source_id
-  AND address_sources.redistribution_allowed = 1;
+  AND address_sources.redistribution_allowed = 1
+WHERE address_pool.active = 1;
 
-INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT INTO schema_migrations(version, applied_at)
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 6) AS version
+ON CONFLICT (version) DO NOTHING;

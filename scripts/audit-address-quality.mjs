@@ -1,22 +1,18 @@
-import { access } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { openDatabase } from '../server/database/sqlite.mjs';
+import { openPostgresDatabase } from '../server/database/postgres.mjs';
 import { validateAddressQuality } from '../src/domain/address-quality.mjs';
 
-const databasePath = resolve(process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite');
-await access(databasePath);
-const database = openDatabase(databasePath, { readOnly: true });
+const database = await openPostgresDatabase({ migrate: false });
 const results = {};
-let cursor = 0;
+let cursor = '';
 
 try {
   while (true) {
-    const rows = (await database.prepare(`SELECT rowid AS rid,country_code,admin1,admin1_code,locality,postal_locality,
+    const rows = (await database.prepare(`SELECT id,country_code,admin1,admin1_code,locality,postal_locality,
       district,postcode,street,house_number,building_name,component_variants_json
-      FROM address_pool WHERE active=1 AND rowid>? ORDER BY rowid LIMIT 5000`).bind(cursor).all()).results;
+      FROM address_pool WHERE active=1 AND id>? ORDER BY id LIMIT 5000`).bind(cursor).all()).results;
     if (!rows.length) break;
     for (const row of rows) {
-      cursor = Number(row.rid);
+      cursor = String(row.id);
       let sourceComponents = {};
       try { sourceComponents = JSON.parse(String(row.component_variants_json || '{}')).native || {}; } catch {}
       const components = {
@@ -42,7 +38,7 @@ try {
       }
     }
   }
-  console.log(JSON.stringify({ database: databasePath, countries: results }, null, 2));
+  console.log(JSON.stringify({ database: 'postgres', countries: results }, null, 2));
 } finally {
-  database.close();
+  await database.close();
 }

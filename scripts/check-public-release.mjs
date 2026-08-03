@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 const tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
 const candidates = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { encoding: 'utf8' })
   .split('\0').filter(Boolean);
+const staged = execFileSync('git', ['diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'], { encoding: 'utf8' })
+  .split('\0').filter(Boolean);
+const historicalPaths = execFileSync('git', ['log', '--all', '--format=', '--name-only'], { encoding: 'utf8' })
+  .split(/\r?\n/u).filter(Boolean);
 const failures = [];
 const report = (path, type) => failures.push({ path, type });
 
@@ -14,13 +18,20 @@ const forbidden = [
   /(^|\/)(?:data|logs|runtime|backups|worker)\//u,
   /(^|\/)plan\.md$/u,
   /(^|\/)tmp-probe\.png$/u,
-  /\.(?:db|sqlite|sqlite3|pem|p12|pfx)$/iu,
+  /\.(?:db|sqlite|sqlite3|dump|backup|bak|pem|key|p12|pfx|jks|keystore|jsonl|parquet|pbf|osm)$/iu,
+  /(?:^|\/)(?:id_rsa|id_ed25519|id_ecdsa)$/u,
+  /(?:^|\/)(?:\.npmrc|\.pypirc|\.netrc)$/u,
   /(^|\/)\.env(?:\.|$)/u
 ];
 
 for (const path of tracked) {
   if (path.endsWith('.env.example') || path === 'ops/deploy.env.example') continue;
   if (forbidden.some((pattern) => pattern.test(path))) report(path, 'forbidden-tracked-file');
+}
+
+for (const path of historicalPaths) {
+  if (path.endsWith('.env.example') || path === 'ops/deploy.env.example') continue;
+  if (forbidden.some((pattern) => pattern.test(path))) report(path, 'forbidden-history-file');
 }
 
 const secretShapes = [
@@ -33,6 +44,12 @@ const secretShapes = [
   ['tencent-map-key', /\b(?:[A-Z0-9]{5}-){5}[A-Z0-9]{5}\b/u]
 ];
 
+const scan = (path, content, prefix = '') => {
+  for (const [type, pattern] of secretShapes) {
+    if (pattern.test(content)) report(path, prefix ? `${prefix}-${type}` : type);
+  }
+};
+
 for (const path of candidates) {
   let content;
   try {
@@ -40,10 +57,21 @@ for (const path of candidates) {
   } catch {
     continue;
   }
-  for (const [type, pattern] of secretShapes) {
-    if (pattern.test(content)) report(path, type);
+  scan(path, content);
+}
+
+for (const path of staged) {
+  try {
+    scan(path, execFileSync('git', ['show', `:${path}`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }), 'staged');
+  } catch {
+    report(path, 'unreadable-staged-file');
   }
 }
+
+const historyPatch = execFileSync('git', ['log', '--all', '--format=', '--no-ext-diff', '-p'], {
+  encoding: 'utf8', maxBuffer: 128 * 1024 * 1024
+});
+scan('git-history', historyPatch, 'history');
 
 for (const path of ['.env.example', 'server/sync/.env.example', 'ops/address.env.example', 'ops/deploy.env.example']) {
   const content = readFileSync(path, 'utf8');

@@ -31,8 +31,8 @@ const buildDb = (rows, updates) => ({
       bind(...args) { statement._args = args; return statement; },
       async all() {
         if (sql.includes('FROM address_pool WHERE active')) {
-          const cursor = Number(statement._args[0] || 0);
-          return { results: rows.filter((row) => row.rid > cursor) };
+          const cursor = String(statement._args[0] || '');
+          return { results: rows.filter((row) => row.id > cursor) };
         }
         return { results: [] };
       },

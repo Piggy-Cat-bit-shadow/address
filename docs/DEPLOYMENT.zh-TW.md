@@ -7,46 +7,45 @@
 ## 運行要求
 
 - Linux AMD64 或 ARM64 VPS
-- 最低 4 GB 內存；完整首次導入建議 8 GB
+- 完整首次導入需要 8 GB 內存（日本構建實測峰值約 6.5 GB RSS；同步任務默認在可用內存低於 2 GiB 時拒絕啟動）；僅提供已初始化數據庫的服務時 4 GB 足夠
 - 應用卷至少預留 60 GiB
-- `git`、`curl`、`ca-certificates`、`xz-utils`、Python 3 和 `venv`
+- `git`、`curl`、`ca-certificates`、`xz-utils`、Python 3.10 或更新版本（生產使用 3.12）和 `venv`
 - 已解析到 VPS 的域名，以及支持 HTTPS 的反向代理
 
 安裝腳本會下載項目固定的 Node.js 版本，無需在系統中預裝 Node.js。
 
 ## 容量估算
 
-以下數據於 2026-07-23、提交 `084805e`、27 國同步完成後實測：
+PostgreSQL 生產數據保存在 `/root/postgresql/data`。首次導入會在 `/root/address/data/staging` 臨時保留源文件和中間結果，發佈成功後刪除；建議至少預留 60 GiB，用於數據庫、同步暫存、備份和恢復。實際容量取決於上游版本、地址目標量和保留快照。
 
-| 內容 | 實測值 |
-|---|---:|
-| `address.sqlite` | 6.90 GiB |
-| 活躍 SQLite WAL | 0.68 GiB |
-| 完整 `data/` 目錄 | 7.89 GiB |
-| 當前有效地址 | 722,950 條 |
-| 舊版中國住宅子集 | 174,327 條（歷史實測，不是新版 POI 小區池） |
-
-新版中國 POI 小區池會在高德、百度或騰訊同步後增長，最終數量和容量取決於啟用城市、頁數及平台返回結果。首次導入會臨時保留源文件和中間結果，舊版歷史實測峰值約 11.2 GiB。上游版本、WAL 活躍度和可選保留設置會改變實際大小。建議 60 GiB 是為了給同步、備份和恢復留出餘量：影子擴容在 40 GiB 停止，寫入會在達到 45 GiB 前中止，項目絕對上限為 50 GiB。
+首次導入受網絡和 CPU 限制：普通 VPS 通常需要數小時到一天以上，且支持斷點續跑——已完成國家重啟後直接跳過。韓國郵編補齊受 Geoapify 每日 2,800 次上限約束，首次達標後會在後續每日同步中逐步補滿目標量。
 
 ## API Key 與密鑰
 
-日常生成只查詢 active SQLite 中通過證據門禁的真實住宅記錄。中國小區同步需要一個或多個高德、百度或騰訊服務端 Key，部署後在 `/admin/` 中配置；發佈仍要求多平台一致。
+日常生成只查詢 active PostgreSQL 中通過證據門禁的真實住宅記錄。中國小區同步需要一個或多個高德、百度或騰訊服務端 Key，部署後在 `/admin/` 中配置；發佈仍要求多平台一致。
 
 | 變量 | 是否必需 | 功能 | 獲取方式 |
 |---|---|---|---|
-| `CONFIG_MASTER_KEY` | 必需 | 加密 `control.sqlite` 中的地圖憑據 | 使用 `openssl rand -base64 32` 生成，只保留在伺服器。 |
+| `CONFIG_MASTER_KEY` | 必需 | 加密 PostgreSQL 控制表中的地圖憑據 | 使用 `openssl rand -base64 32` 生成，只保留在伺服器。 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 首次必需 | 初始化管理員身份 | 設置強密碼；初始化完成後不再讀取其明文。 |
 | `AMAP_API_KEY` / 其他高德 WebService Key | 中國同步，僅伺服端 | 小區 POI 導入 | 創建“Web 服務”Key 後，透過被忽略的執行配置導入首個值，或在 `/admin/` 添加；不要復用瀏覽器 JS Key。 |
 | `AMAP_JS_API_KEY` | 可選首次導入 | 瀏覽器高德地圖渲染 | 創建專用“Web 端（JS API）”Key，在控制台限制生產域名和本地測試來源，再通過被忽略的運行配置或 `/admin/` 導入。 |
 | `AMAP_JS_SECURITY_CODE` | 與 JS Key 配套 | 鑑權高德 JS 服務請求 | 隨 JS API Key 獲取，只保留在伺服器；應用加密保存並通過 `/_AMapService` 使用。 |
 | 百度 Key | 中國同步 | 小區 POI 導入和交叉驗證 | 創建服務端 Place API Key 後在 `/admin/` 添加。 |
 | 騰訊 Key | 中國同步 | 小區 POI 導入和交叉驗證 | 創建 WebService API Key 後在 `/admin/` 添加。 |
-| `GEOAPIFY_API_KEY` | 可選 | 中國以外實時地理編碼及部分反向本地化 | 按 [Geoapify 官方指南](https://www.geoapify.com/get-started-with-maps-api/)創建項目和 Key。 |
+| `GEOAPIFY_API_KEY` | KR 首次導入必需 | K-apt 郵編反查（無有效郵編的記錄會被丟棄）；也用於中國以外實時地理編碼 | 按 [Geoapify 官方指南](https://www.geoapify.com/get-started-with-maps-api/)創建項目和 Key；免費額度足夠覆蓋導出器每日 2,800 次請求。 |
 | `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET` | 成對可選 | 在線翻譯備用通道 | 在[有道智雲](https://ai.youdao.com/)創建自然語言翻譯應用。 |
-| `ONEMAP_ACCESS_TOKEN` | 可選 | 新加坡地址存在性、郵編和座標核驗 | 按 [OneMap 認證文檔](https://www.onemap.gov.sg/apidocs/authentication)獲取；Token 有效期為 3 天並需要續期，OneMap 單獨結果不構成住宅用途證據。 |
+| `ONEMAP_ACCESS_TOKEN` | 可選 | 擴大新加坡 HDB 建築匹配範圍，以及地址存在性、郵編和座標核驗 | 按 [OneMap 認證文檔](https://www.onemap.gov.sg/apidocs/authentication)獲取；Token 有效期為 3 天並需要續期，OneMap 單獨結果不構成住宅用途證據。 |
+| `GOOGLE_GEOCODING_API_KEY`、`OS_DATA_HUB_API_KEY` | 可選 | API 運行期實時查詢（不參與批量導入） | 分別在 Google Cloud 控制台和 OS Data Hub 獲取。 |
 | `SYNC_ADMIN_TOKEN` | VPS 必需 | 保護同步控制寫操作 | 在本機隨機生成，不屬於第三方憑據。 |
 
-保留 `LIVE_API_MODES=ip-region` 可把實時服務限制在 IP 座標或城市匹配。公開生成只查詢 active SQLite 住宅池，實時候選也必須通過地址存在性和住宅證據門禁；IP 模式無覆蓋時返回 `IP_REGION_NO_RESULT`，不替換成州省或全國地址。除非明確需要在線翻譯，否則保留 `GOOGLE_TRANSLATION_ENABLED=false`。
+### 各國憑據需求
+
+- 無需任何憑據（Overture、Geofabrik/OSM 和官方開放數據）：US、CA、MX、GB、DE、FR、IT、ES、NL、RU、JP、HK、TW、TH、PH、VN、MY、SA、IN、AU、TR、BR、NG、ZA，以及 SG（HDB 源無 Token 即可完成，`ONEMAP_ACCESS_TOKEN` 僅用於擴大覆蓋）。
+- KR：必需 `GEOAPIFY_API_KEY`；缺少時 K-apt 住宅源無法通過質量門禁，首次初始化無法完成。
+- CN：不經過批量 ETL。中國小區數據由 API 進程使用高德（可選百度、騰訊交叉驗證）服務端 Key 同步，在 `/admin/` 配置。
+
+公開生成和 IP 區域生成只查詢 active PostgreSQL 住宅池。第三方平台密鑰由後台同步使用，不會注入公開生成請求；IP 模式無覆蓋時返回 `IP_REGION_NO_RESULT`，不替換成州省或全國地址。除非後台同步明確需要在線翻譯，否則保留 `GOOGLE_TRANSLATION_ENABLED=false`。
 
 ## 密鑰保護
 
@@ -92,8 +91,8 @@ chmod 600 /root/address/runtime/address.env
 | `API_HOST` | `127.0.0.1` | Hono 監聽地址 |
 | `API_PORT` | `8787` | Hono 監聽端口 |
 | `STATIC_ROOT` | `/root/address/app/dist` | Astro 構建結果 |
-| `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite 數據庫 |
-| `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | 認證、加密憑據、配額、任務和審計數據庫 |
+| `POSTGRES_URL` | `postgresql://address:...@127.0.0.1:5432/address` | PostgreSQL 連接串，只保存在伺服器運行配置 |
+| `POSTGRES_POOL_MAX` / `POSTGRES_POOL_MIN` | `64` / `4` | 應用連接池上下限 |
 | `CONFIG_MASTER_KEY` | 僅伺服器保存的隨機值 | 地圖憑據和高德 JS 安全配置的 AES-256-GCM 主密鑰 |
 | `AMAP_JS_API_KEY` | 空 | 專用瀏覽器 JS API Key 的可選首次導入值 |
 | `AMAP_JS_SECURITY_CODE` | 空 | 僅伺服器使用的 JS 安全密鑰可選首次導入值 |
@@ -104,6 +103,7 @@ chmod 600 /root/address/runtime/address.env
 | `SYNC_HOST` | `127.0.0.1` | 同步管理監聽地址 |
 | `SYNC_PORT` | `8791` | 同步管理端口 |
 | `SYNC_CONTROL_PUBLIC` | `false` | 禁止主 API 公開同步管理入口 |
+| `SYNC_SCHEDULER_ENABLED` | `true` | 允許同步服務自動補齊首次初始化並執行每日更新 |
 | `SYNC_UTC_HOUR` | `3` | 每日調度檢查時間，UTC 小時 |
 
 只有受控反向代理會覆蓋轉發 IP 請求頭時才啟用 `TRUST_PROXY`。端口 `8791` 始終保持私有。
@@ -146,16 +146,36 @@ cd /root/address/app
 npm run build
 ```
 
-### 4. 初始化全部國家
+### 4. 導入位置目錄
+
+```bash
+export PATH=/root/address/runtime/node/bin:$PATH
+cd /root/address/app
+. ops/env.sh
+npm run data:catalog
+npm run data:catalog:import
+```
+
+`data:catalog` 下載開放的地區/城市/郵編參考數據（countries-states-cities-database 加 GeoNames，數百 MB），生成 `.data-cache/catalog-seed.sql`；`data:catalog:import` 將其寫入 `POSTGRES_URL` 指向的數據庫。此步驟必須在首次地址導入前完成：ETL 依賴目錄表做導入期反向地理編碼，目錄為空會顯著降低接受率。
+
+### 5. 初始化全部國家
+
+`SYNC_SCHEDULER_ENABLED=true`（模板默認值）時，直接啟動服務即可——同步服務會自動執行支持斷點續跑的首次導入，失敗按退避自動重試：
+
+```bash
+/root/address/app/ops/start.sh
+```
+
+如需先在前台執行首次導入（要求 supervisor 已停止），使用：
 
 ```bash
 /root/address/app/ops/initial-sync.sh
 tail -f /root/address/logs/initial-sync.log
 ```
 
-任務在後臺執行，每個國家獨立驗證和發佈，重啟後可複用已完成緩存。耗時取決於 VPS CPU、磁盤、網絡和上游狀態。全部成功後自動啟動 API 與調度服務。
+每個國家獨立驗證和發佈，重啟後可複用已完成緩存。耗時取決於 VPS CPU、磁盤、網絡和上游狀態（通常數小時到一天以上）。導入進行期間，API 會先提供已發佈國家的數據。
 
-### 5. 驗證服務
+### 6. 驗證服務
 
 ```bash
 /root/address/app/ops/status.sh
@@ -187,8 +207,8 @@ server {
 
 ## 同步與運維
 
-- 首次任務處理 27 國，支持斷點續跑。
-- 穩態調度在每天 03:00 UTC 檢查，每天最多更新一個到期國家。
+- 首次任務覆蓋 26 個 ETL 國家（中國由 API 進程單獨同步），支持斷點續跑。
+- 穩態調度要求 `SYNC_SCHEDULER_ENABLED=true`：每天 03:00 UTC 檢查，每天最多更新一個到期國家。
 - 國家同步成功後，下一週期為 30 天。
 - 新快照失敗時繼續保留舊 active 數據。
 - 發佈成功後默認刪除原始源文件，除非明確開啟保留。
@@ -199,14 +219,21 @@ server {
 /root/address/app/ops/stop.sh
 /root/address/app/ops/status.sh
 
-# 創建 SQLite 一致性備份
+# 創建 PostgreSQL 自定義格式備份
 /root/address/app/ops/backup.sh
 
 # 恢復 /root/address/backups 下的備份
-/root/address/app/ops/restore.sh /root/address/backups/ADDRESS_BACKUP.sqlite
+/root/address/app/ops/restore.sh /root/address/backups/ADDRESS_BACKUP.dump
 ```
 
-項目使用進程 supervisor，不安裝 systemd 服務或 cron。需要 VPS 重啟後自動啟動時，把 `ops/start.sh` 接入主機已有的啟動機制。
+備份注意事項：
+
+- `backup.sh` 使用 `pg_dump --format=custom`；恢復腳本使用 `pg_restore --clean --if-exists`。
+- 任何備份都應排除 `data/staging`（`ADDRESS_SYNC_CACHE_DIR`）：其中只有可重新下載的源產物，導入期間可達數十 GiB。
+- 單個備份包含地址表、控制表、憑據密文、同步狀態和審計數據。備份文件必須保持權限 `600`，並定期使用 `pg_restore --list` 驗證可讀性。
+- PostgreSQL 伺服器使用 `max_connections=256`；應用池默認最大 64、最小 4，可通過 `POSTGRES_POOL_MAX` 和 `POSTGRES_POOL_MIN` 調整。
+
+項目 supervisor（`ops/supervisor.mjs`，由 `ops/start.sh` 啟動）運行並守護兩個進程：API 服務（`server/api/server.ts`，端口 `8787`）和同步服務（`server/sync/index.mjs`，端口 `8791`）。它基於進程管理，不安裝 systemd 服務或 cron。需要 VPS 重啟後自動啟動時，把 `ops/start.sh` 接入主機已有的啟動機制。
 
 ## 部署後續提交
 

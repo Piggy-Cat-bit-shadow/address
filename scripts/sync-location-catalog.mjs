@@ -129,14 +129,14 @@ const writeBatch = (stream, table, columns, records, values) => {
 };
 
 const stream = createWriteStream(outputUrl, { encoding: 'utf8' });
-stream.write(`PRAGMA foreign_keys = OFF;
-BEGIN TRANSACTION;
+stream.write(`BEGIN;
+SET CONSTRAINTS ALL DEFERRED;
 DROP TABLE IF EXISTS catalog_regions_staging;
 DROP TABLE IF EXISTS catalog_cities_staging;
 DROP TABLE IF EXISTS catalog_postcodes_staging;
-CREATE TABLE catalog_regions_staging AS SELECT * FROM catalog_regions WHERE 0;
-CREATE TABLE catalog_cities_staging AS SELECT * FROM catalog_cities WHERE 0;
-CREATE TABLE catalog_postcodes_staging AS SELECT * FROM catalog_postcodes WHERE 0;
+CREATE TABLE catalog_regions_staging AS SELECT * FROM catalog_regions WHERE FALSE;
+CREATE TABLE catalog_cities_staging AS SELECT * FROM catalog_cities WHERE FALSE;
+CREATE TABLE catalog_postcodes_staging AS SELECT * FROM catalog_postcodes WHERE FALSE;
 `);
 writeBatch(stream, 'catalog_regions_staging', ['id', 'country_code', 'code', 'name', 'native_name', 'zh_name', 'type', 'parent_id', 'path', 'latitude', 'longitude'], selectedStates, (state) => [
   state.id, state.country_code, state.iso2 || '', state.name, state.native || state.name,
@@ -152,13 +152,13 @@ writeBatch(stream, 'catalog_postcodes_staging', ['id', 'country_code', 'region_i
   postcode.locality_name || '', number(postcode.latitude), number(postcode.longitude)
 ]);
 stream.write(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude)
-SELECT id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude FROM catalog_regions_staging WHERE 1
+SELECT id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude FROM catalog_regions_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,code=excluded.code,name=excluded.name,native_name=excluded.native_name,zh_name=excluded.zh_name,type=excluded.type,parent_id=excluded.parent_id,path=excluded.path,latitude=excluded.latitude,longitude=excluded.longitude;
 INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude)
-SELECT id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude FROM catalog_cities_staging WHERE 1
+SELECT id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude FROM catalog_cities_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=excluded.region_id,name=excluded.name,native_name=excluded.native_name,zh_name=excluded.zh_name,type=excluded.type,population=excluded.population,latitude=excluded.latitude,longitude=excluded.longitude;
 INSERT INTO catalog_postcodes(id,country_code,region_id,city_id,code,locality_name,latitude,longitude)
-SELECT id,country_code,region_id,city_id,code,locality_name,latitude,longitude FROM catalog_postcodes_staging WHERE 1
+SELECT id,country_code,region_id,city_id,code,locality_name,latitude,longitude FROM catalog_postcodes_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=excluded.region_id,city_id=excluded.city_id,code=excluded.code,locality_name=excluded.locality_name,latitude=excluded.latitude,longitude=excluded.longitude;
 DELETE FROM catalog_postcodes WHERE id NOT IN (SELECT id FROM catalog_postcodes_staging);
 DELETE FROM catalog_cities WHERE id NOT IN (SELECT id FROM catalog_cities_staging);
@@ -181,9 +181,9 @@ for (let index = 0; index < residentialCoverage.length; index += 250) {
   const batch = residentialCoverage.slice(index, index + 250);
   stream.write(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id) VALUES\n${tuples(batch, (record) => [
     record.countryCode, record.region || '', record.city || '', record.addressCount || 1, record.verifiedAt || now, record.regionId || null, record.cityId || null
-  ])}\nON CONFLICT(country_code,region_name,city_name) DO UPDATE SET address_count = MAX(address_count, excluded.address_count), last_verified_at = MAX(last_verified_at, excluded.last_verified_at), region_id = COALESCE(excluded.region_id, residential_coverage.region_id), city_id = COALESCE(excluded.city_id, residential_coverage.city_id);\n`);
+  ])}\nON CONFLICT(country_code,region_name,city_name) DO UPDATE SET address_count = GREATEST(residential_coverage.address_count, excluded.address_count), last_verified_at = GREATEST(residential_coverage.last_verified_at, excluded.last_verified_at), region_id = COALESCE(excluded.region_id, residential_coverage.region_id), city_id = COALESCE(excluded.city_id, residential_coverage.city_id);\n`);
 }
-stream.write('COMMIT;\nPRAGMA foreign_keys = ON;\n');
+stream.write('COMMIT;\n');
 await new Promise((resolve, reject) => { stream.end(resolve); stream.on('error', reject); });
 
 const countByCountry = (records) => Object.fromEntries([...countryCodes].map((country) => [country, records.filter((record) => record.country_code === country).length]));

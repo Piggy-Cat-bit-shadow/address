@@ -72,12 +72,12 @@ describe('profile result presentation', () => {
     expect(localizedExtensionValue('ms', 'zh-CN')).toBe('女士');
     expect(localizedExtensionValue('Software Engineer', 'en')).toBe('Software Engineer');
 
-    // profileValue: native resolves to the country's language (zh for CN-family, else English).
+    // profileValue: native resolves to the country's language and script.
     expect(profileValue('Software Engineer', 'zh-CN', 'US')).toBe('软件工程师');
     expect(profileValue('Software Engineer', 'en', 'US')).toBe('Software Engineer');
     expect(profileValue('Software Engineer', 'native', 'US')).toBe('Software Engineer');
     expect(profileValue('Software Engineer', 'native', 'CN')).toBe('软件工程师');
-    expect(profileValue('Software Engineer', 'native', 'TW')).toBe('软件工程师');
+    expect(profileValue('Software Engineer', 'native', 'TW')).toBe('軟體工程師');
     // Closed enum sets carry real native-language dictionaries.
     expect(profileValue('master', 'native', 'JP')).toBe('修士');
     expect(profileValue('employed', 'native', 'KR')).toBe('재직 중');
@@ -109,5 +109,15 @@ describe('profile result presentation', () => {
     expect(source).toContain('extensions.basic.honorific');
     expect(source).toContain('extensions.employment.workSchedule');
     expect(source).toContain('cardNotice');
+  });
+
+  it('uses one profile language control for every generated profile section', () => {
+    const source = App.toString();
+    expect(source).toContain('ProfileLanguageControl');
+    expect(source).toContain('displayedFullName');
+    expect(source).toContain('profilePresentation?.company');
+    expect(source).toContain('profilePresentation?.accountDisplayName');
+    expect(source).toContain('profilePresentation?.securityAnswer');
+    expect(source).not.toContain('sectionLanguages');
   });
 });
