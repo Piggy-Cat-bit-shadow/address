@@ -16,6 +16,11 @@ const validReleaseId = (value) => {
 
 const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
 const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED']);
+const nonRetryableFailureCodes = new Set([
+  ...deterministicFailureCodes,
+  'SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED',
+  'ADDRESS_SYNC_MEMORY_LOW', 'ADDRESS_SYNC_ALREADY_RUNNING'
+]);
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
@@ -72,7 +77,7 @@ export const acquireSyncLease = async (file, { now = () => Date.now(), isAlive =
 };
 const shouldRetry = (error) => {
   const errors = error instanceof AggregateError ? error.errors : [error];
-  return errors.some((entry) => !deterministicFailureCodes.has(entry?.code));
+  return errors.some((entry) => !nonRetryableFailureCodes.has(entry?.code));
 };
 
 export const assertSyncMemory = (availableBytes, minimumBytes) => {
@@ -135,7 +140,8 @@ export const runAddressSync = async ({
       requireResidential: enabled(environment.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
       maxShardsPerRun: syncMode === 'manual' || syncMode === 'initial' ? Number.MAX_SAFE_INTEGER : 1
     };
-    const attempts = integer(environment.ADDRESS_SYNC_RETRY_ATTEMPTS, 3, 1, 10);
+    const defaultAttempts = syncMode === 'daily' ? 1 : 3;
+    const attempts = integer(environment.ADDRESS_SYNC_RETRY_ATTEMPTS, defaultAttempts, 1, 10);
     const baseDelayMs = integer(environment.ADDRESS_SYNC_RETRY_BASE_MS, 1_000, 1, 60_000);
     let etl;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -150,6 +156,7 @@ export const runAddressSync = async ({
         if (attempt === attempts || !shouldRetry(error)) throw error;
         const waitMs = Math.min(60_000, baseDelayMs * 2 ** (attempt - 1));
         console.warn(`Address synchronization attempt ${attempt}/${attempts} failed; retrying in ${waitMs}ms`, error);
+        if (signal?.aborted) throw Object.assign(new Error('Address synchronization aborted'), { code: 'SYNC_JOB_TIMEOUT' });
         await wait(waitMs);
       }
     }

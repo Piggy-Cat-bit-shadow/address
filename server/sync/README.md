@@ -22,6 +22,8 @@
 - `node server/sync/address-etl.mjs --manual --shard US`：手动同步指定国家。
 - `node server/sync/index.mjs`：启动同步管理 API；当 `SYNC_SCHEDULER_ENABLED=true` 时自动补跑未完成的初始化并按 `SYNC_UTC_HOUR` 每日调度。
 
+同步服务只在队列空闲时清理 staging 临时产物：启动时立即检查，此后默认每 15 分钟检查一次；死亡 PID 的临时文件立即回收，无 PID 的下载残片和临时目录默认保留 6 小时。
+
 成功国家的 `next_sync_at` 为完成时间加 30 天。失败不会替换现有 active dataset。同步目录达到 40GB 后停止 shadow 扩容，预计达到 45GB 时中止写入。`run-address-sync` 在可用内存低于 `ADDRESS_SYNC_MIN_FREE_MEMORY_BYTES`（默认 2 GiB）时拒绝启动；日本构建实测峰值约 6.5 GB RSS。
 
 ## 数据处理

@@ -10,6 +10,9 @@ class SyncBusyError extends Error {
 }
 
 const errorText = (error) => error instanceof Error ? error.message : String(error);
+const errorCode = (error) => error?.code || (error instanceof AggregateError
+  ? error.errors.map((entry) => errorCode(entry)).find(Boolean)
+  : null);
 const jobFileName = (id) => `${id}.json`;
 
 export class SyncCoordinator {
@@ -19,7 +22,7 @@ export class SyncCoordinator {
     now = () => new Date(),
     idFactory = randomUUID,
     lockStaleMs = 5 * 60 * 1000,
-    jobTimeoutMs = 3 * 60 * 60_000,
+    jobTimeoutMs = 90 * 60_000,
     processIsAlive = (pid) => {
       try {
         process.kill(pid, 0);
@@ -40,6 +43,7 @@ export class SyncCoordinator {
     this.processIsAlive = processIsAlive;
     this.currentJob = null;
     this.currentTask = null;
+    this.recoveredJobs = [];
     this.initialized = false;
   }
 
@@ -68,7 +72,8 @@ export class SyncCoordinator {
       heartbeatAt: null,
       deadlineAt: null,
       shards: [...new Set(shards)],
-      error: null
+      error: null,
+      errorCode: null
     };
 
     let lock;
@@ -133,7 +138,8 @@ export class SyncCoordinator {
         status: 'failed',
         phase: 'failed',
         completedAt: this.now().toISOString(),
-        error: errorText(error).slice(0, 1000)
+        error: errorText(error).slice(0, 1000),
+        errorCode: errorCode(error)
       });
     } finally {
       clearInterval(heartbeat);
@@ -252,9 +258,11 @@ export class SyncCoordinator {
         status: 'failed',
         phase: 'interrupted',
         completedAt: this.now().toISOString(),
-        error: 'Synchronization interrupted before completion'
+        error: 'Synchronization interrupted before completion',
+        errorCode: 'SYNC_JOB_INTERRUPTED'
       });
       await this.writeJob(job);
+      this.recoveredJobs.push(job);
     }
   }
 

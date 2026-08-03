@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-. /root/address/app/ops/env.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env.sh"
 
 pid_file="$RUNTIME/pids/initial-sync.pid"
 supervisor_pid="$RUNTIME/pids/supervisor.pid"

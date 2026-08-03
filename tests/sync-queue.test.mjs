@@ -76,6 +76,17 @@ describe('attempt evaluation and latching', () => {
     expect(eighth.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 24 * 60 * 60_000));
   });
 
+  it('suspends a country after two consecutive timeout failures', () => {
+    const first = evaluateAttempt({
+      ...base, jobSucceeded: false, netGrowth: 0, failureCode: 'SYNC_PROCESS_TIMEOUT', consecutiveFailures: 0
+    });
+    expect(first).toMatchObject({ action: 'backoff', consecutiveFailures: 1, failureCode: 'SYNC_PROCESS_TIMEOUT' });
+    const second = evaluateAttempt({
+      ...base, jobSucceeded: false, netGrowth: 0, failureCode: 'SYNC_PROCESS_TIMEOUT', consecutiveFailures: 1
+    });
+    expect(second).toMatchObject({ action: 'suspend', consecutiveFailures: 2, failureCode: 'SYNC_PROCESS_TIMEOUT' });
+  });
+
   it('moves quota-bound countries to waiting_quota instead of latching when the quota is spent', () => {
     const result = evaluateAttempt({
       ...base, jobSucceeded: false, netGrowth: 0,

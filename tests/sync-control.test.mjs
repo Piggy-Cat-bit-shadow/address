@@ -86,7 +86,7 @@ describe('address sync coordinator', () => {
     const result = await coordinator.trigger('manual');
     await coordinator.waitForIdle();
     await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
-      status: 'failed', phase: 'failed', error: 'Synchronization exceeded 20ms'
+      status: 'failed', phase: 'failed', error: 'Synchronization exceeded 20ms', errorCode: 'SYNC_JOB_TIMEOUT'
     });
   });
 
@@ -296,6 +296,19 @@ describe('atomic address release command', () => {
     })).rejects.toThrow('Address sync failed');
     expect(calls).toBe(1);
     expect(waits).toEqual([]);
+  });
+
+  it('does not immediately retry a timed-out synchronization process', async () => {
+    let calls = 0;
+    await expect(runAddressSync({
+      releaseId: 'release-process-timeout',
+      environment: { ADDRESS_SYNC_RETRY_ATTEMPTS: '3' },
+      runEtl: async () => {
+        calls += 1;
+        throw Object.assign(new Error('python exceeded deadline'), { code: 'SYNC_PROCESS_TIMEOUT' });
+      }
+    })).rejects.toMatchObject({ code: 'SYNC_PROCESS_TIMEOUT' });
+    expect(calls).toBe(1);
   });
 });
 

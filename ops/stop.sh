@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-. /root/address/app/ops/env.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env.sh"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl cat address.service >/dev/null 2>&1; then
   systemctl stop address.service

@@ -408,7 +408,7 @@ export const createSourceAdapters = ({
   fetchImpl = fetch,
   execute = runProcess,
   processConcurrency = 3,
-  processTimeoutMs = Number(process.env.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 90 * 60_000),
+  processTimeoutMs = Number(process.env.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 30 * 60_000),
   signal,
   pythonBin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
   enableOvertureResidential = process.env.ADDRESS_SYNC_OVERTURE_BUILDINGS === 'true'
@@ -423,7 +423,13 @@ export const createSourceAdapters = ({
   const runExecute = async (options) => {
     if (activeProcesses >= processConcurrency) await new Promise((resolve) => processWaiters.push(resolve));
     activeProcesses += 1;
-    try { return await execute({ ...options, signal, timeoutMs: processTimeoutMs }); }
+    try {
+      return await execute({
+        ...options,
+        signal: options.signal || signal,
+        timeoutMs: options.timeoutMs || processTimeoutMs
+      });
+    }
     finally {
       activeProcesses -= 1;
       processWaiters.shift()?.();
@@ -972,13 +978,15 @@ export const createSourceAdapters = ({
       try {
         await runProcess({
           file: 'curl',
-          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-C', '-', '-o', partial, url]
+          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-C', '-', '-o', partial, url],
+          signal
         });
       } catch {
         await rm(partial, { force: true });
         await runProcess({
           file: 'curl',
-          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-o', partial, url]
+          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-o', partial, url],
+          signal
         });
       }
       const downloaded = (await stat(partial)).size;
@@ -991,7 +999,10 @@ export const createSourceAdapters = ({
     let offset = 0;
     try { offset = (await stat(partial)).size; } catch {}
     if (expectedBytes !== null && expectedBytes > maxBytes) throw new Error(`Source file exceeds cache budget: ${expectedBytes} > ${maxBytes}`);
-    const response = await fetchImpl(url, { headers: offset ? { Range: `bytes=${offset}-` } : {} });
+    const response = await fetchImpl(url, {
+      headers: offset ? { Range: `bytes=${offset}-` } : {},
+      signal
+    });
     if (!response.ok) throw new Error(`Source download failed (${response.status}): ${url}`);
     const append = offset > 0 && response.status === 206;
     if (!append) offset = 0;
@@ -1195,7 +1206,6 @@ export const createSourceAdapters = ({
       osmFile ? sha256File(osmFile) : null,
       sha256File(postalFile)
     ]);
-    let completed = false;
     try {
       await runExecute({
         file: pythonBin,
@@ -1212,12 +1222,11 @@ export const createSourceAdapters = ({
         phase: `materialize:${shard.id}`
       });
       await rename(temporary, output);
-      completed = true;
     } finally {
       await rm(temporary, { force: true });
-      if (osmFile && !options.retainRaw && !options.sharedRaw && completed) await rm(osmFile, { force: true });
-      if (!options.retainRaw && completed) await rm(postalFile, { force: true });
-      if (!options.retainRaw && completed) {
+      if (osmFile && !options.retainRaw && !options.sharedRaw) await rm(osmFile, { force: true });
+      if (!options.retainRaw) await rm(postalFile, { force: true });
+      if (!options.retainRaw) {
         await Promise.all(plateauArtifacts.flatMap((bundle) => [
           rm(bundle.bundleFile, { force: true }), rm(bundle.directory, { recursive: true, force: true })
         ]));

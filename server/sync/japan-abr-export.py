@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import duckdb
 import osmium
@@ -396,19 +396,19 @@ def open_candidate_store(path):
             building_id TEXT, building_class TEXT, building_name TEXT
         )
     """)
-    connection.execute("CREATE INDEX candidate_coordinates ON candidates(longitude, latitude)")
     return connection
 
 
 def insert_candidates(connection, candidates):
-    for candidate in candidates:
-        connection.execute("""
+    rows = [tuple(candidate[field] for field in (
+        "source_id", "prefecture", "city", "district", "street", "number", "postcode",
+        "longitude", "latitude", "source_rank"
+    )) for candidate in candidates]
+    for offset in range(0, len(rows), 5000):
+        connection.executemany("""
             INSERT INTO candidates(source_id,prefecture,city,district,street,number,postcode,
               longitude,latitude,source_rank) VALUES (?,?,?,?,?,?,?,?,?,?)
-        """, tuple(candidate[field] for field in (
-            "source_id", "prefecture", "city", "district", "street", "number", "postcode",
-            "longitude", "latitude", "source_rank"
-        )))
+        """, rows[offset:offset + 5000])
 
 
 def match_residential_buildings(connection, osm_path, output_path):
@@ -596,30 +596,50 @@ def main():
     store_path.unlink(missing_ok=True)
     connection = open_candidate_store(store_path)
     try:
+        connection.execute("BEGIN TRANSACTION")
         with ThreadPoolExecutor(max_workers=max(1, min(args.workers, 32))) as executor:
             priority_codes = set(args.plateau_city_code)
-            futures = [executor.submit(parse_city, (
-                base_url, prefecture, city, postcodes,
-                None if any(lot_city_matches(priority, code, has_ward) for priority in priority_codes)
-                else city_limit
-            )) for prefecture, city, code, has_ward in cities]
-            failures = 0
-            for completed, future in enumerate(as_completed(futures), start=1):
+            city_iterator = iter(cities)
+            worker_count = max(1, min(args.workers, 32))
+            pending = set()
+
+            def submit_next():
                 try:
-                    insert_candidates(connection, future.result())
-                except RuntimeError as error:
-                    failures += 1
-                    print(str(error), file=sys.stderr, flush=True)
-                if completed % 100 == 0 or completed == len(futures):
-                    count = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-                    print(f"Japan ABR preparation: {completed}/{len(futures)} cities, {count} candidates",
-                          file=sys.stderr, flush=True)
+                    prefecture, city, code, has_ward = next(city_iterator)
+                except StopIteration:
+                    return False
+                pending.add(executor.submit(parse_city, (
+                    base_url, prefecture, city, postcodes,
+                    None if any(lot_city_matches(priority, code, has_ward) for priority in priority_codes)
+                    else city_limit
+                )))
+                return True
+
+            for _ in range(min(len(cities), worker_count * 2)):
+                submit_next()
+            failures = 0
+            completed = 0
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    completed += 1
+                    try:
+                        insert_candidates(connection, future.result())
+                    except RuntimeError as error:
+                        failures += 1
+                        print(str(error), file=sys.stderr, flush=True)
+                    submit_next()
+                    if completed % 100 == 0 or completed == len(cities):
+                        count = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+                        print(f"Japan ABR preparation: {completed}/{len(cities)} cities, {count} candidates",
+                              file=sys.stderr, flush=True)
             if failures > max(10, math.floor(len(cities) * 0.1)):
                 raise RuntimeError(f"ABR city preparation failed for {failures}/{len(cities)} cities")
         connection.commit()
         candidate_count = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         if candidate_count == 0:
             raise RuntimeError("ABR and Japan Post produced no strict address candidates")
+        connection.execute("CREATE INDEX candidate_coordinates ON candidates(longitude, latitude)")
         if args.plateau_parquet:
             matched = match_plateau_buildings(connection, args.plateau_parquet)
             print(f"Japan PLATEAU residential matches: {matched}", file=sys.stderr, flush=True)
@@ -638,6 +658,7 @@ def main():
     finally:
         connection.close()
         store_path.unlink(missing_ok=True)
+        pathlib.Path(f"{store_path}.wal").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

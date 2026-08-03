@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-. /root/address/app/ops/env.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env.sh"
 
 job_id="${1:-}"
 case "$job_id" in

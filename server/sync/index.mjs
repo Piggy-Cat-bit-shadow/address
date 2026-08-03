@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createSyncApi } from './api.mjs';
+import { createSyncArtifactCleanup } from './artifact-cleanup.mjs';
 import { createPostgresPool, initializePostgres, PostgresDatabase } from '../database/postgres.mjs';
 import { SyncCoordinator } from './coordinator.mjs';
 import { createSyncQueue } from './queue.mjs';
@@ -52,7 +53,7 @@ export const createSyncRuntime = async ({
   const coordinator = new SyncCoordinator({
     stateDir,
     now,
-    jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 3 * 60 * 60_000, 60_000, 24 * 60 * 60_000),
+    jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 90 * 60_000, 60_000, 24 * 60 * 60_000),
     runSync: ({ id, trigger, shards, signal }) => runSync({
       releaseId: id,
       signal,
@@ -66,6 +67,14 @@ export const createSyncRuntime = async ({
     })
   });
   await coordinator.initialize();
+  const artifactCleanup = environment.ADDRESS_SYNC_CACHE_DIR ? createSyncArtifactCleanup({
+    cacheDir: environment.ADDRESS_SYNC_CACHE_DIR,
+    isBusy: () => Boolean(coordinator.currentJob),
+    staleMs: integer(environment.ADDRESS_SYNC_ARTIFACT_STALE_MS, 6 * 60 * 60_000, 60_000, 30 * 24 * 60 * 60_000),
+    intervalMs: integer(environment.ADDRESS_SYNC_CLEANUP_INTERVAL_MS, 15 * 60_000, 60_000, 24 * 60 * 60_000),
+    retainRaw: enabled(environment.ADDRESS_SYNC_RETAIN_RAW)
+  }) : null;
+  artifactCleanup?.start();
   const queue = createSyncQueue({
     environment,
     coordinator,
@@ -126,6 +135,7 @@ export const createSyncRuntime = async ({
       stopInitialScheduler?.();
       stopInitialScheduler = undefined;
       stopQueue = undefined;
+      await artifactCleanup?.stop();
       await queue.stop();
       await coordinator.waitForIdle();
       testDatabase?.close();

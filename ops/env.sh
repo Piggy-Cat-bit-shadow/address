@@ -1,7 +1,14 @@
 #!/bin/sh
 set -eu
 
-ROOT=/root/address
+if [ -n "${ADDRESS_ROOT:-}" ]; then
+  ROOT=$ADDRESS_ROOT
+elif [ -f "$PWD/ops/env.sh" ]; then
+  ROOT=$(CDPATH= cd -- "$PWD/.." && pwd)
+else
+  ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fi
+export ADDRESS_ROOT="$ROOT"
 APP="$ROOT/app"
 RUNTIME="$ROOT/runtime"
 NODE="$RUNTIME/node/bin/node"

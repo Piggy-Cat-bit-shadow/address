@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = resolve(process.env.ADDRESS_ROOT || (basename(app) === 'app' ? dirname(app) : app));
 const runner = resolve(app, 'node_modules/tsx/dist/cli.mjs');
 const definitions = [
   ['api', resolve(app, 'server/api/server.ts')],
@@ -20,12 +21,12 @@ const signalTree = (child, signal) => {
 };
 
 const retireLegacyInitialQueue = async () => {
-  const pidFile = '/root/address/runtime/pids/initial-queue.pid';
+  const pidFile = resolve(root, 'runtime/pids/initial-queue.pid');
   try {
     const pid = Number.parseInt((await readFile(pidFile, 'utf8')).trim(), 10);
     if (Number.isSafeInteger(pid) && pid > 0) {
       const command = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).replaceAll('\0', ' ');
-      if (command.includes('/root/address/app/ops/queue-initial-sync.sh')) process.kill(pid, 'SIGTERM');
+      if (command.includes(resolve(app, 'ops/queue-initial-sync.sh'))) process.kill(pid, 'SIGTERM');
     }
   } catch {}
   await rm(pidFile, { force: true });

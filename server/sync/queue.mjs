@@ -90,6 +90,7 @@ export const evaluateAttempt = ({
   netGrowth,
   fingerprintAfter,
   deterministicFailure = false,
+  failureCode = null,
   quotaBound = false,
   quotaAvailable = true,
   quotaResetAt = null,
@@ -98,6 +99,7 @@ export const evaluateAttempt = ({
   backoffBaseMs = 5 * 60_000,
   backoffCapMs = 6 * 60 * 60_000,
   maxConsecutiveFailures = 8,
+  maxTimeoutFailures = 2,
   suspendMs = 24 * 60 * 60_000,
   probeIntervalMs = DEFAULT_SOURCE_PROBE_MS
 }) => {
@@ -117,12 +119,14 @@ export const evaluateAttempt = ({
     return { action: 'latch', reason: LATCH_REASON, fingerprint: fingerprintAfter, latchedAt: completedAt };
   }
   const failures = consecutiveFailures + 1;
-  if (failures >= Math.max(1, maxConsecutiveFailures)) {
+  const timeoutFailure = ['SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'].includes(String(failureCode || ''));
+  if (failures >= Math.max(1, timeoutFailure ? maxTimeoutFailures : maxConsecutiveFailures)) {
     return {
       action: 'suspend',
       reason: SUSPENDED_REASON,
       fingerprint: fingerprintAfter,
       consecutiveFailures: failures,
+      failureCode: failureCode || null,
       nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, suspendMs)).toISOString()
     };
   }
@@ -130,6 +134,7 @@ export const evaluateAttempt = ({
   return {
     action: 'backoff',
     consecutiveFailures: failures,
+    failureCode: failureCode || null,
     nextAttemptAt: new Date(timestamp(completedAt) + delay).toISOString()
   };
 };
@@ -185,6 +190,7 @@ export class QueueStateStore {
         reason: evaluation.reason || SUSPENDED_REASON,
         fingerprint: evaluation.fingerprint,
         consecutiveFailures: evaluation.consecutiveFailures,
+        failureCode: evaluation.failureCode || null,
         nextAttemptAt: evaluation.nextAttemptAt || null,
         updatedAt: evaluatedAt
       };
@@ -193,6 +199,7 @@ export class QueueStateStore {
         state: 'backoff',
         latched: false,
         consecutiveFailures: evaluation.consecutiveFailures,
+        failureCode: evaluation.failureCode || null,
         nextAttemptAt: evaluation.nextAttemptAt,
         updatedAt: evaluatedAt
       };
@@ -398,6 +405,7 @@ export const computeQueueSnapshot = async ({
         && failedShards.every((shard) => deterministicFailureCodes.has(shard.failureCode)),
       intervalDays: Number((catalogShards || []).find((shard) => shard.id === countryShards[0]?.shardId)?.intervalDays || 1),
       consecutiveFailures: Number(persisted.consecutiveFailures || 0),
+      failureCode: persisted.failureCode || null,
       nextAttemptAt: null,
       reason: null,
       position: null
@@ -507,6 +515,32 @@ export const createSyncQueue = ({
     return snap.entries.find((entry) => entry.countryCode === countryCode) || null;
   };
 
+  const applyRecoveredFailures = async () => {
+    const recovered = coordinator?.recoveredJobs?.splice(0) || [];
+    for (const job of recovered) {
+      for (const value of job.shards || []) {
+        const countryCode = String(value).toUpperCase();
+        if (!/^[A-Z]{2}$/u.test(countryCode)) continue;
+        const entry = await countryEntry(countryCode);
+        if (!entry || ['done', 'source_limited'].includes(entry.state)) continue;
+        const completedAt = job.completedAt || now().toISOString();
+        await store.apply(countryCode, evaluateAttempt({
+          jobSucceeded: false,
+          netGrowth: 0,
+          fingerprintAfter: entry.fingerprint,
+          failureCode: job.errorCode || 'SYNC_JOB_INTERRUPTED',
+          consecutiveFailures: entry.consecutiveFailures,
+          completedAt,
+          backoffBaseMs,
+          backoffCapMs,
+          maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
+          maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
+          suspendMs: integer(environment.SYNC_QUEUE_SUSPEND_MS, 24 * 60 * 60_000, 60_000, 30 * 24 * 60 * 60_000)
+        }), completedAt);
+      }
+    }
+  };
+
   // One pass: pick the next runnable country, run it to completion through the
   // coordinator, evaluate the outcome. Returns milliseconds to sleep before
   // the next pass (0 means continue immediately).
@@ -552,7 +586,9 @@ export const createSyncQueue = ({
       completedAt,
       backoffBaseMs,
       backoffCapMs,
-      maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 8, 1, 100),
+      maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
+      maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
+      failureCode: job?.errorCode || null,
       suspendMs: integer(environment.SYNC_QUEUE_SUSPEND_MS, 24 * 60 * 60_000, 60_000, 30 * 24 * 60 * 60_000),
       probeIntervalMs: Math.max(60_000, Number(pick.intervalDays || 1) * 24 * 60 * 60_000)
     });
@@ -562,6 +598,7 @@ export const createSyncQueue = ({
   };
 
   const run = async () => {
+    await applyRecoveredFailures();
     while (!stopped) {
       let delay = rescanMs;
       try {

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-. /root/address/app/ops/env.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env.sh"
 
 source_file=${1:-}
 case "$source_file" in
@@ -9,9 +10,10 @@ case "$source_file" in
 esac
 test -f "$source_file"
 "$APP/ops/stop.sh"
+POSTGRES_ROOT=${POSTGRES_ROOT:-/root/postgresql}
 set -a
-. /root/postgresql/.env
+. "$POSTGRES_ROOT/.env"
 set +a
-docker compose -f /root/postgresql/docker-compose.yml --env-file /root/postgresql/.env \
+docker compose -f "$POSTGRES_ROOT/docker-compose.yml" --env-file "$POSTGRES_ROOT/.env" \
   exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner <"$source_file"
 "$APP/ops/start.sh"
