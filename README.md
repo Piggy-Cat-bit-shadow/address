@@ -15,6 +15,8 @@
 
 Address reads a synchronized PostgreSQL address pool and returns a randomly selected eligible record together with a coherent synthetic profile. Public generation never downloads an upstream dataset or calls a map provider.
 
+**A typical completed deployment uses approximately 5 GB of disk space for the application and PostgreSQL address database. Active synchronization requires additional temporary space.**
+
 ## Highlights
 
 - 27 configured countries and regions with country, administrative-area, city, district, and postcode filters where supported.
