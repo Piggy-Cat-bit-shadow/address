@@ -22,7 +22,7 @@ The initial import is network- and CPU-bound: expect several hours up to more th
 
 ## API keys and secrets
 
-Runtime generation reads only verified residential records from the active PostgreSQL snapshot. China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`; publication still requires multi-provider consistency.
+China community synchronization needs one or more AMap, Baidu, or Tencent server keys, configured after deployment in `/admin/`; publication still requires multi-provider consistency.
 
 | Variable | Required | Feature | Where to obtain it |
 |---|---|---|---|
@@ -45,7 +45,7 @@ Runtime generation reads only verified residential records from the active Postg
 - KR: requires `GEOAPIFY_API_KEY`; without it the K-apt residential source cannot pass its quality gate and the initial import never completes.
 - CN: not part of the bulk ETL. China community data is synchronized by the API process using AMap (plus optional Baidu/Tencent cross-validation) server keys configured in `/admin/`.
 
-Public generation and IP-region generation use only the active residential PostgreSQL pool. Provider credentials are consumed by background synchronization; they are never injected into public generation requests. IP mode reports no coverage instead of substituting a region-wide or nationwide address. Set `GOOGLE_TRANSLATION_ENABLED=false` unless synchronization explicitly needs online translation.
+IP mode reports no coverage instead of substituting a region-wide or nationwide address. Set `GOOGLE_TRANSLATION_ENABLED=false` unless synchronization explicitly needs online translation.
 
 ## Secret handling
 

@@ -188,5 +188,3 @@ curl -fsS -X POST http://127.0.0.1:8791/api/v1/sync/jobs \
 - 生產環境將 `ALLOWED_ORIGIN` 設置為公開 HTTPS 來源。
 - API Key 和 `SYNC_ADMIN_TOKEN` 不進入查詢參數、瀏覽器代碼、截圖或日誌。
 - 瀏覽器渲染應使用專用且受域名限制的高德 JS API Key。JS Key 按平台機制會出現在瀏覽器請求中；配套安全密鑰和所有 WebService 同步 Key 始終留在伺服器。
-- 生成的個人資料和銀行卡號是測試數據，不對應真實個人或支付賬戶。
-- 公開生成和 IP 區域生成只讀取 active PostgreSQL 中具備證據的真實住宅記錄。第三方平台密鑰僅供後台同步使用，公開生成請求不會實時調用平台。

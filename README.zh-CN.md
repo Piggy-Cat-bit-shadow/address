@@ -13,8 +13,6 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/在线演示-address.333186.xyz-1769e0" alt="在线演示" /></a>
 </p>
 
-Address 从已同步的 PostgreSQL 地址池中随机选择合格记录，并生成逻辑一致的合成测试资料。公开生成过程不会临时下载上游数据，也不会调用地图平台获取地址。
-
 **常规部署完成后，应用程序与 PostgreSQL 地址数据库大约占用 5 GB 硬盘空间；同步运行期间需要额外的临时空间。**
 
 ## 核心功能

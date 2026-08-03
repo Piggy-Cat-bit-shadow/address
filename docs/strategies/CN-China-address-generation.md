@@ -30,7 +30,6 @@
 - `AMAP_JS_SECURITY_CODE`：仅在服务器以 AES-GCM 密文保存，只由 `/_AMapService` 代理使用。
 - Security Code、同步 Key 和其他 Token 不进入前端、Git 或日志；示例值全部是空值或占位符；VPS 运行配置权限为 `600`。
 
-- 公开生成和 IP 区域生成只读取 active PostgreSQL 住宅池；第三方平台 API 仅用于后台同步，不在公开请求期间调用。
 
 统一证据等级、配额、自动同步与来源验证见 [数据源与自动同步方案](../data-sources.md)；运行参考见 [CN DOCX](CN-China-address-generation-and-key-rotation.docx)。
 ## 覆盖与保留

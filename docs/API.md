@@ -190,5 +190,3 @@ The main API hides `/sync-control/*` by default. Keep `SYNC_CONTROL_PUBLIC=false
 - Set `ALLOWED_ORIGIN` to the public HTTPS origin in production.
 - Do not place API keys or `SYNC_ADMIN_TOKEN` in query strings, browser code, screenshots, or logs.
 - Use a dedicated, domain-restricted AMap JS API key for browser rendering. The JS key is necessarily visible in browser requests; the paired security code and all WebService synchronization keys remain server-only.
-- Generated profiles and card numbers are test fixtures. They do not identify a real person or payment account.
-- Public generation and IP-region generation read only verified residential records from the active PostgreSQL pool. Provider credentials are used by background synchronization, never by a public generation request.

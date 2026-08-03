@@ -13,8 +13,6 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/線上展示-address.333186.xyz-1769e0" alt="線上展示" /></a>
 </p>
 
-Address 從已同步的 PostgreSQL 位址池隨機選擇合格記錄，並產生邏輯一致的合成測試資料。公開產生流程不會臨時下載上游資料，也不會呼叫地圖平台取得位址。
-
 **一般部署完成後，應用程式與 PostgreSQL 位址資料庫大約占用 5 GB 磁碟空間；同步執行期間需要額外的暫存空間。**
 
 ## 核心功能

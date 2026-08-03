@@ -16,7 +16,6 @@
 - OSM 独立地址点仅在精确落入明确住宅建筑面时获得住宅用途证据；不使用附近建筑、同街道或邻近坐标推断。
 - 官方依据：<https://www.bora.dopa.go.th/bora-web-portal>、<https://www.bora.dopa.go.th/app-thaid>。
 
-- 公开生成和 IP 区域生成只读取 active PostgreSQL 住宅池；第三方平台 API 仅用于后台同步，不在公开请求期间调用。
 
 统一证据等级、许可、配额与 VPS 边界见 [数据源与自动同步方案](../data-sources.md)。策略变化时同步更新本文件、实现与测试。
 ## 覆盖与保留

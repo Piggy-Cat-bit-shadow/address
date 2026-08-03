@@ -18,8 +18,6 @@ Browser
        -> validation and atomic country snapshot publication
 ```
 
-Public generation and IP-region generation read only verified residential records from the active PostgreSQL pool. Provider integrations belong to background synchronization and are not called by public generation requests.
-
 Map rendering is isolated from address verification. Google uses a coordinate preview; AMap uses a dedicated JS API key plus the same-origin `/_AMapService` proxy. The AMap JS security code remains encrypted in the control database and never enters the browser bundle or map-configuration response.
 
 ## Repository layout

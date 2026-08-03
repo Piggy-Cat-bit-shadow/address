@@ -22,7 +22,7 @@ PostgreSQL 生产数据保存在 `/root/postgresql/data`。首次导入会在 `/
 
 ## API Key 与密钥
 
-日常生成只查询 active PostgreSQL 中通过证据门禁的真实住宅记录。中国小区同步需要一个或多个高德、百度或腾讯服务端 Key，部署后在 `/admin/` 中配置；发布仍要求多平台一致。
+中国小区同步需要一个或多个高德、百度或腾讯服务端 Key，部署后在 `/admin/` 中配置；发布仍要求多平台一致。
 
 | 变量 | 是否必需 | 功能 | 获取方式 |
 |---|---|---|---|
@@ -45,7 +45,7 @@ PostgreSQL 生产数据保存在 `/root/postgresql/data`。首次导入会在 `/
 - KR：必需 `GEOAPIFY_API_KEY`；缺少时 K-apt 住宅源无法通过质量门禁，首次初始化无法完成。
 - CN：不经过批量 ETL。中国小区数据由 API 进程使用高德（可选百度、腾讯交叉验证）服务端 Key 同步，在 `/admin/` 配置。
 
-公开生成和 IP 区域生成只查询 active PostgreSQL 住宅池。第三方平台密钥由后台同步使用，不会注入公开生成请求；IP 模式无覆盖时返回 `IP_REGION_NO_RESULT`，不替换成州省或全国地址。除非后台同步明确需要在线翻译，否则保留 `GOOGLE_TRANSLATION_ENABLED=false`。
+IP 模式无覆盖时返回 `IP_REGION_NO_RESULT`，不替换成州省或全国地址。除非后台同步明确需要在线翻译，否则保留 `GOOGLE_TRANSLATION_ENABLED=false`。
 
 ## 密钥保护
 

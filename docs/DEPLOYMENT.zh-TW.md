@@ -22,7 +22,7 @@ PostgreSQL 生產數據保存在 `/root/postgresql/data`。首次導入會在 `/
 
 ## API Key 與密鑰
 
-日常生成只查詢 active PostgreSQL 中通過證據門禁的真實住宅記錄。中國小區同步需要一個或多個高德、百度或騰訊服務端 Key，部署後在 `/admin/` 中配置；發佈仍要求多平台一致。
+中國小區同步需要一個或多個高德、百度或騰訊服務端 Key，部署後在 `/admin/` 中配置；發佈仍要求多平台一致。
 
 | 變量 | 是否必需 | 功能 | 獲取方式 |
 |---|---|---|---|
@@ -45,7 +45,7 @@ PostgreSQL 生產數據保存在 `/root/postgresql/data`。首次導入會在 `/
 - KR：必需 `GEOAPIFY_API_KEY`；缺少時 K-apt 住宅源無法通過質量門禁，首次初始化無法完成。
 - CN：不經過批量 ETL。中國小區數據由 API 進程使用高德（可選百度、騰訊交叉驗證）服務端 Key 同步，在 `/admin/` 配置。
 
-公開生成和 IP 區域生成只查詢 active PostgreSQL 住宅池。第三方平台密鑰由後台同步使用，不會注入公開生成請求；IP 模式無覆蓋時返回 `IP_REGION_NO_RESULT`，不替換成州省或全國地址。除非後台同步明確需要在線翻譯，否則保留 `GOOGLE_TRANSLATION_ENABLED=false`。
+IP 模式無覆蓋時返回 `IP_REGION_NO_RESULT`，不替換成州省或全國地址。除非後台同步明確需要在線翻譯，否則保留 `GOOGLE_TRANSLATION_ENABLED=false`。
 
 ## 密鑰保護
 

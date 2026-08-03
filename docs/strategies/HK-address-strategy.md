@@ -22,7 +22,6 @@
 
 - 官方来源：[房委会公共租住房屋库存](https://data.gov.hk/en-data/dataset/hk-housing-emms-emms-housing-stock)、[ALS](https://data.gov.hk/en-data/dataset/hk-dpo-als_01-als)、[屋宇署楼宇资料及楼龄纪录](https://data.gov.hk/en-data/dataset/hk-bd-opendata-building-information)。DATA.GOV.HK 数据条款要求在再分发时保留来源署名和免责声明。
 
-- 公开生成和 IP 区域生成只读取 active PostgreSQL 住宅池；第三方平台 API 仅用于后台同步，不在公开请求期间调用。
 
 统一证据等级、许可、配额与 VPS 边界见 [数据源与自动同步方案](../data-sources.md)。策略变化时同步更新本文件、实现与测试。
 ## 覆盖与保留

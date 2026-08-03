@@ -13,8 +13,6 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live-address.333186.xyz-1769e0" alt="Live demo" /></a>
 </p>
 
-Address reads a synchronized PostgreSQL address pool and returns a randomly selected eligible record together with a coherent synthetic profile. Public generation never downloads an upstream dataset or calls a map provider.
-
 **A typical completed deployment uses approximately 5 GB of disk space for the application and PostgreSQL address database. Active synchronization requires additional temporary space.**
 
 ## Highlights
