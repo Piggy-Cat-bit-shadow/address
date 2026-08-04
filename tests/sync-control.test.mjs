@@ -115,6 +115,32 @@ describe('address sync coordinator', () => {
     });
     await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('recovers a container lock whose pid was reused by the new process', async () => {
+    const stateDir = testStateDir();
+    const jobsDir = resolve(stateDir, 'jobs');
+    const job = {
+      id: 'sync-reused-pid', trigger: 'scheduled', status: 'running', phase: 'build-and-publish',
+      createdAt: '2026-07-16T03:00:00.000Z', startedAt: '2026-07-16T03:00:01.000Z', completedAt: null,
+      releaseId: null, shards: ['ES'], error: null
+    };
+    await mkdir(jobsDir, { recursive: true });
+    await writeFile(resolve(jobsDir, `${job.id}.json`), JSON.stringify(job));
+    await writeFile(resolve(stateDir, 'sync.lock'), JSON.stringify({ jobId: job.id, token: 'old', pid: process.pid }));
+    const coordinator = new SyncCoordinator({
+      stateDir,
+      runSync: async () => ({}),
+      processIsAlive: () => true,
+      now: () => new Date('2026-07-17T03:00:00.000Z')
+    });
+
+    await coordinator.initialize();
+
+    await expect(coordinator.getJob(job.id)).resolves.toMatchObject({
+      status: 'failed', phase: 'interrupted', errorCode: 'SYNC_JOB_INTERRUPTED'
+    });
+    await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 describe('sync management API', () => {

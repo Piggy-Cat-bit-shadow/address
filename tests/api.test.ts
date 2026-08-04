@@ -106,6 +106,48 @@ describe('synchronized address registry', () => {
     expect(response.headers.get('Cache-Control')).toContain('max-age=30');
   });
 
+  it('lists hierarchy children and reports the three synchronization rules', async () => {
+    const database = openTestDatabase(':memory:');
+    const now = new Date().toISOString();
+    try {
+      await database.batch([
+        database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+          VALUES (901,'US','CA','California','California','加利福尼亚州','state',NULL,'/901')`),
+        database.prepare(`INSERT INTO sync_country_policies(
+          country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,min_per_node,coverage_ratio,level1_min,level2_min,updated_at
+        ) VALUES ('US',1,10,10,10,10,10,2,1,2,0,?)`).bind(now),
+        database.prepare(`INSERT INTO admin_coverage_stats(
+          node_key,parent_key,country_code,level,region_code,region_name,residential_count,total_count,child_count,updated_at
+        ) VALUES ('US','','US',0,'US','United States',5,5,1,?)`).bind(now),
+        database.prepare(`INSERT INTO admin_coverage_stats(
+          node_key,parent_key,country_code,level,region_code,region_name,residential_count,total_count,child_count,updated_at
+        ) VALUES ('US:1:CA','US','US',1,'CA','California',1,1,0,?)`).bind(now)
+      ]);
+      const hierarchy = await app.request('/api/v1/locations/hierarchy?country=US&parentType=country&childType=region', {}, {
+        ALLOWED_ORIGIN: '*', LOCATION_DB: database
+      });
+      const hierarchyPayload = await hierarchy.json() as { data: { children: LocationOption[] } };
+      expect(hierarchy.status).toBe(200);
+      expect(hierarchyPayload.data.children).toContainEqual(expect.objectContaining({ id: '901', value: 'California' }));
+
+      const coverage = await app.request('/api/v1/coverage?country=US', {}, { ALLOWED_ORIGIN: '*', ADDRESS_DB: database });
+      const coveragePayload = await coverage.json() as { data: { countries: Array<{ unmetRules: string[]; rules: Record<string, unknown> }> } };
+      expect(coverage.status).toBe(200);
+      expect(coveragePayload.data.countries[0].unmetRules).toEqual(['total', 'administrative_coverage', 'regional_minimums']);
+      expect(coveragePayload.data.countries[0].rules).toHaveProperty('total');
+      expect(coveragePayload.data.countries[0].rules).toHaveProperty('administrativeCoverage');
+      expect(coveragePayload.data.countries[0].rules).toHaveProperty('regionalMinimums');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('returns not found for an address ID outside the published synchronized pool', async () => {
+    const response = await app.request('/api/v1/addresses/pool-v2-missing', {}, { ALLOWED_ORIGIN: '*' });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'ADDRESS_NOT_FOUND' } });
+  });
+
   it('counts each publishable residential runtime address once and rejects stale or invalid records', async () => {
     const database = openTestDatabase(':memory:');
     const observedAt = '2026-07-01T00:00:00Z';
@@ -238,6 +280,40 @@ describe('pool-only and IP address generation', () => {
     expect(payload.data.eligibleCount).toBe(12_345);
     expect(payload.data.sourcesTried).toEqual(['address-pool-v2']);
     expect(payload.data.result.address.id).toBe(address.id);
+  });
+
+  it('batch-generates unique database records with structured filters', async () => {
+    const base = eligibleAddresses('US', true, new Date('2026-01-01T00:00:00Z'))[0];
+    const pick = vi.fn(async ({ seed }: { seed: string }) => ({
+      ready: true as const,
+      result: { address: { ...base, id: `pool-v2-${seed}` }, source: 'address-pool-v2' as const, eligibleCount: 10_000 }
+    }));
+    const response = await app.request('/api/v1/generate/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        count: 3,
+        filters: { country: 'US', region: 'California', q: 'Street' },
+        options: { unique: true, seed: 'batch-seed', strategy: 'instant', requestId: 'batch-request' },
+        excludeAddressIds: []
+      })
+    }, { ...mockBindings, RANDOM_ADDRESS_SERVICE: { pick } });
+    const payload = await response.json() as { data: { requestedCount: number; returnedCount: number; unique: boolean; exhausted: boolean; results: GeneratedBundle[] } };
+    expect(response.status).toBe(200);
+    expect(payload.data).toMatchObject({ requestedCount: 3, returnedCount: 3, unique: true, exhausted: false });
+    expect(new Set(payload.data.results.map((result) => result.address.id)).size).toBe(3);
+    expect(pick).toHaveBeenCalledWith(expect.objectContaining({
+      countryCode: 'US', filters: expect.objectContaining({ region: 'California', q: 'Street' })
+    }));
+  });
+
+  it('rejects batch sizes above the public limit', async () => {
+    const response = await app.request('/api/v1/generate/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: 51, filters: { country: 'US' } })
+    }, mockBindings);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_BATCH_REQUEST' } });
   });
 
   it('does not enter an online provider when a regular synchronized pool misses', async () => {

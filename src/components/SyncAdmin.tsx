@@ -95,7 +95,7 @@ interface SyncQueueData {
 const baseAdminText = {
   'zh-CN': {
     labels: { dashboard: '仪表盘', blacklist: '地址黑名单', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌' },
-    providers: { amap: '高德地图的 Web服务', baidu: '百度的 Web服务API', tencent: '腾讯地图的 Web服务', onemap: 'OneMap', youdao: '有道智云翻译', geoapify: 'Geoapify 地理编码', 'google-geocoding': '谷歌地理编码' },
+    providers: { amap: '高德地图的 Web服务', baidu: '百度的 Web服务API', tencent: '腾讯地图的 Web服务', onemap: 'OneMap', youdao: '有道智云翻译', geoapify: 'Geoapify 地理编码', 'google-geocoding': '谷歌地理编码', mappls: 'Mappls 搜索 API' },
     brandName: '地址', brand: '管理系统', loginTitle: '管理员登录', password: '管理员密码', login: '登录', loggingIn: '登录中…', backGenerator: '返回生成器',
     bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', retry: '重新加载', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据总览', dashboardDescription: '全面掌握全球真实地址数据的分布与增长情况', totalResidential: '真实住宅总量', countriesCovered: '国家数', regionsCovered: '行政区覆盖率', qualifiedRegions: '今日更新', countryRanking: 'Top 国家排行', coverageDetails: '行政区覆盖明细', allCountries: '全部国家', region: '区域', level: '行政层级', residential: '真实住宅', children: '下级区域', administrativeCoverage: '行政区覆盖', qualifiedCoverage: '至少5条', updated: '更新数据', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
@@ -113,7 +113,7 @@ const baseAdminText = {
   },
   en: {
     labels: { dashboard: 'Dashboard', blacklist: 'Address Blacklist', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens' },
-    providers: { amap: 'AMap Web Service API', baidu: 'Baidu Web Service API', tencent: 'Tencent Web Service API', onemap: 'OneMap Singapore API', youdao: 'Youdao Translation API', geoapify: 'Geoapify Geocoding API', 'google-geocoding': 'Google Geocoding API' },
+    providers: { amap: 'AMap Web Service API', baidu: 'Baidu Web Service API', tencent: 'Tencent Web Service API', onemap: 'OneMap Singapore API', youdao: 'Youdao Translation API', geoapify: 'Geoapify Geocoding API', 'google-geocoding': 'Google Geocoding API', mappls: 'Mappls Search API' },
     brandName: 'ADDRESS', brand: 'Admin Console', loginTitle: 'Administrator sign in', password: 'Administrator password', login: 'Sign in', loggingIn: 'Signing in…', backGenerator: 'Back to generator',
     bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', retry: 'Reload', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address Data Overview', dashboardDescription: 'Monitor the distribution and growth of verified global address data', totalResidential: 'Verified residences', countriesCovered: 'Countries', regionsCovered: 'Administrative coverage', qualifiedRegions: 'Updated today', countryRanking: 'Top countries', coverageDetails: 'Administrative coverage', allCountries: 'All countries', region: 'Region', level: 'Administrative level', residential: 'Verified residential', children: 'Child regions', administrativeCoverage: 'Administrative coverage', qualifiedCoverage: 'At least 5', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
@@ -186,7 +186,9 @@ const labelsFor = (locale: AdminLocale): Record<View, string> => ({
   tokens: adminText[locale].labels.tokens
 });
 const viewIcons = { dashboard: LayoutDashboard, blacklist: ShieldBan, providers: KeyRound, addressData: RefreshCw, syncQueue: ListOrdered, shortcuts: MapPin, access: ShieldCheck, tokens: Braces } as const;
-const providerLabel = (locale: AdminLocale, provider: string): string => adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
+const providerLabel = (locale: AdminLocale, provider: string): string =>
+  adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']]
+  || (provider === 'mappls' ? 'Mappls Search API' : provider);
 const credentialDisplayLabel = (locale: AdminLocale, label: string): string => ({
   AMAP_API_KEY: adminText[locale].providers.amap,
   BAIDU_API_KEY: adminText[locale].providers.baidu,
@@ -195,6 +197,7 @@ const credentialDisplayLabel = (locale: AdminLocale, label: string): string => (
   YOUDAO_APP_KEY: adminText[locale].providers.youdao,
   GEOAPIFY_API_KEY: adminText[locale].providers.geoapify,
   GOOGLE_GEOCODING_API_KEY: adminText[locale].providers['google-geocoding'],
+  MAPPLS_API_KEY: providerLabel(locale, 'mappls'),
   AMAP_JS_API_KEY: adminText[locale].amapBrowserTitle
 } as Record<string, string>)[label] || label;
 const interpolate = (value: string, replacements: Record<string, string | number>): string => Object.entries(replacements).reduce((result, [key, replacement]) => result.replace(`{${key}}`, String(replacement)), value);
@@ -914,10 +917,10 @@ function AmapBrowserDialog({ value, locale, busy, mutate, close }: { value: Amap
 }
 
 const providerQuotaDefaults: Record<string, number> = {
-  amap: 5_000, baidu: 100, tencent: 10_000, onemap: 100, geoapify: 3_000
+  amap: 5_000, baidu: 100, tencent: 10_000, onemap: 100, geoapify: 3_000, mappls: 1_000
 };
 const providerQuotaPeriods: Record<string, 'day' | 'month'> = {
-  amap: 'month', baidu: 'day', tencent: 'day', onemap: 'day', geoapify: 'day'
+  amap: 'month', baidu: 'day', tencent: 'day', onemap: 'day', geoapify: 'day', mappls: 'day'
 };
 
 function TranslationSettingsPanel({ value, youdao, locale, busy, mutate }: {
@@ -973,7 +976,7 @@ function ProviderCredentialDialog({ value, locale, busy, mutate, close }: {
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.keySaved);
     if (result) close();
   }}>
-    <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{t.providers.amap}</option><option value="baidu">{t.providers.baidu}</option><option value="tencent">{t.providers.tencent}</option><option value="onemap">{t.providers.onemap}</option><option value="geoapify">{t.providers.geoapify}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>
+    <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{t.providers.amap}</option><option value="baidu">{t.providers.baidu}</option><option value="tencent">{t.providers.tencent}</option><option value="onemap">{t.providers.onemap}</option><option value="geoapify">{t.providers.geoapify}</option><option value="mappls">{providerLabel(locale, 'mappls')}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'mappls'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>
     <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
     <label className="secret-input-field"><span>{t.key}</span><div><input name="secret" type={visible ? 'text' : 'password'} value={secret} required={creating} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
     {provider === 'geoapify' && <p className="security-note">{t.geoapifyWorkerHint}</p>}
@@ -1183,12 +1186,13 @@ function SyncQueuePanel({ initialData, locale, request }: { initialData: SyncQue
     : text.states[entry.state === 'waiting_quota' ? 'quota_wait' : entry.state] || entry.state;
   const rulesFor = (entry: SyncQueueEntry): SyncQueueRules => {
     if (entry.rules) return entry.rules;
-    const coverageMet = !entry.unmetRules?.includes('coverage');
+    const administrativeCoverageMet = !entry.unmetRules?.some((rule) => ['coverage', 'administrative_coverage'].includes(rule));
+    const regionalMinimumsMet = !entry.unmetRules?.some((rule) => ['coverage', 'node_overrides', 'regional_minimums'].includes(rule));
     return {
       total: { current: entry.current, target: entry.target, met: entry.current >= entry.target },
-      administrativeCoverage: { actual: coverageMet ? 1 : 0, target: 1, met: coverageMet, covered: 0, total: 0 },
+      administrativeCoverage: { actual: administrativeCoverageMet ? 1 : 0, target: 1, met: administrativeCoverageMet, covered: 0, total: 0 },
       regionalMinimums: {
-        actual: coverageMet ? 1 : 0, target: 1, met: coverageMet,
+        actual: regionalMinimumsMet ? 1 : 0, target: 1, met: regionalMinimumsMet,
         lowest: null, level1: null, level2: null, overrides: { satisfied: 0, total: 0, met: true }
       }
     };

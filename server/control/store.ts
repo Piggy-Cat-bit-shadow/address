@@ -9,9 +9,9 @@ import type { CountryCode, CountryShortcutConfig } from '../../src/domain/types.
 
 export type SessionRole = 'admin' | 'frontend';
 export type ProviderName = 'amap' | 'baidu' | 'tencent';
-export type ServiceProviderName = 'youdao' | 'geoapify' | 'google-geocoding';
+export type ServiceProviderName = 'youdao' | 'geoapify' | 'google-geocoding' | 'mappls';
 export type CredentialProviderName = ProviderName | 'onemap' | ServiceProviderName;
-export const serviceProviderNames = ['youdao', 'geoapify', 'google-geocoding'] as const;
+export const serviceProviderNames = ['youdao', 'geoapify', 'google-geocoding', 'mappls'] as const;
 export const credentialProviderNames = ['amap', 'baidu', 'tencent', 'onemap', ...serviceProviderNames] as const;
 export type CredentialOutcome = 'success' | 'qps' | 'quota' | 'auth' | 'network' | 'invalid';
 export type QuotaPeriod = 'day' | 'month';
@@ -67,7 +67,7 @@ export const browserMapCredentialFromEnvironment = (environment: Record<string, 
 
 const environmentCredentialDefinitions = [
   ['AMAP_API_KEY', 'amap'], ['BAIDU_API_KEY', 'baidu'], ['TENCENT_API_KEY', 'tencent'], ['ONEMAP_ACCESS_TOKEN', 'onemap'],
-  ['GEOAPIFY_API_KEY', 'geoapify'], ['GOOGLE_GEOCODING_API_KEY', 'google-geocoding']
+  ['GEOAPIFY_API_KEY', 'geoapify'], ['GOOGLE_GEOCODING_API_KEY', 'google-geocoding'], ['MAPPLS_API_KEY', 'mappls']
 ] as const;
 
 export interface YoudaoSecretParts { appKey: string; appSecret: string }
@@ -135,7 +135,8 @@ export const credentialProviderDefaults: Record<CredentialProviderName, {
   onemap: { qps: 1, service: 'search', period: 'day', limit: 100, timezoneOffset: 480 },
   youdao: { qps: 1, service: 'text-translate', period: 'month', limit: 100_000, timezoneOffset: 0 },
   geoapify: { qps: 5, service: 'geocode', period: 'day', limit: 3_000, timezoneOffset: 0 },
-  'google-geocoding': { qps: 10, service: 'geocode', period: 'month', limit: 40_000, timezoneOffset: 0 }
+  'google-geocoding': { qps: 10, service: 'geocode', period: 'month', limit: 40_000, timezoneOffset: 0 },
+  mappls: { qps: 5, service: 'nearby-place-details', period: 'day', limit: 1_000, timezoneOffset: 330 }
 };
 const quotaPeriodStart = (period: QuotaPeriod, offsetMinutes: number, date = new Date()): string => {
   const shifted = new Date(date.getTime() + offsetMinutes * 60_000).toISOString();
@@ -1016,7 +1017,7 @@ const serviceEnvironmentSecret = (provider: ServiceProviderName, environment: Re
     return appKey && appSecret ? JSON.stringify({ appKey, appSecret }) : undefined;
   }
   const names: Record<Exclude<ServiceProviderName, 'youdao'>, string> = {
-    geoapify: 'GEOAPIFY_API_KEY', 'google-geocoding': 'GOOGLE_GEOCODING_API_KEY'
+    geoapify: 'GEOAPIFY_API_KEY', 'google-geocoding': 'GOOGLE_GEOCODING_API_KEY', mappls: 'MAPPLS_API_KEY'
   };
   return environment[names[provider]]?.trim() || undefined;
 };

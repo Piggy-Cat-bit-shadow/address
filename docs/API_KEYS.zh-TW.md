@@ -6,10 +6,9 @@
 
 ## 儲存位置與優先關係
 
-- 啟動值只能寫入被 Git 忽略的 `.env` 或 `/root/address/runtime/address.env`，後者權限應設為 `600`。不要把真實值寫入範例檔。
-- 管理後台可儲存高德、百度、騰訊、OneMap、Geoapify、Google Geocoding、有道及高德瀏覽器地圖憑據；所有值使用 `CONFIG_MASTER_KEY` 加密後存入 PostgreSQL。
-- 程序啟動時會匯入尚未儲存的環境變數金鑰；後台記錄與其共同參與輪換，修改範例檔不會覆蓋已有密文記錄。
-- 韓國批次同步程序目前在啟動時直接讀取 `GEOAPIFY_API_KEY`；新加坡 OneMap 輔助匯入直接讀取 `ONEMAP_ACCESS_TOKEN`。
+- 高德、百度、騰訊、Mappls、OneMap、Geoapify、Google Geocoding、有道及高德瀏覽器地圖憑據統一在管理員後台設定；所有值使用 `CONFIG_MASTER_KEY` 加密後存入 PostgreSQL。
+- 管理員後台保存的憑據直接加入同步服務使用的額度、冷卻與輪換池。
+- 一般部署保持 `config/address.env` 為空。它只保留給同步程序啟動前必須存在的授權 feed URL、欄位映射與授權門禁；除非未來適配器明確要求，否則不要在其中保存平台 Key。
 
 ## 平台憑據
 
@@ -47,6 +46,33 @@
 4. 設定 `TENCENT_API_KEY`、編號變數，或在後台逐一新增。
 
 騰訊[官方狀態碼表](https://lbs.qq.com/service/webService/webServiceGuide/status)說明：`120` 為每秒請求量上限，`121` 為每日呼叫量上限。回應標頭 `X-LIMIT` 可提供即時用量，最終以控制台為準。
+
+### Mappls Search API
+
+1. 在 [Mappls 控制台](https://auth.mappls.com/console/)建立應用，並為該應用開通 Nearby Places 與 Place Details。
+2. 從應用的 credentials 區域複製靜態 Key；現行 Nearby API 文件要求透過 `access_token` 查詢參數傳入。
+3. 控制台支援時，將 Key 限制到生產伺服器 IP。
+4. 設定 `MAPPLS_API_KEY`、`MAPPLS_API_KEY_2` 等編號變數，或在管理後台逐一新增。
+
+印度住宅適配器預設關閉。只有合約明確允許住宅分類代碼、受限地址欄位、座標、快取和再分發後才能啟用。系統內建的每日 1,000 次只是本機保護值，不是官方方案額度；實際額度必須按合約和控制台設定。參見 [Nearby API 現行文件](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-near-by-api-example/Readme)。
+
+### 越南郵政 Vpostcode feed
+
+1. 取得允許住宅欄位、座標、伺服器端快取和再分發的 Vpostcode 批次 feed 或 API 合約。
+2. 將 `ADDRESS_SYNC_VPOSTCODE_FEED_URL` 設定為 HTTPS feed，或設定為 `ADDRESS_DATA_ROOT` 下的本機檔案；填寫不可變的 `ADDRESS_SYNC_VPOSTCODE_FEED_VERSION` 和格式（`csv`、`json` 或 `jsonl`）。
+3. 將 `ADDRESS_SYNC_VPOSTCODE_FIELD_MAP` 設定為 JSON，映射 `id`、`number`、`street`、`locality`、`admin1`、`postcode`、`longitude` 和 `latitude`。若合約沒有明確整庫均為住宅，還要映射 `residentialClass` 並設定 `ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES`。
+4. 檢查合約和欄位樣本後，才設定 `ADDRESS_SYNC_VPOSTCODE_ENABLED=true`、`ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED=true` 和 `ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED=true`。
+
+適配器只接受五位郵遞區號；在真實授權樣本通過住宅品質門禁前保持關閉。合成 feed 吞吐測試不能證明 Vpostcode 的真實容量。
+
+### 奈及利亞 NIPOST 或 ProgIS feed
+
+1. 取得允許住宅欄位、座標、伺服器端快取和再分發的 NIPOST 或 ProgIS 批次 feed 合約。
+2. 將 `ADDRESS_SYNC_NG_FEED_URL` 設定為 HTTPS feed，或設定為 `ADDRESS_DATA_ROOT` 下的本機檔案；填寫 `ADDRESS_SYNC_NG_FEED_VERSION` 和格式（`csv`、`json` 或 `jsonl`）。
+3. 將 `ADDRESS_SYNC_NG_FIELD_MAP` 設定為 JSON，映射 `id`、`number`、`street`、`district`、`locality`、`admin1`、`postcode`、`longitude` 和 `latitude`。若合約沒有明確整庫均為住宅，還要映射 `residentialClass` 並設定 `ADDRESS_SYNC_NG_RESIDENTIAL_VALUES`。
+4. 檢查合約和欄位樣本後，才設定 `ADDRESS_SYNC_NG_FEED_ENABLED=true`、`ADDRESS_SYNC_NG_LICENSE_CONFIRMED=true` 和 `ADDRESS_SYNC_NG_REDISTRIBUTION_ALLOWED=true`。
+
+適配器要求六位郵遞區號和 district；在真實授權樣本通過住宅品質門禁前保持關閉。合成 feed 吞吐測試不能證明 NIPOST 或 ProgIS 的真實容量。
 
 ### Geoapify
 
@@ -119,4 +145,4 @@ openssl rand -base64 36   # 管理員與 PostgreSQL 密碼
 3. 只在管理後台測試憑據，不把完整值複製到日誌或截圖。
 4. 若憑據曾被顯示，立即輪換。
 
-官方頁面核對日期：2026-08-03。平台條款、方案、額度與控制台流程可能變更。
+官方頁面核對日期：2026-08-04。平台條款、方案、額度與控制台流程可能變更。

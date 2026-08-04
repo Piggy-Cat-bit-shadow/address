@@ -56,7 +56,7 @@ This table reflects the current synchronization implementation. Except for the e
 | France (FR) | Overture Maps, 27 Geofabrik regional shards; BAN for existence checks only | house number, street, suffix, commune, postcode, coordinates | all address fields and coordinates | none; formatting only | explicit residential building or use; BAN alone is insufficient |
 | Italy (IT) | Overture Maps and Geofabrik OSM | house number, street, city, province/region, CAP, coordinates | all address fields and coordinates | none; no invented internal number | explicit residential building or use |
 | Spain (ES) | Overture Maps and Geofabrik OSM | house number, street, municipality, province, postcode, coordinates | all address fields and coordinates | none; stair/door retained only when sourced | explicit residential building or use |
-| Netherlands (NL) | Overture Maps, potentially carrying BAG provenance | house number/addition, street, city, postcode, coordinates | all address fields and coordinates | none; no invented addition | explicit BAG/OSM/Overture residential use |
+| Netherlands (NL) | Kadaster BAG via PDOK and Overture Maps | house number/letter/addition, street, city, province, postcode, coordinates | all BAG/source address fields and coordinates | none; reversible number formatting only | active BAG `woonfunctie` or explicit Overture residential use |
 | Russia (RU) | Geofabrik OSM | house number, street, locality, federal subject, postcode, coordinates | all address fields and coordinates | none; no invented корпус/квартира | explicit OSM residential building |
 | China (CN) | AreaCity/StatsGov plus AMap, Baidu, and Tencent residential-community POIs | province, city, district, street/house number, community, building/unit/floor/room, coordinates | administrative areas, community name, street/house number, and provider coordinates | only building, unit, floor, and room are synthesized and marked `synthetic`; no postcode generation | strict residential class, matching district, numeric house number, and institutional blacklist gates |
 | Hong Kong (HK) | Housing Authority public-housing units, Buildings Department records, ALS | unit/floor, building, house number, street, locality, 18 districts, region, coordinates | official public-housing or private residential-building fields and coordinates; no general postcode | none | Housing Authority inventory or Buildings Department `Residential/Composite` Tower |
@@ -67,13 +67,13 @@ This table reflects the current synchronization implementation. Except for the e
 | Malaysia (MY) | Geofabrik OSM Malaysia shard | unit/lot, building, street, district, city, state, postcode, coordinates | all fields present in OSM and source coordinates | none; no invented unit | explicit OSM residential building with commercial POIs excluded |
 | Thailand (TH) | Geofabrik OSM; DOPA for administrative validation only | house number, moo, soi, road, subdistrict, district, province, postcode, coordinates | all fields present in OSM and source coordinates | none; formatting only | explicit OSM residential building |
 | Philippines (PH) | Geofabrik OSM, PHLPost; PSA PSGC for administrative validation only | house number, street, barangay, city/municipality, province, postcode, coordinates | OSM address fields and coordinates | a missing postcode may be completed only by a unique PHLPost province+city/municipality match | explicit OSM residential building |
-| Vietnam (VN) | Geofabrik OSM; 2025 official administrative directory for validation | house number, street, ward/commune, province-level city/province, postcode, coordinates | all fields present in OSM and source coordinates | none; only sourced five-digit postcodes accepted | explicit OSM residential building with institutional records excluded |
+| Vietnam (VN) | Geofabrik OSM; optional licensed Vpostcode feed (disabled until licensed and validated) | house number, street, ward/commune, province-level city/province, postcode, coordinates | source fields and coordinates | none; only five-digit postcodes accepted | explicit OSM residential building or licensed residential classification |
 | Türkiye (TR) | Geofabrik OSM and İzmir official Building Identity data | house number, street, district, province, postcode, coordinates | all sourced address fields and coordinates | none; formatting only | OSM residential tag or official `Konut` use |
 | Saudi Arabia (SA) | preserved national address points, Overture, Geofabrik OSM | building/house number, street, district, city, postcode, coordinates | national-address point fields and coordinates | none; formatting only | address point exactly associated with an explicit residential building |
-| India (IN) | Geofabrik OSM | house number, street/locality, district, city, state, PIN, coordinates | all fields present in OSM and source coordinates | none; no invented apartment or floor | explicit OSM residential building |
+| India (IN) | Geofabrik OSM; optional Mappls Nearby and Place Details (disabled until licensed and validated) | house number, street/locality, district, city, state, PIN, coordinates | source fields and coordinates | none; no invented apartment or floor | explicit OSM residential building or contract-authorized Mappls residential category |
 | Australia (AU) | Overture Maps and Geofabrik OSM | unit, house number, street, suburb, state, postcode, coordinates | all sourced address fields and coordinates | none; no invented unit | explicit residential building/use; address existence alone is insufficient |
 | Brazil (BR) | Geofabrik OSM | house number, street, neighborhood, city, state, CEP, coordinates | all fields present in OSM and source coordinates | none; no invented complemento | explicit OSM residential building |
-| Nigeria (NG) | Geofabrik OSM | house number, street, district, city, state, postcode, coordinates | source fields and coordinates passing completeness gates | none; missing fields are not inferred | explicit OSM residential building; sparse points are not spread to nearby buildings |
+| Nigeria (NG) | optional licensed NIPOST or ProgIS feed; no enabled default source | house number, street, district, city, state, postcode, coordinates | licensed source fields and coordinates | none; missing fields are not inferred | per-record or contract-level residential classification; disabled until licensed and validated |
 | South Africa (ZA) | eThekwini official addresses/zoning, Cape Town official parcels, Geofabrik OSM, SAPO | unit, house number, street, suburb, city, postcode, coordinates | official address/parcel fields, supplemental OSM fields, uniquely matched SAPO postcode, and coordinates | none; no invented unit | exact official residential-zoning association or explicit OSM residential building |
 
 See [data sources](docs/data-sources.md) and the [country/region strategies](docs/strategies/) for source versions, coordinate systems, deduplication, and publication gates.
@@ -142,29 +142,21 @@ The queue applies bounded retries, exponential backoff, cooldown/quota reset tim
 
 ## Quick start
 
-Requirements: Node.js 24+, Docker Compose, and enough disk space for the datasets you choose to import.
+Requirements: Docker Engine with Compose v2 and enough disk space for the datasets you choose to import.
 
 ```bash
 git clone https://github.com/daimon3332/address.git
 cd address
-
-cd ops/postgresql
-POSTGRES_PASSWORD='REPLACE_WITH_A_STRONG_PASSWORD' docker compose up -d
-cd ../..
-
-cp .env.example .env
-# Set POSTGRES_URL, CONFIG_MASTER_KEY, and ADMIN_BOOTSTRAP_PASSWORD in .env.
-npm ci
-npm run db:migrate
-npm run build
-npm start
+sh ops/init-compose.sh
+docker compose up -d
+docker compose ps
 ```
 
-The initial database contains schema only. Import only the countries and sources whose licenses, resource requirements, and strategy documents you have reviewed. Production deployment, service supervision, reverse proxy, backup, and restore procedures are in the [deployment guide](docs/DEPLOYMENT.md).
+Compose pulls `daimon23/address`, starts PostgreSQL, runs schema migrations once, and then starts the API and automatic synchronization services. The generated administrator password is stored in the ignored `config/secrets/admin_bootstrap_password` file. Application and PostgreSQL data use `./data/address` and `./data/postgres`. Production upgrades, reverse proxy, backup, and restore procedures are in the [deployment guide](docs/DEPLOYMENT.md).
 
 ## Configuration and API keys
 
-- Copy `.env.example`; never commit `.env`.
+- Deployment works without `.env`; copy `ops/compose.env.example` only to override the image, bind address, port, origin, or HTTPS cookie settings.
 - Provider keys are optional unless the selected synchronization strategy needs them.
 - Multiple credentials rotate independently. A failing key is cooled down while another available key is tried; when all keys are unavailable, work waits for the earliest reset.
 - Encrypted administrator credentials depend on a stable `CONFIG_MASTER_KEY`.

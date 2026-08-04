@@ -6,10 +6,10 @@ import type {
   AddressLanguage,
   AddressPresentation,
   CountryCode,
-  GeneratedBundle,
   Locale,
   VerifiedAddress
 } from './types';
+import type { FavoriteAddressPresentationSource } from './favorites';
 
 export type AddressDisplayLanguage = 'native' | Locale;
 
@@ -30,7 +30,7 @@ const trustedLanguage = (language: AddressDisplayLanguage, nativeLanguage: strin
 };
 
 export const addressDisplayComponents = (
-  bundle: GeneratedBundle,
+  bundle: FavoriteAddressPresentationSource,
   language: AddressDisplayLanguage
 ): AddressComponents => bundle.address.componentVariants[trustedLanguage(language, bundle.address.nativeLanguage) || 'en']
   || bundle.address.componentVariants.native;
@@ -49,7 +49,7 @@ export const addressDisplayCountryName = (
 };
 
 export const addressDisplayPresentation = (
-  bundle: GeneratedBundle,
+  bundle: FavoriteAddressPresentationSource,
   language: AddressDisplayLanguage,
   fallbackLocale: Locale
 ): AddressPresentation => {

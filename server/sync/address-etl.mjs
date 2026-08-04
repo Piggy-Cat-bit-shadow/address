@@ -584,6 +584,7 @@ const selectShards = (catalog, requested) => {
 
 export const runAddressEtl = async ({
   database: providedDatabase,
+  environment = process.env,
   cacheDir = process.env.ADDRESS_SYNC_CACHE_DIR || defaultCacheDir,
   dataRoot = process.env.ADDRESS_DATA_ROOT || resolve('data'),
   requestedShards = process.env.ADDRESS_SYNC_SHARDS ? [process.env.ADDRESS_SYNC_SHARDS] : ['all'],
@@ -606,12 +607,13 @@ export const runAddressEtl = async ({
   now = () => new Date(),
   catalog: providedCatalog,
   adapters: providedAdapters,
+  credentialPool = null,
   importer: providedImporter,
   localizeRecords = localizeAddressRecords,
   stateStore: providedStateStore,
   measureStorage = measureStorageBytes
 } = {}) => {
-  const catalog = providedCatalog || await loadSourceCatalog();
+  const catalog = providedCatalog || await loadSourceCatalog(undefined, environment);
   const requested = selectShards(catalog, requestedShards);
   const stateFile = resolve(cacheDir, 'manifest.json');
   const activeRun = !dryRun && !estimate;
@@ -622,7 +624,21 @@ export const runAddressEtl = async ({
     : { prepareConcurrency: Math.min(10, prepareConcurrency), cpuConcurrency: Math.min(4, cpuConcurrency) };
   runtimePolicy.prepareConcurrency = Math.min(runtimePolicy.prepareConcurrency, maxPrepareConcurrency);
   runtimePolicy.cpuConcurrency = Math.min(runtimePolicy.cpuConcurrency, maxCpuConcurrency);
-  const adapters = providedAdapters || createSourceAdapters({ processConcurrency: runtimePolicy.cpuConcurrency, signal });
+  const loadSeedLocations = async (countryCode) => {
+    if (!database) return [];
+    return (await database.prepare(`SELECT latitude,longitude FROM catalog_postcodes
+      WHERE country_code=? AND latitude IS NOT NULL AND longitude IS NOT NULL
+      UNION SELECT latitude,longitude FROM catalog_cities
+      WHERE country_code=? AND latitude IS NOT NULL AND longitude IS NOT NULL
+      ORDER BY latitude,longitude`).bind(countryCode, countryCode).all()).results;
+  };
+  const adapters = providedAdapters || createSourceAdapters({
+    processConcurrency: runtimePolicy.cpuConcurrency,
+    signal,
+    environment,
+    credentialPool,
+    loadSeedLocations
+  });
   const importer = activeRun ? providedImporter || new PostgresAddressImporter({
     database,
     normalizeRecord: normalizeSourceRecord,

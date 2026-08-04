@@ -2,17 +2,18 @@
 
 | 项目 | 核心内容 |
 |---|---|
-| 主源 | Overture Maps addresses（可能含 BAG 来源标识） |
-| 格式 / 邮编 | `<street> <house><addition>, <postcode> <city>, NL`；addition 缺失保持空；BAG/源记录；格式门禁 `\d{4}\s?[A-Z]{2}`。只清洗格式，不创造或按邻近地址补齐 |
+| 主源 | Kadaster BAG `verblijfsobject`（PDOK OGC Features API）+ Overture Maps addresses |
+| 真实字段 / 坐标系 | BAG `identificatie`、门牌号/字母/附加号、道路、邮编、居住地、省、用途、状态与 Point 坐标均为源字段；API 输出 CRS84/WGS84。生成字段仅限可逆格式组合，不创造地址组件 |
+| 格式 / 邮编 | `<street> <house><letter>-<addition>, <postcode> <city>, NL`；缺失的 letter/addition 保持空；格式门禁 `\d{4}\s?[A-Z]{2}`。只清洗格式，不按邻近地址补齐 |
 | 行政区 | CBS/PDOK 行政区与 BAG 作为候选核验；当前源字段与 catalog 反查。行政层级必须与坐标反查一致；冲突时保留源值在隔离区并拒绝发布 |
-| admin1 派生 | Overture NL（BAG）`address_levels` 仅含城市一层，导出器因此把城市名写入 `admin1`。导入器（`strict-residential-v21` 起）强制校验：`admin1` 必须匹配 `catalog_regions` 的 12 个省之一（忽略大小写、变音符与标点）；不匹配则按坐标就近省质心（上限 10°）重派生并写入 `admin1_code`；仍无法锚定即丢弃该记录——严禁发明行政区 |
-| 住宅证据 | BAG/Osm/Overture 建筑住宅用途证据；邮编不能替代用途证据。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
+| admin1 派生 | BAG 直接使用 `provincie_naam` 并与 12 省目录核验；Overture 的非省级 `address_levels` 仍按坐标锚定目录省份。无法锚定或与坐标冲突即拒绝，严禁发明行政区 |
+| 住宅证据 | BAG 仅接受用途严格等于 `woonfunctie`、状态为 `Verblijfsobject in gebruik`、`geconstateerd=N`，且主地址、道路和居住地均为有效状态的对象；混合商业/住宅用途也拒绝。Overture 仍要求明确住宅建筑/用途证据；邮编不能替代住宅证据 |
 | 发布门禁 | 质量高于数量。仅发布 E3：地址存在与独立住宅用途证据同时成立；本国格式规定的必填组件缺一即淘汰，字段冲突拒绝合并；只允许可逆、可验证的格式规范化。 |
-| 同步频率 | 每月检查上游版本；新快照通过门禁后原子切换，失败保留上一 active 快照。 |
-| 验证 / 排除 | 荷兰门牌附加字母/数字是源字段，不能随机生成。 暂不采用：PDOK BAG 官方开放服务需在本地导入器中单独验证版本和许可，当前不重复导入。 |
-| 策略版本 / 状态 / 更新 | 1.3 / 严格质量门禁 + admin1 catalog 锚定 + 多规则完成下限 / 2026-08-02 |
+| 同步方式 | 初始化按邮编/城市坐标分散 bbox，覆盖优先轮询所有地理种子第一页，再按官方 `rel=next` cursor 进入后续页；每个种子最多 2 页，单页大小按候选上限和种子数自动分配。每页保存原子 checkpoint，按 BAG ID 去重，成功后清除候选和 checkpoint。请求中断可恢复，最终快照通过门禁后原子发布 |
+| 去重 / 验证 | BAG `identificatie` 先去重，再按国家规范化地址与坐标生成 canonical hash；门牌、道路、居住地、省、邮编或坐标缺一即淘汰。门牌字母/附加号只保留源值，不能随机生成 |
+| 策略版本 / 状态 / 更新 | 2.0 / BAG 严格在用住宅初始化 + Overture 补充 / 2026-08-04 |
 
-- 默认 active 地址上限 25,000；省、市镇、区单节点上限 3,000/400/80，后台可覆盖；只裁剪地址记录，行政区划与邮编目录保持完整。
+- 默认 active 目标 50,000；省、市镇、区单节点上限 5,000/700/120，省级最低 1,000，后台可覆盖；数量目标不得降低任何质量门禁。
 
 
 统一证据等级、许可、配额与 VPS 边界见 [数据源与自动同步方案](../data-sources.md)。策略变化时同步更新本文件、实现与测试。

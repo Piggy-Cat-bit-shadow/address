@@ -5,7 +5,7 @@ import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../se
 describe('PostgreSQL database adapter', () => {
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 6, control_version: 8 }], fields: [], rowCount: 1
+      rows: [{ address_version: 7, control_version: 9 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -26,6 +26,9 @@ describe('PostgreSQL database adapter', () => {
       expect(schema).toContain('ON CONFLICT');
       expect(schema).toContain('CREATE TABLE IF NOT EXISTS');
     }
+    const addressSchema = await readFile('server/database/schema.sql', 'utf8');
+    expect(addressSchema).toContain("native_name='Fryslân'");
+    expect(addressSchema).toContain("generate_series(1, 7)");
   });
 
   it('rewrites parameters without changing quoted question marks', async () => {

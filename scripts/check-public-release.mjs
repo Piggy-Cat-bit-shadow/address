@@ -73,7 +73,7 @@ const historyPatch = execFileSync('git', ['log', '--all', '--format=', '--no-ext
 });
 scan('git-history', historyPatch, 'history');
 
-for (const path of ['.env.example', 'server/sync/.env.example', 'ops/address.env.example', 'ops/deploy.env.example']) {
+for (const path of ['.env.example', 'server/sync/.env.example', 'ops/compose.env.example', 'ops/deploy.env.example']) {
   const content = readFileSync(path, 'utf8');
   for (const line of content.split(/\r?\n/u)) {
     const match = line.match(/^\s*([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|COOKIE)[A-Z0-9_]*)\s*=\s*(.*?)\s*$/u);

@@ -2,7 +2,7 @@
 
 [English](API.md) · [简体中文](API.zh-CN.md) · [繁體中文](API.zh-TW.md)
 
-外部 API 位于 `/api/v1`，其数据端点使用 `GET` 并返回 JSON。服务启动后，可在 `/en/api/` 或 `/zh-CN/api/` 查看交互参数说明。
+外部 API 位于 `/api/v1` 并返回 JSON。服务启动后，可在 `/en/api/` 或 `/zh-CN/api/` 查看交互参数说明。
 
 ## 基础地址
 
@@ -12,7 +12,7 @@ https://YOUR_DOMAIN.example/api/v1
 
 本地开发默认使用 `http://127.0.0.1:8787/api/v1`。
 
-除 `/api/v1/health` 外，外部 API 请求需要管理员创建的 Bearer Token：
+除 `/api/v1/health`、`/api/v1/ready` 和 `/api/v1/openapi.json` 外，外部 API 请求需要管理员创建的 Bearer Token：
 
 ```http
 Authorization: Bearer YOUR_API_TOKEN
@@ -25,10 +25,17 @@ Token 在 `/admin/` 创建，同时保存不可逆鉴权哈希和由服务端主
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `GET` | `/health` | API 基础健康检查 |
+| `GET` | `/ready` | PostgreSQL 就绪检查 |
+| `GET` | `/openapi.json` | OpenAPI 3.1 契约 |
 | `GET` | `/countries` | 国家注册表、同步数量和严格住宅覆盖 |
+| `GET` | `/availability` | 所有已配置国家的公开生成可用性 |
 | `GET` | `/client-context` | 将请求 IP 或指定 IP 解析到支持地区 |
 | `GET` | `/locations/search` | 搜索州省、城市和邮编选项 |
+| `GET` | `/locations/hierarchy` | 按上下级关系浏览行政区和邮编选项 |
 | `GET` | `/generate` | 生成通过证据门禁的真实住宅地址和相关测试资料 |
+| `POST` | `/generate/batch` | 使用结构化筛选和唯一性控制批量生成最多 50 个地址 |
+| `GET` | `/addresses/{id}` | 按生成结果 ID 查询当前发布地址 |
+| `GET` | `/coverage` | 查询国家同步的三项完成规则 |
 | `POST` | `/address-translation` | 将已生成地址翻译为支持的显示语言 |
 | `GET` | `/data-health` | 检查地址池覆盖和就绪状态 |
 
@@ -49,6 +56,15 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
 ```
 
 响应格式为 `{ "data": [...] }`。每个国家包含代码、本地化名称、支持的筛选条件、同步总量、真实住宅数量、住宅覆盖状态和 `generationMode`。公开生成只使用真实住宅池；同步总量仅用于迁移和健康报告。未连接数据库时，数量为 `null`。
+
+## 生成可用性
+
+```bash
+curl -fsS -H "Authorization: Bearer YOUR_API_TOKEN" \
+  https://YOUR_DOMAIN.example/api/v1/availability
+```
+
+响应说明每个已配置国家当前是否存在通过发布门禁、可用于生成的住宅记录。
 
 ## 客户端地区
 
@@ -71,14 +87,14 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8"
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `country` | `US` | 项目支持的国家代码 |
-| `field` | `city` | `region`、`city` 或 `postcode` |
+| `field` | `city` | `region`、`city`、`district` 或 `postcode` |
 | `q` | 空 | 搜索文本 |
 | `region` | 空 | 上级州省文本 |
 | `regionId` | 空 | 稳定州省 ID |
 | `cityId` | 空 | 稳定城市 ID |
 | `residential` | `false`（目录兼容） | 传入 `true` 时只列出具备真实住宅覆盖的选项；`/generate` 始终使用住宅记录 |
 | `cursor` | 空 | 上一页返回的分页游标 |
-| `limit` | `100` | 请求页大小 |
+| `limit` | `100` | 请求页大小，范围为 `20` 至 `200` |
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=city&q=南京"
@@ -94,8 +110,8 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=
 | `mode` | `residential` | 使用 `ip-region` 开启 IP 坐标或城市匹配 |
 | `ip` | 请求 IP | `mode=ip-region` 时使用的指定 IP |
 | `residential` | `true` | 旧客户端兼容参数；`true`、`false` 均可传入，但公开生成始终执行住宅证据门禁 |
-| `region`、`city`、`postcode` | 空 | 可读地区筛选 |
-| `regionId`、`cityId`、`postcodeId` | 空 | 稳定目录 ID |
+| `region`、`city`、`district`、`postcode` | 空 | 可读地区筛选 |
+| `regionId`、`cityId`、`districtId`、`postcodeId` | 空 | 稳定目录 ID |
 | `q` | 空 | 自由文本地区提示 |
 | `strategy` | `random` | 用 `random` 或 `instant` 选择合格真实记录，不合成地址字段 |
 | `seed` | 自动 UUID | 确定性生成种子 |
@@ -122,6 +138,12 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8
 响应外层为 `{ "data": { ... } }`。生成数据包含请求 ID、模式、国家、筛选、精确 `filterMatchLevel` 或 IP `ipMatchLevel`、尝试的数据源和耗时；普通生成还返回 `eligibleCount`，表示当前精确筛选范围内通过发布门禁的数据库记录数。地址三语变体与室内字段均来自来源，缺失值保持为空；人物资料、沙盒银行卡、工作、财务和网络字段仍为合成测试数据。地区筛选严格匹配，IP 模式只接受坐标或城市匹配。
 
 普通请求从当前筛选范围的完整合格数据库候选集中选择，不使用固定候选窗口或固定顺序。需要稳定复现合格记录选择与测试资料时传入 `seed`；未传入时服务器为每次请求生成新 UUID。该参数不会生成缺失的地址组件，地址源同步后底层住宅池仍可能变化。
+
+## 批量生成与结构化查询
+
+`POST /generate/batch` 接受 1 至 50 的 `count`、必填的 `filters` 对象、可选的 `options`（`unique`、`seed`、`strategy`、`requestId`），以及最多 500 个 `excludeAddressIds`。唯一合格地址不足时返回已有结果，并以 `exhausted: true` 标明。
+
+`GET /locations/hierarchy` 使用 `country`、`parentType`、`parentId` 和 `childType` 浏览目录上下级。`GET /addresses/{id}` 重新查询当前仍在发布的同步地址。`GET /coverage` 分别返回国家总量、完整行政区覆盖率和各级节点最低数量三项规则。
 
 ## 地址翻译
 

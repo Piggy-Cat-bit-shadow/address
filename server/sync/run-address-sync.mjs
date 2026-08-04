@@ -6,6 +6,7 @@ import { freemem } from 'node:os';
 import { createPostgresPool, initializePostgres, PostgresDatabase } from '../database/postgres.mjs';
 import { runAddressEtl } from './address-etl.mjs';
 import { PostgresCountryStateStore } from './postgres-country-state.mjs';
+import { createProviderCredentialPool } from './provider-credential-pool.mjs';
 import { loadSourceCatalog } from './source-adapters.mjs';
 
 const validReleaseId = (value) => {
@@ -123,12 +124,15 @@ export const runAddressSync = async ({
       await initializePostgres(postgresPool);
       database = new PostgresDatabase(postgresPool);
     }
-    const catalog = providedCatalog || (usesBuiltInEtl ? await loadSourceCatalog() : undefined);
+    const catalog = providedCatalog || (usesBuiltInEtl ? await loadSourceCatalog(undefined, environment) : undefined);
     const stateStore = database && catalog ? new PostgresCountryStateStore({ database, shards: catalog.shards }) : undefined;
+    const credentialPool = usesBuiltInEtl ? createProviderCredentialPool(database, environment) : null;
     const options = {
       database,
+      environment,
       catalog,
       stateStore,
+      credentialPool,
       requestedShards: environment.ADDRESS_SYNC_SHARDS
         ? environment.ADDRESS_SYNC_SHARDS.split(',').map((value) => value.trim()).filter(Boolean)
         : ['all'],

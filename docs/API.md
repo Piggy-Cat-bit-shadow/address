@@ -2,7 +2,7 @@
 
 [English](API.md) · [简体中文](API.zh-CN.md) · [繁體中文](API.zh-TW.md)
 
-The external API is served under `/api/v1`. Its data endpoints use `GET` and return JSON. Interactive parameter documentation is available at `/en/api/` and `/zh-CN/api/` on a running instance.
+The external API is served under `/api/v1` and returns JSON. Interactive parameter documentation is available at `/en/api/` and `/zh-CN/api/` on a running instance.
 
 ## Base URL
 
@@ -12,7 +12,7 @@ https://YOUR_DOMAIN.example/api/v1
 
 Local development defaults to `http://127.0.0.1:8787/api/v1`.
 
-Except for `/api/v1/health`, external API requests use an administrator-created Bearer token:
+Except for `/api/v1/health`, `/api/v1/ready`, and `/api/v1/openapi.json`, external API requests use an administrator-created Bearer token:
 
 ```http
 Authorization: Bearer YOUR_API_TOKEN
@@ -25,10 +25,17 @@ Tokens are created in `/admin/`. The server stores both an irreversible authenti
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Lightweight API health check |
+| `GET` | `/ready` | PostgreSQL readiness check |
+| `GET` | `/openapi.json` | OpenAPI 3.1 contract |
 | `GET` | `/countries` | Country registry, synchronized counts, and strict residential coverage |
+| `GET` | `/availability` | Public generation availability for every configured country |
 | `GET` | `/client-context` | Resolve the request IP or an explicit IP to a supported region |
 | `GET` | `/locations/search` | Search region, city, and postcode options |
+| `GET` | `/locations/hierarchy` | Navigate parent-child administrative and postcode options |
 | `GET` | `/generate` | Generate a verified residential address and related test profile |
+| `POST` | `/generate/batch` | Generate up to 50 addresses with structured filters and uniqueness control |
+| `GET` | `/addresses/{id}` | Retrieve a currently published address by generated ID |
+| `GET` | `/coverage` | Inspect the three country synchronization completion rules |
 | `POST` | `/address-translation` | Translate a generated address into a supported display locale |
 | `GET` | `/data-health` | Inspect synchronized pool coverage and readiness |
 
@@ -49,6 +56,15 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
 ```
 
 The response is `{ "data": [...] }`. Each country includes its code, localized name, supported filters, total synchronized count, verified residential count, residential availability, and `generationMode`. Public generation uses only the verified residential pool; total counts remain visible for migration and health reporting. Counts are `null` when no database is attached.
+
+## Availability
+
+```bash
+curl -fsS -H "Authorization: Bearer YOUR_API_TOKEN" \
+  https://YOUR_DOMAIN.example/api/v1/availability
+```
+
+The response reports whether each configured country currently has publication-gated residential records available for generation.
 
 ## Client context
 
@@ -71,14 +87,14 @@ The response may contain `publicIp`, country, region, city, postcode, latitude, 
 | Parameter | Default | Description |
 |---|---|---|
 | `country` | `US` | Supported ISO-style project country code |
-| `field` | `city` | `region`, `city`, or `postcode` |
+| `field` | `city` | `region`, `city`, `district`, or `postcode` |
 | `q` | empty | Search text |
 | `region` | empty | Parent region text |
 | `regionId` | empty | Stable parent region ID |
 | `cityId` | empty | Stable parent city ID |
 | `residential` | `false` (catalog compatibility) | Set `true` to list only verified residential coverage; `/generate` always uses residential records |
 | `cursor` | empty | Pagination cursor returned by the previous request |
-| `limit` | `100` | Requested page size |
+| `limit` | `100` | Requested page size from `20` through `200` |
 
 ```bash
 curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=US&field=city&q=San"
@@ -94,8 +110,8 @@ The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a c
 | `mode` | `residential` | Set `ip-region` for IP coordinate/city matching |
 | `ip` | request IP | Explicit IP used with `mode=ip-region` |
 | `residential` | `true` | Legacy compatibility flag; `true` and `false` are accepted, while public generation always enforces residential evidence |
-| `region`, `city`, `postcode` | empty | Human-readable location filters |
-| `regionId`, `cityId`, `postcodeId` | empty | Stable catalog IDs |
+| `region`, `city`, `district`, `postcode` | empty | Human-readable location filters |
+| `regionId`, `cityId`, `districtId`, `postcodeId` | empty | Stable catalog IDs |
 | `q` | empty | Free-text location hint |
 | `strategy` | `random` | Select an eligible verified record with `random` or `instant`; it never synthesizes address fields |
 | `seed` | generated UUID | Deterministic generation seed |
@@ -122,6 +138,12 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8
 The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Normal generation also returns `eligibleCount`, the number of publication-gated database records in the exact selection scope. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
 
 Normal requests select from the complete eligible database scope, without a fixed candidate window or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected residential pool over time.
+
+## Batch generation and structured queries
+
+`POST /generate/batch` accepts `count` from 1 through 50, a required `filters` object, optional `options` (`unique`, `seed`, `strategy`, `requestId`), and up to 500 `excludeAddressIds`. It returns the requested records when enough unique eligible addresses exist and marks a partial response with `exhausted: true` otherwise.
+
+`GET /locations/hierarchy` navigates catalog children with `country`, `parentType`, `parentId`, and `childType`. `GET /addresses/{id}` reloads a currently published synchronized address. `GET /coverage` returns total-count, complete administrative coverage, and per-node minimum rules separately for every enabled country.
 
 ## Address translation
 

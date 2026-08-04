@@ -53,8 +53,12 @@ for value in building_asset_values:
     else:
         raise ValueError("building-assets-file must contain HTTPS GeoParquet URLs with optional bboxes")
 building_assets = [entry["url"] for entry in building_asset_entries]
+output_path = pathlib.Path(args.output).resolve()
+duckdb_home = output_path.parent / "duckdb-home"
+duckdb_home.mkdir(parents=True, exist_ok=True)
 
 connection = duckdb.connect()
+connection.execute(f"SET home_directory={sql_string(str(duckdb_home))}")
 connection.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
 connection.execute("SET preserve_insertion_order=false")
 connection.execute("SET threads=4")
@@ -63,11 +67,11 @@ connection.execute("SET http_keep_alive=true")
 connection.execute("SET http_retries=10")
 connection.execute("SET http_retry_wait_ms=250")
 connection.execute("SET http_timeout=120")
-temporary_directory = pathlib.Path(args.output).resolve().parent / "duckdb-temp"
+temporary_directory = output_path.parent / "duckdb-temp"
 temporary_directory.mkdir(parents=True, exist_ok=True)
 connection.execute("SET memory_limit='2GB'")
 connection.execute(f"SET temp_directory={sql_string(str(temporary_directory))}")
-output = sql_string(str(pathlib.Path(args.output).resolve()))
+output = sql_string(str(output_path))
 country = sql_string(args.country.upper())
 minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = args.bounds
 if not (-180 <= minimum_longitude < maximum_longitude <= 180

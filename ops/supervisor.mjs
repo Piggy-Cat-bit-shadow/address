@@ -6,6 +6,33 @@ import { fileURLToPath } from 'node:url';
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = resolve(process.env.ADDRESS_ROOT || (basename(app) === 'app' ? dirname(app) : app));
 const runner = resolve(app, 'node_modules/tsx/dist/cli.mjs');
+const composeMode = process.env.ADDRESS_DEPLOY_MODE === 'compose';
+
+if (composeMode) {
+  const composeFile = resolve(process.env.ADDRESS_COMPOSE_FILE || resolve(root, 'docker-compose.yml'));
+  if (!composeFile.startsWith(`${root}/`) && composeFile !== resolve(root, 'docker-compose.yml')) {
+    throw new Error('ADDRESS_COMPOSE_FILE must stay inside ADDRESS_ROOT');
+  }
+  const compose = spawn('docker', ['compose', '-f', composeFile, 'up', '--remove-orphans'], {
+    cwd: root, env: process.env, stdio: 'inherit'
+  });
+  let stopping = false;
+  const stopCompose = () => {
+    if (stopping) return;
+    stopping = true;
+    compose.kill('SIGINT');
+    setTimeout(() => compose.kill('SIGKILL'), 25_000).unref();
+  };
+  process.once('SIGINT', stopCompose);
+  process.once('SIGTERM', stopCompose);
+  const result = await new Promise((resolveExit, rejectExit) => {
+    compose.once('error', rejectExit);
+    compose.once('exit', (code, signal) => resolveExit({ code, signal }));
+  });
+  if (result.signal && !stopping) throw new Error(`Docker Compose stopped with signal ${result.signal}`);
+  process.exit(result.code ?? (stopping ? 0 : 1));
+}
+
 const definitions = [
   ['api', resolve(app, 'server/api/server.ts')],
   ['sync', resolve(app, 'server/sync/index.mjs')]

@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/compose-root.sh"
+
+if [ -f "$COMPOSE_FILE" ]; then
+  docker compose -f "$COMPOSE_FILE" ps
+  curl -fsS "http://127.0.0.1:${API_PORT:-8787}/api/v1/health" || true
+  exit 0
+fi
+
 . "$SCRIPT_DIR/env.sh"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl cat address.service >/dev/null 2>&1; then

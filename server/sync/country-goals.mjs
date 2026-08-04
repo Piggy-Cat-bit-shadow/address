@@ -8,8 +8,92 @@ export const eligibleCoverageNode = (row) => row.country_code !== 'CN'
 
 const ratio = (satisfied, total) => total > 0 ? satisfied / total : null;
 
+const catalogCoverageSummaries = async (database) => {
+  const [regionsResult, coverageResult, cityResult, policiesResult] = await Promise.all([
+    database.prepare('SELECT id,parent_id,country_code,code FROM catalog_regions').all(),
+    database.prepare(`SELECT country_code,region_id,SUM(address_count) AS address_count
+      FROM residential_coverage WHERE region_id IS NOT NULL
+      GROUP BY country_code,region_id`).all(),
+    database.prepare(`WITH city_counts AS (
+        SELECT city_id,SUM(address_count) AS address_count
+        FROM residential_coverage WHERE city_id IS NOT NULL GROUP BY city_id
+      )
+      SELECT city.country_code,city.region_id,COUNT(*) AS total,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>0 THEN 1 ELSE 0 END) AS covered,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.min_per_node THEN 1 ELSE 0 END) AS qualified_lowest,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.level1_min THEN 1 ELSE 0 END) AS qualified_level1,
+        SUM(CASE WHEN COALESCE(coverage.address_count,0)>=policy.level2_min THEN 1 ELSE 0 END) AS qualified_level2
+      FROM catalog_cities city
+      JOIN sync_country_policies policy ON policy.country_code=city.country_code
+      LEFT JOIN city_counts coverage ON coverage.city_id=city.id
+      GROUP BY city.country_code,city.region_id`).all(),
+    database.prepare(`SELECT country_code,min_per_node,level1_min,level2_min
+      FROM sync_country_policies`).all()
+  ]);
+  const regions = regionsResult.results || [];
+  const byId = new Map(regions.map((region) => [Number(region.id), region]));
+  const policies = new Map((policiesResult.results || []).map((policy) => [String(policy.country_code), policy]));
+  const depthById = new Map();
+  const regionDepth = (region) => {
+    const id = Number(region.id);
+    if (depthById.has(id)) return depthById.get(id);
+    const seen = new Set([id]);
+    let depth = 1;
+    let parent = region.parent_id == null ? null : byId.get(Number(region.parent_id));
+    while (parent && !seen.has(Number(parent.id))) {
+      seen.add(Number(parent.id));
+      depth += 1;
+      parent = parent.parent_id == null ? null : byId.get(Number(parent.parent_id));
+    }
+    depthById.set(id, depth);
+    return depth;
+  };
+  const regionCounts = new Map();
+  for (const row of coverageResult.results || []) {
+    const count = Number(row.address_count || 0);
+    let region = byId.get(Number(row.region_id));
+    const seen = new Set();
+    while (region && !seen.has(Number(region.id))) {
+      const id = Number(region.id);
+      seen.add(id);
+      regionCounts.set(id, (regionCounts.get(id) || 0) + count);
+      region = region.parent_id == null ? null : byId.get(Number(region.parent_id));
+    }
+  }
+  const summaries = new Map();
+  const summary = (countryCode, level) => {
+    const country = summaries.get(countryCode) || new Map();
+    const value = country.get(level) || {
+      level, total: 0, covered: 0, qualified_lowest: 0, qualified_level1: 0, qualified_level2: 0
+    };
+    country.set(level, value);
+    summaries.set(countryCode, country);
+    return value;
+  };
+  for (const region of regions) {
+    const countryCode = String(region.country_code);
+    const policy = policies.get(countryCode);
+    if (!policy) continue;
+    const count = regionCounts.get(Number(region.id)) || 0;
+    const value = summary(countryCode, regionDepth(region));
+    value.total += 1;
+    if (count > 0) value.covered += 1;
+    if (count >= Number(policy.min_per_node || 0)) value.qualified_lowest += 1;
+    if (count >= Number(policy.level1_min || 0)) value.qualified_level1 += 1;
+    if (count >= Number(policy.level2_min || 0)) value.qualified_level2 += 1;
+  }
+  for (const row of cityResult.results || []) {
+    const region = byId.get(Number(row.region_id));
+    const value = summary(String(row.country_code), Math.max(2, region ? regionDepth(region) + 1 : 1));
+    for (const key of ['total', 'covered', 'qualified_lowest', 'qualified_level1', 'qualified_level2']) {
+      value[key] += Number(row[key] || 0);
+    }
+  }
+  return new Map([...summaries].map(([countryCode, levels]) => [countryCode, [...levels.values()]]));
+};
+
 export const evaluateCountryGoals = async (database) => {
-  const [policiesResult, coverageResult, overridesResult] = await Promise.all([
+  const [policiesResult, coverageResult, overridesResult, catalogSummaries] = await Promise.all([
     database.prepare(`SELECT policy.country_code,policy.enabled,policy.target_count,policy.min_per_node,
         policy.coverage_ratio,policy.level1_min,policy.level2_min,
         COALESCE(root.residential_count,0) AS current_count
@@ -26,7 +110,8 @@ export const evaluateCountryGoals = async (database) => {
         override.min_count AS target_count
       FROM sync_node_overrides override
       JOIN admin_coverage_stats coverage ON coverage.node_key=override.node_key
-      WHERE override.min_count IS NOT NULL AND override.min_count>0`).all()
+      WHERE override.min_count IS NOT NULL AND override.min_count>0`).all(),
+    catalogCoverageSummaries(database)
   ]);
   const nodesByCountry = new Map();
   for (const row of coverageResult.results.filter(eligibleCoverageNode)) {
@@ -43,11 +128,23 @@ export const evaluateCountryGoals = async (database) => {
   const goals = new Map();
   for (const policy of policiesResult.results) {
     const countryCode = String(policy.country_code);
-    const nodes = nodesByCountry.get(countryCode) || [];
-    const lowestLevel = nodes.reduce((maximum, node) => Math.max(maximum, Number(node.level)), 0);
+    const catalog = countryCode === 'CN' ? [] : catalogSummaries.get(countryCode) || [];
+    const nodes = catalog.length ? [] : nodesByCountry.get(countryCode) || [];
+    const lowestLevel = (catalog.length ? catalog : nodes)
+      .reduce((maximum, node) => Math.max(maximum, Number(node.level)), 0);
     const levelNodes = (level) => nodes.filter((node) => Number(node.level) === level);
     const nodeTarget = (node, fallback) => node.override_target == null ? fallback : Number(node.override_target);
-    const summarize = (level, fallback) => {
+    const summarize = (level, fallback, catalogQualified) => {
+      const catalogLevel = catalog.find((value) => Number(value.level) === level);
+      if (catalogLevel) {
+        const total = Number(catalogLevel.total || 0);
+        const covered = Number(catalogLevel.covered || 0);
+        const qualified = Number(catalogLevel[catalogQualified] || 0);
+        return {
+          level, minimum: fallback, total, covered, qualified,
+          coverageRatio: ratio(covered, total), floorRatio: ratio(qualified, total)
+        };
+      }
       const values = levelNodes(level);
       if (!values.length) return null;
       const covered = values.filter((node) => Number(node.residential_count || 0) > 0).length;
@@ -60,9 +157,9 @@ export const evaluateCountryGoals = async (database) => {
         coverageRatio: ratio(covered, values.length), floorRatio: ratio(qualified, values.length)
       };
     };
-    const lowest = lowestLevel ? summarize(lowestLevel, Number(policy.min_per_node || 0)) : null;
-    const level1 = summarize(1, Number(policy.level1_min || 0));
-    const level2 = summarize(2, Number(policy.level2_min || 0));
+    const lowest = lowestLevel ? summarize(lowestLevel, Number(policy.min_per_node || 0), 'qualified_lowest') : null;
+    const level1 = summarize(1, Number(policy.level1_min || 0), 'qualified_level1');
+    const level2 = summarize(2, Number(policy.level2_min || 0), 'qualified_level2');
     const targetRatio = Number(policy.coverage_ratio ?? 1);
     const administrativeCoverageActual = lowest?.coverageRatio ?? 0;
     const floorRatios = [
@@ -85,8 +182,8 @@ export const evaluateCountryGoals = async (database) => {
     const complete = Boolean(policy.enabled) && countMet && coverageMet && overrideMet;
     const unmetRules = [];
     if (!countMet) unmetRules.push('total');
-    if (!coverageMet) unmetRules.push('coverage');
-    if (!overrideMet) unmetRules.push('node_overrides');
+    if (!administrativeCoverageMet) unmetRules.push('administrative_coverage');
+    if (!regionalMinimumMet || !overrideMet) unmetRules.push('regional_minimums');
     goals.set(countryCode, {
       countryCode, enabled: Boolean(policy.enabled), current, target, deficit: Math.max(0, target - current),
       countMet, coverageMet, overrideMet, complete, unmetRules, coverageRatio: targetRatio, coverageActual,

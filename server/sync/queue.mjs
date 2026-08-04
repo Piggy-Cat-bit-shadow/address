@@ -1,11 +1,8 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { loadSourceCatalog } from './source-adapters.mjs';
+import { loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
 import { evaluateCountryGoals } from './country-goals.mjs';
-// Read-only import: postgres-address-importer.mjs is owned by the import pipeline.
-// A revision bump there changes every country fingerprint and unlatches cached
-// source-limited countries automatically.
 import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
 
 export const LATCH_REASON = 'source_limited_cache';
@@ -18,7 +15,12 @@ const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QU
 // Countries whose synchronization consumes a metered provider quota. A shard
 // may declare `quotaProvider` in source-shards.json to extend this; the
 // korea-kapt shard does not yet, so KR -> geoapify is kept here on purpose.
-const builtinQuotaProviders = { KR: 'geoapify' };
+const builtinQuotaProviders = { 'korea-kapt-residential': 'geoapify' };
+const revisionEmbeddedAdapters = new Set([
+  'japan-abr', 'singapore-hdb', 'korea-kapt', 'inegi-residential', 'ethekwini-residential',
+  'cape-town-residential', 'taiwan-residential', 'hong-kong-residential', 'mappls-residential',
+  'licensed-residential-feed', 'pdok-bag'
+]);
 
 const timestamp = (value) => {
   const parsed = Date.parse(String(value || ''));
@@ -40,17 +42,41 @@ export const nextQuotaResetTime = (period, offsetMinutes, date = new Date()) => 
   return new Date(shifted.getTime() - offset * 60_000);
 };
 
-export const countryFingerprint = ({ importRevision = ADDRESS_IMPORT_REVISION, sourceVersions = [] }) =>
+const sortedPairs = (pairs) => [...pairs].map(([key, value]) => [String(key), String(value || '')])
+  .sort(([left], [right]) => left.localeCompare(right));
+
+export const countryFingerprint = ({ adapterRevisions = [], sourceVersions = [] }) =>
   sha256(JSON.stringify({
-    importRevision,
-    sourceVersions: [...sourceVersions].map(([shardId, version]) => [String(shardId), String(version || '')])
-      .sort(([left], [right]) => left.localeCompare(right))
+    adapterRevisions: sortedPairs(adapterRevisions),
+    sourceVersions: sortedPairs(sourceVersions)
   }));
+
+export const legacyCountryFingerprint = ({ importRevision = ADDRESS_IMPORT_REVISION, sourceVersions = [] }) =>
+  sha256(JSON.stringify({ importRevision, sourceVersions: sortedPairs(sourceVersions) }));
+
+const deprecatedCountryFingerprint = ({
+  importRevision = ADDRESS_IMPORT_REVISION,
+  policyUpdatedAt = '',
+  nodeTargetsUpdatedAt = '',
+  catalogVersion = '',
+  adapterRevisions = [],
+  sourceVersions = []
+}) => sha256(JSON.stringify({
+  importRevision,
+  policyUpdatedAt: String(policyUpdatedAt || ''),
+  nodeTargetsUpdatedAt: String(nodeTargetsUpdatedAt || ''),
+  catalogVersion: String(catalogVersion || ''),
+  adapterRevisions: sortedPairs(adapterRevisions),
+  sourceVersions: sortedPairs(sourceVersions)
+}));
+
+const retryFingerprint = (sourceFingerprint, credentialRevision = '') =>
+  sha256(JSON.stringify({ sourceFingerprint, credentialRevision: String(credentialRevision || '') }));
 
 export const quotaProviderMap = (shards) => {
   const providers = { ...builtinQuotaProviders };
   for (const shard of shards || []) {
-    if (shard.quotaProvider) providers[shard.countryCode] = String(shard.quotaProvider);
+    if (shard.quotaProvider) providers[shard.id] = String(shard.quotaProvider);
   }
   return providers;
 };
@@ -70,6 +96,33 @@ export const orderRunnable = (entries) => [...entries].sort((left, right) => {
   return (right.deficit - left.deficit) || left.countryCode.localeCompare(right.countryCode);
 });
 
+const goalDeficit = (rules) => {
+  if (!rules) return Number.MAX_SAFE_INTEGER;
+  const required = (summary, target = 1) => {
+    if (!summary) return 0;
+    return Math.max(0, Math.ceil(Number(summary.total || 0) * Number(target || 0)) - Number(summary.qualified || 0));
+  };
+  const coverage = rules.administrativeCoverage || {};
+  const regional = rules.regionalMinimums || {};
+  const total = rules.total || {};
+  return Math.max(0, Number(total.target || 0) - Number(total.current || 0))
+    + Math.max(0, Math.ceil(Number(coverage.total || 0) * Number(coverage.target || 0)) - Number(coverage.covered || 0))
+    + required(regional.lowest, regional.target)
+    + required(regional.level1, regional.target)
+    + required(regional.level2, regional.target)
+    + Math.max(0, Number(regional.overrides?.total || 0) - Number(regional.overrides?.satisfied || 0));
+};
+
+export const goalProgress = (rules) => ({
+  deficit: goalDeficit(rules),
+  total: Number(rules?.total?.current || 0),
+  covered: Number(rules?.administrativeCoverage?.covered || 0),
+  lowestQualified: Number(rules?.regionalMinimums?.lowest?.qualified || 0),
+  level1Qualified: Number(rules?.regionalMinimums?.level1?.qualified || 0),
+  level2Qualified: Number(rules?.regionalMinimums?.level2?.qualified || 0),
+  overridesSatisfied: Number(rules?.regionalMinimums?.overrides?.satisfied || 0)
+});
+
 export const nextWakeAt = (entries, now = new Date()) => {
   let earliest = 0;
   for (const entry of entries || []) {
@@ -79,16 +132,16 @@ export const nextWakeAt = (entries, now = new Date()) => {
   return earliest ? new Date(earliest) : null;
 };
 
-// Post-run evaluation. A run is "fruitless" when it produced no net growth and
-// every source input (import revision and source versions) is
-// identical to the attempt. Successful or deterministically failing fruitless
-// runs latch the country as source_limited_cache until an input changes;
-// transient failures only back off (capped) so infrastructure issues never
-// silence a country permanently.
+// A successful identical-input run with no goal progress exhausts that source.
+// Transient failures back off, then stop for the same effective inputs after a
+// bounded number of attempts.
 export const evaluateAttempt = ({
   jobSucceeded,
   netGrowth,
+  goalDeficitBefore = null,
+  goalDeficitAfter = null,
   fingerprintAfter,
+  failureFingerprintAfter = fingerprintAfter,
   deterministicFailure = false,
   failureCode = null,
   quotaBound = false,
@@ -100,13 +153,14 @@ export const evaluateAttempt = ({
   backoffCapMs = 6 * 60 * 60_000,
   maxConsecutiveFailures = 8,
   maxTimeoutFailures = 2,
-  suspendMs = 24 * 60 * 60_000,
   probeIntervalMs = DEFAULT_SOURCE_PROBE_MS
 }) => {
   if (quotaBound && !quotaAvailable) {
     return { action: 'waiting_quota', nextAttemptAt: quotaResetAt, consecutiveFailures: 0 };
   }
-  if (jobSucceeded && netGrowth > 0) {
+  const progressed = netGrowth > 0 || (goalDeficitBefore != null && goalDeficitAfter != null
+    && Number(goalDeficitAfter) < Number(goalDeficitBefore));
+  if (jobSucceeded && progressed) {
     return {
       action: 'checked',
       reason: CHECKED_REASON,
@@ -124,15 +178,16 @@ export const evaluateAttempt = ({
     return {
       action: 'suspend',
       reason: SUSPENDED_REASON,
-      fingerprint: fingerprintAfter,
+      fingerprint: failureFingerprintAfter,
       consecutiveFailures: failures,
       failureCode: failureCode || null,
-      nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, suspendMs)).toISOString()
+      nextAttemptAt: null
     };
   }
   const delay = Math.min(backoffCapMs, backoffBaseMs * 2 ** (failures - 1));
   return {
     action: 'backoff',
+    fingerprint: failureFingerprintAfter,
     consecutiveFailures: failures,
     failureCode: failureCode || null,
     nextAttemptAt: new Date(timestamp(completedAt) + delay).toISOString()
@@ -160,10 +215,19 @@ export class QueueStateStore {
     await rename(temporary, this.file);
   }
 
-  async apply(countryCode, evaluation, evaluatedAt) {
+  async apply(countryCode, evaluation, evaluatedAt, shardId = null) {
     const state = await this.load();
+    let target;
+    if (shardId) {
+      const country = state.countries[countryCode] ||= { shards: {} };
+      country.shards ||= {};
+      target = country.shards;
+    } else {
+      target = state.countries;
+    }
+    const key = shardId || countryCode;
     if (evaluation.action === 'latch') {
-      state.countries[countryCode] = {
+      target[key] = {
         state: 'latched',
         latched: true,
         reason: evaluation.reason || LATCH_REASON,
@@ -174,7 +238,7 @@ export class QueueStateStore {
         updatedAt: evaluatedAt
       };
     } else if (evaluation.action === 'checked') {
-      state.countries[countryCode] = {
+      target[key] = {
         state: 'checked',
         latched: false,
         reason: evaluation.reason || CHECKED_REASON,
@@ -184,7 +248,7 @@ export class QueueStateStore {
         updatedAt: evaluatedAt
       };
     } else if (evaluation.action === 'suspend') {
-      state.countries[countryCode] = {
+      target[key] = {
         state: 'suspended',
         latched: false,
         reason: evaluation.reason || SUSPENDED_REASON,
@@ -195,18 +259,24 @@ export class QueueStateStore {
         updatedAt: evaluatedAt
       };
     } else if (evaluation.action === 'backoff') {
-      state.countries[countryCode] = {
+      target[key] = {
         state: 'backoff',
         latched: false,
+        fingerprint: evaluation.fingerprint || null,
         consecutiveFailures: evaluation.consecutiveFailures,
         failureCode: evaluation.failureCode || null,
         nextAttemptAt: evaluation.nextAttemptAt,
         updatedAt: evaluatedAt
       };
     } else if (evaluation.action === 'waiting_quota') {
-      delete state.countries[countryCode];
+      delete target[key];
     } else {
-      delete state.countries[countryCode];
+      delete target[key];
+    }
+    if (shardId) {
+      const country = state.countries[countryCode];
+      country.updatedAt = evaluatedAt;
+      if (!Object.keys(country.shards || {}).length) delete state.countries[countryCode];
     }
     await this.save(state);
     return state;
@@ -218,6 +288,16 @@ export class QueueStateStore {
     else for (const countryCode of countryCodes) delete state.countries[String(countryCode).toUpperCase()];
     await this.save(state);
     return state;
+  }
+
+  async migrateCountry(countryCode, shardId, entry, migratedAt) {
+    const state = await this.load();
+    state.countries[countryCode] = {
+      shards: { [shardId]: entry },
+      migratedAt,
+      updatedAt: migratedAt
+    };
+    await this.save(state);
   }
 }
 
@@ -236,6 +316,7 @@ export const createQueueSources = ({
 
   const addressFacts = () => withDatabase(addressDatabase, {
     policies: {}, counts: {}, rules: {}, shards: {},
+    nodeTargetsUpdatedAt: {}, catalogVersion: '',
     deficits: { belowTarget: new Set(), belowFloor: new Set() }
   }, async (database) => {
     const policies = {};
@@ -258,15 +339,30 @@ export const createQueueSources = ({
     const shards = {};
     try {
       for (const row of (await database.prepare(
-        'SELECT shard_id,country_code,status,source_version,failure_code FROM sync_shard_state'
+        'SELECT shard_id,country_code,status,source_version,failure_code,updated_at FROM sync_shard_state'
       ).all()).results) {
         (shards[String(row.country_code)] ||= []).push({
           shardId: String(row.shard_id),
           status: row.status ? String(row.status) : null,
           sourceVersion: row.source_version ? String(row.source_version) : '',
-          failureCode: row.failure_code ? String(row.failure_code) : null
+          failureCode: row.failure_code ? String(row.failure_code) : null,
+          updatedAt: row.updated_at ? String(row.updated_at) : ''
         });
       }
+    } catch {}
+    const nodeTargetsUpdatedAt = {};
+    try {
+      for (const row of (await database.prepare(`SELECT country_code,MAX(updated_at) AS updated_at
+        FROM sync_node_overrides GROUP BY country_code`).all()).results) {
+        nodeTargetsUpdatedAt[String(row.country_code)] = String(row.updated_at || '');
+      }
+    } catch {}
+    let catalogVersion = '';
+    try {
+      const rows = (await database.prepare(`SELECT source,source_version,source_checksum
+        FROM catalog_metadata ORDER BY source`).all()).results;
+      catalogVersion = rows.map((row) => [String(row.source), String(row.source_version || ''), String(row.source_checksum || '')])
+        .map((row) => row.join(':')).join('|');
     } catch {}
     const deficits = { belowTarget: new Set(), belowFloor: new Set() };
     for (const goal of goals.values()) {
@@ -274,7 +370,7 @@ export const createQueueSources = ({
       if (!goal.countMet) deficits.belowTarget.add(goal.countryCode);
       if (!goal.coverageMet || !goal.overrideMet) deficits.belowFloor.add(goal.countryCode);
     }
-    return { policies, counts, rules, shards, deficits };
+    return { policies, counts, rules, shards, nodeTargetsUpdatedAt, catalogVersion, deficits };
   });
 
   // Availability mirrors ControlStore.acquireCredential filters conservatively:
@@ -283,12 +379,18 @@ export const createQueueSources = ({
   // worker key supplied purely via environment) the quota is treated as
   // available so the country is never starved by missing bookkeeping.
   const quotaStatus = (provider, now = new Date()) => withDatabase(controlDatabase, {
-    provider, known: false, available: true, nextResetAt: null
+    provider, known: false, available: true, nextResetAt: null, revision: ''
   }, async (database) => {
-    const rows = (await database.prepare(`SELECT status,cooldown_until,quota_period,quota_timezone_offset,
-        provider_reported_reset_at
+    const rows = (await database.prepare(`SELECT id,status,cooldown_until,quota_period,quota_timezone_offset,
+        provider_reported_reset_at,updated_at
       FROM provider_credentials WHERE provider=? AND enabled=1 AND status<>'disabled'`).bind(provider).all()).results;
-    if (!rows.length) return { provider, known: false, available: true, nextResetAt: null };
+    if (!rows.length) return {
+      provider,
+      known: false,
+      available: provider !== 'mappls',
+      nextResetAt: null,
+      revision: ''
+    };
     let available = false;
     let nextResetAt = 0;
     for (const row of rows) {
@@ -303,7 +405,13 @@ export const createQueueSources = ({
         : nextQuotaResetTime(String(row.quota_period || 'day'), Number(row.quota_timezone_offset || 0), now).getTime();
       if (!nextResetAt || reset < nextResetAt) nextResetAt = reset;
     }
-    return { provider, known: true, available, nextResetAt: nextResetAt ? new Date(nextResetAt).toISOString() : null };
+    return {
+      provider,
+      known: true,
+      available,
+      nextResetAt: nextResetAt ? new Date(nextResetAt).toISOString() : null,
+      revision: sha256(JSON.stringify(rows.map((row) => [row.id, row.status, row.updated_at]).sort()))
+    };
   });
 
   const chinaPriority = (now = new Date()) => withDatabase(addressDatabase, {
@@ -374,38 +482,133 @@ export const computeQueueSnapshot = async ({
         overrides: { satisfied: 0, total: 0, met: true }
       }
     };
-    const countryShards = facts.shards[countryCode] || [];
-    const fingerprint = countryFingerprint({
-      importRevision,
-      sourceVersions: countryShards.map((shard) => [shard.shardId, shard.sourceVersion])
-    });
+    const storedShards = facts.shards[countryCode] || [];
+    const storedById = new Map(storedShards.map((shard) => [shard.shardId, shard]));
+    const configuredShards = (catalogShards || []).filter((shard) => shard.countryCode === countryCode);
     const persisted = queueState.countries?.[countryCode] || {};
+    const sourceEntries = configuredShards.map((shard) => {
+      const stored = storedById.get(shard.id) || {};
+      const sourceVersion = stored.sourceVersion || shard.source?.sourceVersion || '';
+      const adapterRevision = sourceAdapterRevisions[shard.source?.adapter] || '';
+      const provider = providers[shard.id] || null;
+      const quota = provider ? quotaByProvider[provider] : null;
+      const sourceFingerprint = countryFingerprint({
+        adapterRevisions: [[shard.id, adapterRevision]],
+        sourceVersions: [[shard.id, sourceVersion]]
+      });
+      const failureFingerprint = retryFingerprint(sourceFingerprint, quota?.revision || '');
+      const saved = persisted.shards?.[shard.id] || {};
+      const savedState = String(saved.state || (saved.latched ? 'latched' : ''));
+      const expectedFingerprint = ['suspended', 'backoff'].includes(savedState)
+        ? failureFingerprint
+        : sourceFingerprint;
+      const matches = saved.fingerprint === expectedFingerprint;
+      const nextAttempt = timestamp(saved.nextAttemptAt);
+      const paused = matches && ['latched', 'checked', 'suspended'].includes(savedState)
+        && (!nextAttempt || nextAttempt > now.getTime());
+      return {
+        shard,
+        stored,
+        saved,
+        savedState,
+        matches,
+        paused,
+        nextAttempt,
+        provider,
+        quota,
+        sourceFingerprint,
+        failureFingerprint
+      };
+    });
+    const sourceVersions = sourceEntries.map(({ shard, stored }) => [shard.id, stored.sourceVersion || shard.source?.sourceVersion || '']);
+    const adapterRevisions = sourceEntries.map(({ shard }) => [shard.id, sourceAdapterRevisions[shard.source?.adapter] || '']);
+    const fingerprint = countryFingerprint({ adapterRevisions, sourceVersions });
+    const legacyFingerprint = legacyCountryFingerprint({ importRevision, sourceVersions });
+    const deprecatedFingerprint = deprecatedCountryFingerprint({
+      importRevision,
+      policyUpdatedAt: policy.updatedAt,
+      nodeTargetsUpdatedAt: facts.nodeTargetsUpdatedAt?.[countryCode] || '',
+      catalogVersion: facts.catalogVersion || '',
+      adapterRevisions: storedShards.map((shard) => [
+        shard.shardId,
+        sourceAdapterRevisions[configuredShards.find((candidate) => candidate.id === shard.shardId)?.source?.adapter] || ''
+      ]),
+      sourceVersions: storedShards.map((shard) => [shard.shardId, shard.sourceVersion])
+    });
     const persistedState = String(persisted.state || (persisted.latched ? 'latched' : ''));
-    const persistedFingerprintMatches = persisted.fingerprint === fingerprint;
     const persistedNextAttempt = timestamp(persisted.nextAttemptAt);
-    const persistedPauseActive = persistedFingerprintMatches
+    const legacyFingerprintMatches = !persisted.shards
+      && [legacyFingerprint, deprecatedFingerprint].includes(persisted.fingerprint)
       && ['latched', 'checked', 'suspended'].includes(persistedState)
       && (!persistedNextAttempt || persistedNextAttempt > now.getTime());
-    const provider = providers[countryCode] || null;
-    const quota = provider ? quotaByProvider[provider] : null;
-    const failedShards = countryShards.filter((shard) => shard.status === 'failed');
+    const migrationCandidates = sourceEntries.filter(({ shard, stored }) => {
+      if (!stored.sourceVersion) return false;
+      const adapter = shard.source?.adapter;
+      const revision = sourceAdapterRevisions[adapter] || '';
+      return !revisionEmbeddedAdapters.has(adapter) || !revision || stored.sourceVersion.includes(revision);
+    });
+    const migrationSource = legacyFingerprintMatches && migrationCandidates.length
+      ? [...migrationCandidates].sort((left, right) => timestamp(right.stored.updatedAt) - timestamp(left.stored.updatedAt))[0]
+      : null;
+    const legacyPauseActive = Boolean(migrationSource);
+    const runnableSources = sourceEntries.filter((source) => !source.paused)
+      .sort((left, right) => {
+        const quotaOrder = Number(Boolean(left.quota && !left.quota.available))
+          - Number(Boolean(right.quota && !right.quota.available));
+        if (quotaOrder) return quotaOrder;
+        const meteredOrder = Number(!left.provider) - Number(!right.provider);
+        if (meteredOrder) return meteredOrder;
+        const leftAt = left.matches ? left.nextAttempt : 0;
+        const rightAt = right.matches ? right.nextAttempt : 0;
+        return (leftAt > now.getTime()) - (rightAt > now.getTime()) || leftAt - rightAt;
+      });
+    const selectedSource = runnableSources[0] || null;
+    const provider = selectedSource?.provider || null;
+    const quota = selectedSource?.quota || null;
+    const delayedUntil = selectedSource?.matches && selectedSource.nextAttempt > now.getTime()
+      ? selectedSource.nextAttempt
+      : 0;
+    const pausedWakeAt = sourceEntries.map((source) => source.paused ? source.nextAttempt : 0)
+      .filter((value) => value > now.getTime()).sort((left, right) => left - right)[0] || 0;
+    const failedShards = selectedSource?.stored.status === 'failed' ? [selectedSource.stored] : [];
     const entry = {
       countryCode,
       deficit: Math.max(0, target - current),
       target,
       current,
       rules,
-      unmetRules: [belowTarget ? 'total' : null, belowFloor ? 'coverage' : null].filter(Boolean),
+      unmetRules: [rules.total?.met ? null : 'total',
+        rules.administrativeCoverage?.met ? null : 'administrative_coverage',
+        rules.regionalMinimums?.met ? null : 'regional_minimums'].filter(Boolean),
       fingerprint,
+      legacyMigration: migrationSource ? {
+        shardId: migrationSource.shard.id,
+        entry: {
+          state: persistedState,
+          latched: persistedState === 'latched',
+          reason: persisted.reason || (persistedState === 'checked' ? CHECKED_REASON : LATCH_REASON),
+          fingerprint: persistedState === 'suspended'
+            ? migrationSource.failureFingerprint
+            : migrationSource.sourceFingerprint,
+          latchedAt: persisted.latchedAt || null,
+          consecutiveFailures: Number(persisted.consecutiveFailures || 0),
+          failureCode: persisted.failureCode || null,
+          nextAttemptAt: persistedState === 'suspended' ? null : persisted.nextAttemptAt || null,
+          updatedAt: persisted.updatedAt || now.toISOString()
+        }
+      } : null,
+      runnableShardId: selectedSource?.shard.id || null,
+      sourceFingerprints: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, source.sourceFingerprint])),
+      failureFingerprints: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, source.failureFingerprint])),
       quotaBound: Boolean(provider),
       quotaProvider: provider,
       quotaAvailable: quota ? quota.available : true,
       quotaResetAt: quota?.nextResetAt || null,
       deterministicFailure: failedShards.length > 0
         && failedShards.every((shard) => deterministicFailureCodes.has(shard.failureCode)),
-      intervalDays: Number((catalogShards || []).find((shard) => shard.id === countryShards[0]?.shardId)?.intervalDays || 1),
-      consecutiveFailures: Number(persisted.consecutiveFailures || 0),
-      failureCode: persisted.failureCode || null,
+      intervalDays: Number(selectedSource?.shard.intervalDays || 1),
+      consecutiveFailures: selectedSource?.matches ? Number(selectedSource.saved.consecutiveFailures || 0) : 0,
+      failureCode: selectedSource?.matches ? selectedSource.saved.failureCode || null : null,
       nextAttemptAt: null,
       reason: null,
       position: null
@@ -418,23 +621,28 @@ export const computeQueueSnapshot = async ({
       entry.deadlineAt = runningJob?.deadlineAt || null;
     } else if (!belowTarget && !belowFloor) {
       entry.state = 'done';
-    } else if (persistedPauseActive) {
+    } else if (legacyPauseActive) {
       entry.state = 'source_limited';
       entry.reason = persisted.reason || (persistedState === 'checked' ? CHECKED_REASON : LATCH_REASON);
       entry.latchedAt = persisted.latchedAt || null;
       entry.nextAttemptAt = persistedNextAttempt ? new Date(persistedNextAttempt).toISOString() : null;
-    } else if (!shardCountries.has(countryCode)) {
+    } else if (!configuredShards.length || !shardCountries.has(countryCode)) {
       entry.state = 'source_limited';
       entry.reason = 'no_source_shard';
+    } else if (!selectedSource) {
+      entry.state = 'source_limited';
+      const suspended = sourceEntries.find((source) => source.savedState === 'suspended');
+      const checked = sourceEntries.find((source) => source.savedState === 'checked');
+      entry.reason = suspended?.saved.reason || checked?.saved.reason || LATCH_REASON;
+      entry.nextAttemptAt = pausedWakeAt ? new Date(pausedWakeAt).toISOString() : null;
     } else if (provider && quota && !quota.available) {
       entry.state = 'waiting_quota';
       entry.nextAttemptAt = quota.nextResetAt;
       entry.reason = provider;
     } else {
       entry.state = 'queued';
-      const backoffAt = timestamp(persisted.nextAttemptAt);
-      if (backoffAt > now.getTime()) {
-        entry.nextAttemptAt = new Date(backoffAt).toISOString();
+      if (delayedUntil) {
+        entry.nextAttemptAt = new Date(delayedUntil).toISOString();
         entry.reason = 'retry_backoff';
       }
     }
@@ -463,12 +671,8 @@ export const computeQueueSnapshot = async ({
   };
 };
 
-// Continuous queue engine. While enabled it keeps exactly one country job in
-// flight through the shared coordinator whenever any enabled country is below
-// its target or floor, is not latched as source-limited, and is not blocked on
-// a provider quota. Idle time is spent sleeping until the earliest wake event
-// (quota reset or retry backoff) with a periodic rescan as a safety net for
-// policy edits made directly in the database.
+// Continuous queue engine. It keeps one runnable source shard in flight while
+// preserving independent exhausted and retry states for every source.
 export const createSyncQueue = ({
   environment = process.env,
   coordinator,
@@ -493,13 +697,35 @@ export const createSyncQueue = ({
     .then(() => loadCatalog())
     .then((catalog) => catalog.shards));
 
-  const snapshot = async () => computeQueueSnapshot({
-    sources,
-    catalogShards: await catalogShards(),
-    queueState: await store.load(),
-    runningJob: coordinator?.currentJob || null,
-    now: now()
-  });
+  const queueSnapshot = async () => {
+    const configured = await catalogShards();
+    const build = async () => computeQueueSnapshot({
+      sources,
+      catalogShards: configured,
+      queueState: await store.load(),
+      runningJob: coordinator?.currentJob || null,
+      now: now()
+    });
+    let result = await build();
+    const migrations = result.entries.filter((entry) => entry.legacyMigration);
+    for (const entry of migrations) {
+      await store.migrateCountry(
+        entry.countryCode,
+        entry.legacyMigration.shardId,
+        entry.legacyMigration.entry,
+        now().toISOString()
+      );
+    }
+    if (migrations.length) result = await build();
+    return result;
+  };
+  const snapshot = async () => {
+    const result = await queueSnapshot();
+    return {
+      ...result,
+      entries: result.entries.map(({ sourceFingerprints, failureFingerprints, legacyMigration, ...entry }) => entry)
+    };
+  };
 
   let stopped = true;
   let loop = null;
@@ -511,32 +737,38 @@ export const createSyncQueue = ({
   });
 
   const countryEntry = async (countryCode) => {
-    const snap = await snapshot();
+    const snap = await queueSnapshot();
     return snap.entries.find((entry) => entry.countryCode === countryCode) || null;
   };
 
   const applyRecoveredFailures = async () => {
     const recovered = coordinator?.recoveredJobs?.splice(0) || [];
+    const configured = await catalogShards();
+    const byShard = new Map(configured.map((shard) => [shard.id.toLowerCase(), shard]));
     for (const job of recovered) {
       for (const value of job.shards || []) {
-        const countryCode = String(value).toUpperCase();
+        const requested = String(value);
+        const configuredShard = byShard.get(requested.toLowerCase());
+        const countryCode = configuredShard?.countryCode || requested.toUpperCase();
         if (!/^[A-Z]{2}$/u.test(countryCode)) continue;
         const entry = await countryEntry(countryCode);
         if (!entry || ['done', 'source_limited'].includes(entry.state)) continue;
+        const shardId = configuredShard?.id || entry.runnableShardId;
+        if (!shardId) continue;
         const completedAt = job.completedAt || now().toISOString();
         await store.apply(countryCode, evaluateAttempt({
           jobSucceeded: false,
           netGrowth: 0,
-          fingerprintAfter: entry.fingerprint,
+          fingerprintAfter: entry.sourceFingerprints[shardId],
+          failureFingerprintAfter: entry.failureFingerprints[shardId],
           failureCode: job.errorCode || 'SYNC_JOB_INTERRUPTED',
           consecutiveFailures: entry.consecutiveFailures,
           completedAt,
           backoffBaseMs,
           backoffCapMs,
           maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
-          maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
-          suspendMs: integer(environment.SYNC_QUEUE_SUSPEND_MS, 24 * 60 * 60_000, 60_000, 30 * 24 * 60 * 60_000)
-        }), completedAt);
+          maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10)
+        }), completedAt, shardId);
       }
     }
   };
@@ -545,7 +777,7 @@ export const createSyncQueue = ({
   // coordinator, evaluate the outcome. Returns milliseconds to sleep before
   // the next pass (0 means continue immediately).
   const tick = async () => {
-    const snap = await snapshot();
+    const snap = await queueSnapshot();
     if (coordinator.currentJob) {
       await coordinator.waitForIdle();
       return 0;
@@ -564,7 +796,9 @@ export const createSyncQueue = ({
       return Math.min(rescanMs, delay);
     }
     log.log?.(`[sync-queue] ${pick.countryCode} start deficit=${pick.deficit} current=${pick.current} target=${pick.target}`);
-    const result = await coordinator.trigger('scheduled', { shards: [pick.countryCode] });
+    const shardId = pick.runnableShardId;
+    if (!shardId) return rescanMs;
+    const result = await coordinator.trigger('scheduled', { shards: [shardId] });
     if (!result.accepted) {
       await coordinator.waitForIdle();
       return 0;
@@ -576,8 +810,11 @@ export const createSyncQueue = ({
     const evaluation = evaluateAttempt({
       jobSucceeded: job?.status === 'succeeded',
       netGrowth: (after?.current ?? pick.current) - pick.current,
-      fingerprintBefore: pick.fingerprint,
-      fingerprintAfter: after?.fingerprint ?? pick.fingerprint,
+      goalDeficitBefore: goalDeficit(pick.rules),
+      goalDeficitAfter: goalDeficit(after?.rules),
+      fingerprintBefore: pick.sourceFingerprints[shardId],
+      fingerprintAfter: after?.sourceFingerprints?.[shardId] ?? pick.sourceFingerprints[shardId],
+      failureFingerprintAfter: after?.failureFingerprints?.[shardId] ?? pick.failureFingerprints[shardId],
       deterministicFailure: Boolean(after?.deterministicFailure),
       quotaBound: pick.quotaBound,
       quotaAvailable: after?.quotaAvailable ?? true,
@@ -589,10 +826,9 @@ export const createSyncQueue = ({
       maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
       maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
       failureCode: job?.errorCode || null,
-      suspendMs: integer(environment.SYNC_QUEUE_SUSPEND_MS, 24 * 60 * 60_000, 60_000, 30 * 24 * 60 * 60_000),
       probeIntervalMs: Math.max(60_000, Number(pick.intervalDays || 1) * 24 * 60 * 60_000)
     });
-    await store.apply(pick.countryCode, evaluation, completedAt);
+    await store.apply(pick.countryCode, evaluation, completedAt, shardId);
     log.log?.(`[sync-queue] ${pick.countryCode} ${evaluation.action} growth=${(after?.current ?? pick.current) - pick.current}`);
     return cooldownMs;
   };

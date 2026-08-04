@@ -17,7 +17,7 @@ export const ADDRESS_POLICY_DEFAULTS = {
   FR: policy(40_000, [3_500, 350, 80, 0], ['Region', 'Commune', 'District', ''], 1, 800),
   IT: policy(35_000, [2_500, 350, 80, 0], ['Region', 'Municipality', 'District', ''], 1, 700),
   ES: policy(25_000, [2_500, 350, 80, 0], ['Autonomous community', 'Municipality', 'District', ''], 1, 500),
-  NL: policy(25_000, [3_000, 400, 80, 0], ['Province', 'Municipality', 'District', ''], 1, 500),
+  NL: policy(50_000, [5_000, 700, 120, 0], ['Province', 'Municipality', 'District', ''], 1, 1_000),
   JP: policy(20_000, [7_000, 1_000, 200, 0], ['Prefecture', 'Municipality', 'Town / ward', ''], 1, 400),
   CN: policy(40_000, [2_500, 400, 30, 10], ['Province', 'Prefecture city', 'District / county', 'Township'], 1, 800, 60),
   HK: policy(20_000, [10_000, 2_000, 300, 0], ['Region', 'District', 'Locality', '']),
@@ -39,17 +39,22 @@ export const ADDRESS_POLICY_DEFAULTS = {
 };
 
 const LEGACY_DEFAULT_TARGETS = {
-  CA: [35_000], MX: [30_000], ES: [35_000], NL: [30_000], JP: [40_000, 15_000],
+  CA: [35_000], MX: [30_000], ES: [35_000], NL: [30_000, 25_000], JP: [40_000, 15_000],
   HK: [12_000, 10_000], TW: [25_000], KR: [10_000], SG: [8_000], MY: [15_000], TH: [15_000],
   PH: [15_000], VN: [15_000], TR: [15_000], SA: [8_000], IN: [30_000],
   AU: [35_000], BR: [30_000], NG: [10_000], ZA: [15_000], RU: [30_000]
 };
 
 const LEGACY_DEFAULT_LIMITS = {
+  NL: [[3_000, 400, 80, 0]],
   HK: [[2_000, 300, 80, 0]],
   KR: [[1_500, 250, 60, 0]],
   SG: [[8_000, 500, 80, 0]],
   ZA: [[1_500, 250, 60, 0]]
+};
+
+const LEGACY_DEFAULT_FLOORS = {
+  NL: [[500, 0]]
 };
 
 const integer = (value, minimum, maximum, code) => {
@@ -147,6 +152,15 @@ export const ensureAddressPolicies = async (database, now = new Date().toISOStri
         SET level1_limit=?,level2_limit=?,level3_limit=?,level4_limit=?,updated_at=?
         WHERE country_code=? AND level1_limit=? AND level2_limit=? AND level3_limit=? AND level4_limit=?`).bind(
         ...ADDRESS_POLICY_DEFAULTS[countryCode].limits, now, countryCode, ...legacyLimits
+      ));
+    }
+  }
+  for (const [countryCode, legacyFloorSets] of Object.entries(LEGACY_DEFAULT_FLOORS)) {
+    for (const legacyFloors of legacyFloorSets) {
+      statements.push(database.prepare(`UPDATE sync_country_policies SET level1_min=?,level2_min=?,updated_at=?
+        WHERE country_code=? AND level1_min=? AND level2_min=?`).bind(
+        ADDRESS_POLICY_DEFAULTS[countryCode].level1Min, ADDRESS_POLICY_DEFAULTS[countryCode].level2Min,
+        now, countryCode, ...legacyFloors
       ));
     }
   }

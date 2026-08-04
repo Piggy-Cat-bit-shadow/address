@@ -1,0 +1,135 @@
+name: address
+
+x-app: &app
+  image: ${ADDRESS_IMAGE:-daimon23/address:latest}
+  init: true
+  env_file:
+    - ./config/address.env
+  environment: &app-environment
+    ADDRESS_ROOT: /srv/address
+    ADDRESS_DATA_ROOT: /srv/address/data
+    ADDRESS_SYNC_CACHE_DIR: /srv/address/data/staging
+    STATIC_ROOT: /srv/address/app/dist
+    SYNC_STATE_DIR: /srv/address/runtime/sync-control
+    PYTHON_BIN: /srv/address/venv/bin/python
+    HOME: /srv/address/runtime/home
+    XDG_CACHE_HOME: /srv/address/runtime/cache
+    PIP_CACHE_DIR: /srv/address/runtime/pip-cache
+    POSTGRES_HOST: postgres
+    POSTGRES_DB: ${POSTGRES_DB:-address}
+    POSTGRES_USER: ${POSTGRES_USER:-address}
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    CONFIG_MASTER_KEY_FILE: /run/secrets/config_master_key
+    ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/secrets/admin_bootstrap_password
+    SYNC_ADMIN_TOKEN_FILE: /run/secrets/sync_admin_token
+    COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+    TRUST_PROXY: ${TRUST_PROXY:-false}
+    SYNC_SCHEDULER_ENABLED: "true"
+  secrets: &app-secrets
+    - postgres_password
+    - config_master_key
+    - admin_bootstrap_password
+    - sync_admin_token
+  volumes: &app-volumes
+    - ./data/address:/srv/address/data
+    - ./runtime:/srv/address/runtime
+  networks:
+    - internal
+    - egress
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-address}
+      POSTGRES_USER: ${POSTGRES_USER:-address}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: [postgres, -c, max_connections=256, -c, shared_buffers=512MB, -c, effective_cache_size=2GB]
+    secrets:
+      - postgres_password
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [node, node_modules/tsx/dist/cli.mjs, server/database/migrate.ts]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      API_HOST: 0.0.0.0
+      API_PORT: 8787
+      SYNC_CONTROL_URL: http://sync:8791
+    command: [node, node_modules/tsx/dist/cli.mjs, server/api/server.ts]
+    ports:
+      - ${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8787}:8787
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+  sync:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      SYNC_HOST: 0.0.0.0
+      SYNC_PORT: 8791
+    command: [node, server/sync/index.mjs]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8791/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+networks:
+  internal:
+    internal: true
+  egress:
+
+secrets:
+  postgres_password:
+    file: ./config/secrets/postgres_password
+  config_master_key:
+    file: ./config/secrets/config_master_key
+  admin_bootstrap_password:
+    file: ./config/secrets/admin_bootstrap_password
+  sync_admin_token:
+    file: ./config/secrets/sync_admin_token

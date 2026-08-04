@@ -1,0 +1,14 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import FavoritesPage from '../../components/FavoritesPage';
+import { favoritesCopy } from '../../domain/favorites-i18n';
+import { localeStaticPaths } from '../../domain/locales';
+import type { Locale } from '../../domain/types';
+
+export const getStaticPaths = localeStaticPaths;
+const locale = Astro.params.locale as Locale;
+const copy = favoritesCopy[locale];
+---
+<Layout locale={locale} pagePath="favorites" title={copy.title} description={copy.title}>
+  <FavoritesPage client:load locale={locale} />
+</Layout>

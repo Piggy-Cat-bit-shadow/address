@@ -8,6 +8,7 @@ import { SyncCoordinator } from './coordinator.mjs';
 import { createSyncQueue } from './queue.mjs';
 import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync.mjs';
 import { startDailyScheduler, startInitialScheduler, triggerStartupSync } from './scheduler.mjs';
+import { loadSourceCatalog } from './source-adapters.mjs';
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -81,7 +82,8 @@ export const createSyncRuntime = async ({
     stateDir,
     now,
     addressDatabase: queueDatabase,
-    controlDatabase: queueDatabase
+    controlDatabase: queueDatabase,
+    loadCatalog: () => loadSourceCatalog(undefined, environment)
   });
   const handler = createSyncApi({
     coordinator,

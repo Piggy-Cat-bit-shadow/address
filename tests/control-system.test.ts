@@ -576,7 +576,7 @@ describe('control database security', () => {
   });
 
   it('uses conservative free-tier defaults for every credential provider', async () => {
-    for (const provider of ['amap', 'baidu', 'tencent', 'onemap', 'youdao', 'geoapify', 'google-geocoding'] as const) {
+    for (const provider of ['amap', 'baidu', 'tencent', 'onemap', 'youdao', 'geoapify', 'google-geocoding', 'mappls'] as const) {
       const secret = provider === 'youdao' ? JSON.stringify({ appKey: 'fixture-key', appSecret: 'fixture-secret' }) : `${provider}-fixture`;
       const id = await store.addCredential({ provider, label: provider, secret });
       const row = await database.prepare(`SELECT qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset

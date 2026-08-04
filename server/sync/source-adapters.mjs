@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
@@ -22,6 +23,7 @@ const ethekwiniResidentialExporter = resolve(syncRoot, 'south-africa-ethekwini-e
 const capeTownResidentialExporter = resolve(syncRoot, 'south-africa-cape-town-export.py');
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
+const licensedResidentialExporter = resolve(syncRoot, 'licensed-residential-export.py');
 const overtureResidentialRevision = 'residential-buildings-v4';
 const geofabrikExportRevision = 'g69';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v10';
@@ -33,6 +35,9 @@ const ethekwiniResidentialExportRevision = 'official-address-zoning-postcode-v1'
 const capeTownResidentialExportRevision = 'official-parcel-zoning-postcode-v1';
 const taiwanResidentialExportRevision = 'molit-lvr-oa-post-v2';
 const hongKongResidentialExportRevision = 'bd-building-information-v1';
+const mapplsResidentialRevision = 'licensed-nearby-details-v2';
+const licensedResidentialRevision = 'licensed-feed-v2';
+const pdokBagRevision = 'strict-active-residential-coverage-round-robin-v2';
 export const sourceAdapterRevisions = Object.freeze({
   overture: overtureResidentialRevision,
   geofabrik: geofabrikExportRevision,
@@ -44,7 +49,10 @@ export const sourceAdapterRevisions = Object.freeze({
   'ethekwini-residential': ethekwiniResidentialExportRevision,
   'cape-town-residential': capeTownResidentialExportRevision,
   'taiwan-residential': taiwanResidentialExportRevision,
-  'hong-kong-residential': hongKongResidentialExportRevision
+  'hong-kong-residential': hongKongResidentialExportRevision,
+  'mappls-residential': mapplsResidentialRevision,
+  'licensed-residential-feed': licensedResidentialRevision,
+  'pdok-bag': pdokBagRevision
 });
 // geoBoundaries gbOpen has no entries for these territories; use the exact OSM admin relations instead.
 const osmBoundaryRelations = { HKG: 913110, MAC: 1867188 };
@@ -176,6 +184,82 @@ const headerNumber = (headers, name) => {
 export const sourceSizeMatches = (actual, expected) => expected === null
   || (actual >= Math.floor(expected * 0.75) && actual <= Math.ceil(expected * 1.25));
 
+const pdokText = (value) => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+
+export const normalizePdokBagFeature = (feature, sourceName = 'Kadaster BAG') => {
+  const properties = feature?.properties;
+  const coordinates = feature?.geometry?.type === 'Point' ? feature.geometry.coordinates : null;
+  if (!properties || !Array.isArray(coordinates) || properties.gebruiksdoel !== 'woonfunctie'
+    || properties.status !== 'Verblijfsobject in gebruik' || properties.geconstateerd !== 'N'
+    || properties.hoofdadres_status !== 'Naamgeving uitgegeven'
+    || properties.openbare_ruimte_status !== 'Naamgeving uitgegeven'
+    || properties.woonplaats_status !== 'Woonplaats aangewezen') return null;
+  const sourceRecordId = pdokText(properties.identificatie);
+  const houseNumber = Number(properties.huisnummer);
+  const houseLetter = pdokText(properties.huisletter);
+  const addition = pdokText(properties.toevoeging);
+  const street = pdokText(properties.openbare_ruimte_naam);
+  const locality = pdokText(properties.woonplaats_naam);
+  const admin1 = pdokText(properties.provincie_naam);
+  const postcode = pdokText(properties.postcode).toUpperCase().replace(/\s+/gu, '');
+  const longitude = Number(coordinates[0]);
+  const latitude = Number(coordinates[1]);
+  const safeSuffix = (value) => !value || /^[\p{L}\p{N} .'/+-]{1,16}$/u.test(value);
+  if (!/^\d{16}$/u.test(sourceRecordId) || !Number.isSafeInteger(houseNumber) || houseNumber < 1
+    || !safeSuffix(houseLetter) || !safeSuffix(addition) || !street || !locality || !admin1
+    || !/^\d{4}[A-Z]{2}$/u.test(postcode) || !Number.isFinite(longitude) || !Number.isFinite(latitude)
+    || longitude < 3 || longitude > 8 || latitude < 50 || latitude > 54) return null;
+  const number = `${houseNumber}${houseLetter}${addition ? `-${addition}` : ''}`;
+  return {
+    id: sourceRecordId,
+    source_record_id: sourceRecordId,
+    source_dataset: sourceName,
+    number,
+    street,
+    locality,
+    postal_city: locality,
+    admin1,
+    postcode,
+    longitude,
+    latitude,
+    property_type: 'residential',
+    residential_building_id: sourceRecordId,
+    residential_building_class: 'bag:woonfunctie'
+  };
+};
+
+export const selectDispersedSeeds = (values, maximum = 400) => {
+  const cells = new Map();
+  for (const value of values || []) {
+    const latitude = Number(value.latitude);
+    const longitude = Number(value.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+      || longitude < 3 || longitude > 8 || latitude < 50 || latitude > 54) continue;
+    const key = `${Math.round(latitude / 0.08)}:${Math.round(longitude / 0.12)}`;
+    if (!cells.has(key)) cells.set(key, { latitude, longitude });
+  }
+  const candidates = [...cells.values()];
+  if (candidates.length <= maximum) return candidates;
+  const selected = [candidates.splice(Math.floor(candidates.length / 2), 1)[0]];
+  const minimumDistances = candidates.map((candidate) =>
+    (candidate.latitude - selected[0].latitude) ** 2 + (candidate.longitude - selected[0].longitude) ** 2);
+  while (selected.length < maximum && candidates.length) {
+    let bestIndex = 0;
+    for (let index = 1; index < candidates.length; index += 1) {
+      if (minimumDistances[index] > minimumDistances[bestIndex]) bestIndex = index;
+    }
+    const [latest] = candidates.splice(bestIndex, 1);
+    minimumDistances.splice(bestIndex, 1);
+    selected.push(latest);
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      const distance = (candidate.latitude - latest.latitude) ** 2 + (candidate.longitude - latest.longitude) ** 2;
+      minimumDistances[index] = Math.min(minimumDistances[index], distance);
+    }
+  }
+  return selected;
+};
+
 const recentBootstrapRaw = async ({ cacheDir, shard, dataUrl, currentDate, currentBytes }) => {
   if (!cacheDir || !/^\d{4}-\d{2}-\d{2}$/u.test(currentDate)) return null;
   const directory = resolve(cacheDir, 'raw');
@@ -284,11 +368,23 @@ const hasMinimumLines = async (file, minimum) => {
 };
 export const parseGeofabrikMd5 = (value) => String(value || '').match(/\b[a-f\d]{32}\b/iu)?.[0].toLowerCase() || null;
 
-export const loadSourceCatalog = async (file = catalogFile) => {
+const environmentEnabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
+
+export const loadSourceCatalog = async (file = catalogFile, environment = process.env) => {
   const catalog = JSON.parse(await readFile(file, 'utf8'));
   if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.sources)) throw new Error('Unsupported source shard catalog');
   const shards = [];
-  for (const source of catalog.sources) {
+  for (const configuredSource of catalog.sources) {
+    if (configuredSource.enabledEnvironment && !environmentEnabled(environment[configuredSource.enabledEnvironment])) continue;
+    const source = { ...configuredSource };
+    if (source.redistributionConfirmationEnvironment) {
+      source.redistributionAllowed = environmentEnabled(environment[source.redistributionConfirmationEnvironment]);
+    }
+    if (source.dataUrlEnvironment) {
+      const configuredUrl = String(environment[source.dataUrlEnvironment] || '').trim();
+      if (!configuredUrl) throw new Error(`${source.dataUrlEnvironment} is required when ${source.id} is enabled`);
+      source.dataUrl = configuredUrl;
+    }
     const intervalDays = source.intervalDays || catalog.defaultIntervalDays;
     if (source.adapter === 'overture') {
       for (const countryCode of source.countries || []) shards.push({
@@ -395,6 +491,17 @@ export const loadSourceCatalog = async (file = catalogFile) => {
         intervalDays,
         source
       });
+    } else if (source.adapter === 'mappls-residential' || source.adapter === 'licensed-residential-feed'
+      || source.adapter === 'pdok-bag') {
+      shards.push({
+        id: source.id,
+        countryCode: source.countryCode,
+        maxRecords: source.maxRecords,
+        qualityGate: source.qualityGate,
+        quotaProvider: source.quotaProvider,
+        intervalDays,
+        source
+      });
     } else {
       throw new Error(`Unsupported source adapter: ${source.adapter}`);
     }
@@ -411,8 +518,12 @@ export const createSourceAdapters = ({
   processTimeoutMs = Number(process.env.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 30 * 60_000),
   signal,
   pythonBin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
-  enableOvertureResidential = process.env.ADDRESS_SYNC_OVERTURE_BUILDINGS === 'true'
+  enableOvertureResidential = process.env.ADDRESS_SYNC_OVERTURE_BUILDINGS === 'true',
+  environment = process.env,
+  credentialPool = null,
+  loadSeedLocations = async () => []
 } = {}) => {
+  const apiFetchImpl = fetchImpl;
   const useCurlTransport = fetchImpl === fetch;
   if (useCurlTransport) fetchImpl = curlMetadataFetch;
   let overtureCatalogPromise;
@@ -438,6 +549,102 @@ export const createSourceAdapters = ({
   const downloads = new Map();
   const verifiedDownloads = new Map();
   const sharedRawFiles = new Set();
+
+  const environmentKeys = (baseName) => [baseName, ...Object.keys(environment)
+    .filter((name) => name.startsWith(`${baseName}_`) && /^\d+$/u.test(name.slice(baseName.length + 1)))
+    .sort((left, right) => Number(left.slice(baseName.length + 1)) - Number(right.slice(baseName.length + 1)))]
+    .map((name) => String(environment[name] || '').trim())
+    .filter(Boolean)
+    .map((secret, index) => ({ id: `environment-${index}`, secret, disabled: false, cooldownUntil: 0 }));
+  const mapplsEnvironmentCredentials = environmentKeys('MAPPLS_API_KEY');
+  let mapplsEnvironmentCursor = 0;
+  const mapplsCredentialPool = credentialPool || {
+    acquire: async () => {
+      const now = Date.now();
+      for (let offset = 0; offset < mapplsEnvironmentCredentials.length; offset += 1) {
+        const index = (mapplsEnvironmentCursor + offset) % mapplsEnvironmentCredentials.length;
+        const credential = mapplsEnvironmentCredentials[index];
+        if (!credential.disabled && credential.cooldownUntil <= now) {
+          mapplsEnvironmentCursor = (index + 1) % mapplsEnvironmentCredentials.length;
+          return credential;
+        }
+      }
+      return null;
+    },
+    report: async (id, outcome, observation = {}) => {
+      const credential = mapplsEnvironmentCredentials.find((entry) => entry.id === id);
+      if (!credential || outcome === 'success') return;
+      if (outcome === 'auth' || outcome === 'invalid') credential.disabled = true;
+      else credential.cooldownUntil = Number.isFinite(Date.parse(observation.retryAt))
+        ? Date.parse(observation.retryAt) : Date.now() + (outcome === 'quota' ? 60_000 : 5_000);
+    }
+  };
+
+  const retryAtFrom = (response) => {
+    const value = response.headers.get('retry-after');
+    if (!value) return null;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return new Date(Date.now() + seconds * 1000).toISOString();
+    return Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  };
+
+  const requestMappls = async (target) => {
+    const attempted = new Set();
+    for (let pacingAttempt = 0; pacingAttempt < 20; pacingAttempt += 1) {
+      const credential = await mapplsCredentialPool.acquire('mappls', { excludeIds: attempted });
+      if (!credential) {
+        if (!attempted.size && pacingAttempt < 19) {
+          await wait(100);
+          continue;
+        }
+        throw Object.assign(new Error('No Mappls credential is currently available'), {
+          code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
+        });
+      }
+      attempted.add(credential.id);
+      const url = new URL(target);
+      url.searchParams.set('access_token', credential.secret);
+      let response;
+      try {
+        response = await apiFetchImpl(url, {
+          headers: { Accept: 'application/json' },
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
+        });
+      } catch (error) {
+        if (signal?.aborted) throw Object.assign(error, { code: 'SYNC_PROCESS_ABORTED' });
+        await mapplsCredentialPool.report(credential.id, 'network');
+        continue;
+      }
+      if (response.status === 401 || response.status === 403) {
+        await mapplsCredentialPool.report(credential.id, 'auth');
+        continue;
+      }
+      if (response.status === 429) {
+        await mapplsCredentialPool.report(credential.id, 'quota', { retryAt: retryAtFrom(response) });
+        continue;
+      }
+      if (!response.ok) {
+        await mapplsCredentialPool.report(credential.id, response.status >= 500 ? 'network' : 'invalid', {
+          retryAt: retryAtFrom(response)
+        });
+        if (response.status >= 500) continue;
+        throw Object.assign(new Error(`Mappls request returned HTTP ${response.status}`), {
+          code: 'SOURCE_METADATA_HTTP', status: response.status
+        });
+      }
+      let body;
+      try { body = await response.json(); }
+      catch (error) {
+        await mapplsCredentialPool.report(credential.id, 'invalid');
+        throw Object.assign(new Error('Mappls returned invalid JSON'), { code: 'SOURCE_METADATA_JSON', cause: error });
+      }
+      await mapplsCredentialPool.report(credential.id, 'success');
+      return body;
+    }
+    throw Object.assign(new Error('Every Mappls credential is unavailable'), {
+      code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
+    });
+  };
 
   const loadStacItems = async (collectionUrl, collection) => {
     const links = collection.links.filter((link) => link.rel === 'item');
@@ -947,6 +1154,112 @@ export const createSourceAdapters = ({
     };
   };
 
+  const requireLicensedSource = (source) => {
+    for (const name of [source.licenseConfirmationEnvironment, source.redistributionConfirmationEnvironment].filter(Boolean)) {
+      if (!environmentEnabled(environment[name])) {
+        throw Object.assign(new Error(`${name} must be true before ${source.id} can run`), {
+          code: 'SOURCE_LICENSE_NOT_CONFIRMED'
+        });
+      }
+    }
+  };
+
+  const mapplsCategoryCodes = (source) => {
+    const name = source.categoryCodesEnvironment || 'MAPPLS_RESIDENTIAL_CATEGORY_CODES';
+    const values = String(environment[name] || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
+    if (!values.length || values.some((value) => !/^[A-Z\d_-]{2,32}$/u.test(value))) {
+      throw Object.assign(new Error(`${name} must contain authorized residential category codes`), {
+        code: 'SOURCE_CONFIGURATION_INVALID'
+      });
+    }
+    return [...new Set(values)];
+  };
+
+  const discoverMapplsResidential = async (shard) => {
+    requireLicensedSource(shard.source);
+    const categories = mapplsCategoryCodes(shard.source);
+    const month = new Date().toISOString().slice(0, 7);
+    const categoryFingerprint = createHash('sha256').update(categories.sort().join('\u001f')).digest('hex').slice(0, 12);
+    return {
+      adapter: 'mappls-residential',
+      version: `${month}-${categoryFingerprint}-${mapplsResidentialRevision}`,
+      publishedAt: null,
+      dataUrl: shard.source.dataUrl,
+      sourceBytes: null,
+      categoryCodes: categories,
+      residentialBuildingAvailable: true,
+      estimateMethod: 'licensed-paginated-api'
+    };
+  };
+
+  const licensedLocalFile = async (value) => {
+    const root = await realpath(resolve(environment.ADDRESS_DATA_ROOT || 'data'));
+    const file = await realpath(resolve(value));
+    const relativeFile = relative(root, file);
+    if (!relativeFile || isAbsolute(relativeFile) || relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || relativeFile.startsWith(sep)) {
+      throw Object.assign(new Error('Licensed feed files must be inside ADDRESS_DATA_ROOT'), {
+        code: 'SOURCE_CONFIGURATION_INVALID'
+      });
+    }
+    return file;
+  };
+
+  const discoverLicensedResidential = async (shard) => {
+    requireLicensedSource(shard.source);
+    const configuredVersion = String(environment[shard.source.versionEnvironment] || '').trim();
+    if (/^https:\/\//iu.test(shard.source.dataUrl)) {
+      const response = await headRequest(shard.source.dataUrl, fetchImpl);
+      if (!response.ok) throw new Error(`Licensed feed metadata request failed (${response.status})`);
+      const modified = response.headers.get('last-modified');
+      const etag = response.headers.get('etag')?.replaceAll('"', '') || '';
+      const version = configuredVersion || [modified ? new Date(modified).toISOString().slice(0, 10) : '', etag]
+        .filter(Boolean).join('-');
+      if (!version) throw Object.assign(new Error(`${shard.source.versionEnvironment} is required when the feed has no validator`), {
+        code: 'SOURCE_CONFIGURATION_INVALID'
+      });
+      return {
+        adapter: 'licensed-residential-feed',
+        version: `${safeVersion(version)}-${licensedResidentialRevision}`,
+        publishedAt: modified && Number.isFinite(Date.parse(modified)) ? new Date(modified).toISOString() : null,
+        dataUrl: shard.source.dataUrl,
+        sourceBytes: headerNumber(response.headers, 'content-length'),
+        estimateMethod: 'licensed-feed-content-length'
+      };
+    }
+    const file = await licensedLocalFile(shard.source.dataUrl);
+    const metadata = await stat(file);
+    const checksum = await sha256File(file);
+    return {
+      adapter: 'licensed-residential-feed',
+      version: `${safeVersion(configuredVersion || checksum.slice(0, 24))}-${licensedResidentialRevision}`,
+      publishedAt: metadata.mtime.toISOString(),
+      dataUrl: file,
+      sourceBytes: metadata.size,
+      sourceChecksum: checksum,
+      estimateMethod: 'licensed-local-feed'
+    };
+  };
+
+  const discoverPdokBag = async (shard) => {
+    const metadata = await jsonRequest(shard.source.dataUrl, fetchImpl);
+    const itemLink = metadata?.links?.find((link) => link.rel === 'items'
+      && /(?:application\/geo\+json|application\/json)/iu.test(String(link.type || '')));
+    const updated = metadata?.links?.find((link) => link.rel === 'self')?.updated;
+    if (!itemLink?.href || !updated || !Number.isFinite(Date.parse(updated))) {
+      throw new SourceMetadataError('PDOK BAG collection metadata is incomplete', {
+        url: shard.source.dataUrl, code: 'SOURCE_METADATA_INVALID'
+      });
+    }
+    return {
+      adapter: 'pdok-bag',
+      version: `${new Date(updated).toISOString().slice(0, 10)}-${pdokBagRevision}`,
+      publishedAt: new Date(updated).toISOString(),
+      dataUrl: itemLink.href,
+      sourceBytes: null,
+      estimateMethod: 'pdok-bag-ogc-features'
+    };
+  };
+
   const discover = (shard, options) => {
     if (shard.source.adapter === 'overture') return discoverOverture(shard, options);
     if (shard.source.adapter === 'geofabrik') return discoverGeofabrik(shard, options);
@@ -959,6 +1272,9 @@ export const createSourceAdapters = ({
     if (shard.source.adapter === 'cape-town-residential') return discoverCapeTownResidential(shard, options);
     if (shard.source.adapter === 'taiwan-residential') return discoverTaiwanResidential(shard, options);
     if (shard.source.adapter === 'hong-kong-residential') return discoverHongKongResidential(shard, options);
+    if (shard.source.adapter === 'mappls-residential') return discoverMapplsResidential(shard, options);
+    if (shard.source.adapter === 'licensed-residential-feed') return discoverLicensedResidential(shard, options);
+    if (shard.source.adapter === 'pdok-bag') return discoverPdokBag(shard, options);
     throw new Error(`Unsupported source adapter: ${shard.source.adapter}`);
   };
 
@@ -974,44 +1290,51 @@ export const createSourceAdapters = ({
       await rm(`${destination}.part`, { force: true });
     }
     const partial = `${destination}.part`;
-    if (useCurlTransport) {
-      try {
-        await runProcess({
-          file: 'curl',
-          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-C', '-', '-o', partial, url],
-          signal
-        });
-      } catch {
-        await rm(partial, { force: true });
-        await runProcess({
-          file: 'curl',
-          args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-o', partial, url],
-          signal
-        });
+    let completed = false;
+    try {
+      if (useCurlTransport) {
+        try {
+          await runProcess({
+            file: 'curl',
+            args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-C', '-', '-o', partial, url],
+            signal
+          });
+        } catch {
+          await rm(partial, { force: true });
+          await runProcess({
+            file: 'curl',
+            args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-o', partial, url],
+            signal
+          });
+        }
+        const downloaded = (await stat(partial)).size;
+        if (downloaded > maxBytes || !sourceSizeMatches(downloaded, expectedBytes)) {
+          throw new Error(`Source download size mismatch: ${downloaded} (expected ${expectedBytes ?? 'unknown'})`);
+        }
+        await rename(partial, destination);
+        completed = true;
+        return downloaded;
       }
-      const downloaded = (await stat(partial)).size;
-      if (downloaded > maxBytes || !sourceSizeMatches(downloaded, expectedBytes)) {
-        throw new Error(`Source download size mismatch: ${downloaded} (expected ${expectedBytes ?? 'unknown'})`);
-      }
+      let offset = 0;
+      try { offset = (await stat(partial)).size; } catch {}
+      if (expectedBytes !== null && expectedBytes > maxBytes) throw new Error(`Source file exceeds cache budget: ${expectedBytes} > ${maxBytes}`);
+      const response = await fetchImpl(url, {
+        headers: offset ? { Range: `bytes=${offset}-` } : {},
+        signal
+      });
+      if (!response.ok) throw new Error(`Source download failed (${response.status}): ${url}`);
+      const append = offset > 0 && response.status === 206;
+      if (!append) offset = 0;
+      const remaining = headerNumber(response.headers, 'content-length');
+      if (remaining !== null && offset + remaining > maxBytes) throw new Error(`Source file exceeds cache budget: ${offset + remaining} > ${maxBytes}`);
+      if (!response.body) throw new Error(`Source download returned an empty body: ${url}`);
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(partial, { flags: append ? 'a' : 'w' }));
       await rename(partial, destination);
-      return downloaded;
+      completed = true;
+      return (await stat(destination)).size;
+    } finally {
+      if (!completed) await rm(partial, { force: true });
     }
-    let offset = 0;
-    try { offset = (await stat(partial)).size; } catch {}
-    if (expectedBytes !== null && expectedBytes > maxBytes) throw new Error(`Source file exceeds cache budget: ${expectedBytes} > ${maxBytes}`);
-    const response = await fetchImpl(url, {
-      headers: offset ? { Range: `bytes=${offset}-` } : {},
-      signal
-    });
-    if (!response.ok) throw new Error(`Source download failed (${response.status}): ${url}`);
-    const append = offset > 0 && response.status === 206;
-    if (!append) offset = 0;
-    const remaining = headerNumber(response.headers, 'content-length');
-    if (remaining !== null && offset + remaining > maxBytes) throw new Error(`Source file exceeds cache budget: ${offset + remaining} > ${maxBytes}`);
-    if (!response.body) throw new Error(`Source download returned an empty body: ${url}`);
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(partial, { flags: append ? 'a' : 'w' }));
-    await rename(partial, destination);
-    return (await stat(destination)).size;
   };
 
   const sharedDownload = (url, destination, options) => {
@@ -1698,6 +2021,439 @@ export const createSourceAdapters = ({
     };
   };
 
+  const replaceFile = async (temporary, destination) => {
+    try {
+      await rename(temporary, destination);
+    } catch (error) {
+      if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+      await rm(destination, { force: true });
+      await rename(temporary, destination);
+    }
+  };
+
+  const writeJsonAtomic = async (file, value) => {
+    const temporary = `${file}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, 'utf8');
+    await replaceFile(temporary, file);
+  };
+
+  const mapplsAddressRecord = (detailsPayload, nearby, categoryCode, sourceName) => {
+    const details = Array.isArray(detailsPayload) ? detailsPayload[0]
+      : detailsPayload?.results?.[0] || detailsPayload?.result || detailsPayload?.copResults?.[0]
+        || detailsPayload?.copResults || detailsPayload;
+    if (!details || typeof details !== 'object') return null;
+    const address = details.addressTokens && typeof details.addressTokens === 'object' ? details.addressTokens : details;
+    const admin = details.adminTokens && typeof details.adminTokens === 'object' ? details.adminTokens : details;
+    const sourceRecordId = String(details.eloc || details.eLoc || nearby.eLoc || nearby.eloc || '').trim();
+    const formattedAddress = String(details.address || details.formattedAddress || nearby.placeAddress || '').trim();
+    const addressParts = formattedAddress.split(',').map((value) => value.trim()).filter(Boolean);
+    const parsedNumber = addressParts[0]?.match(/^(\d+[A-Za-z]?(?:[-/]\d+)?)(?:\s|$)/u)?.[1] || '';
+    const number = String(address.houseNumber || details.houseNumber || parsedNumber).trim();
+    const parsedStreet = parsedNumber
+      ? (addressParts[0].slice(parsedNumber.length).trim() || addressParts[1] || '')
+      : '';
+    const street = String(address.street || details.street || parsedStreet).trim();
+    const admin1 = String(admin.state || address.state || details.state || '').trim();
+    const locality = String(admin.city || address.city || details.city || address.village || details.village || address.locality || details.locality || '').trim();
+    const district = String(admin.district || admin.subDistrict || address.district || details.district || address.subDistrict || details.subDistrict || '').trim();
+    const postcode = String(admin.pincode || address.pincode || details.pincode || '').trim();
+    const coordinates = details.coordinates || details.location || {};
+    const longitude = Number(details.longitude ?? details.lon ?? coordinates.longitude ?? coordinates.lng ?? nearby.longitude ?? nearby.lon);
+    const latitude = Number(details.latitude ?? details.lat ?? coordinates.latitude ?? coordinates.lat ?? nearby.latitude ?? nearby.lat);
+    if (!sourceRecordId || !number || !street || !admin1 || !locality || !district || !/^\d{6}$/u.test(postcode)
+      || !Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+    return {
+      id: sourceRecordId,
+      source_record_id: sourceRecordId,
+      source_dataset: sourceName,
+      number,
+      street,
+      building_name: String(address.houseName || details.houseName || details.name || nearby.placeName || '').trim(),
+      district,
+      locality,
+      admin1,
+      postcode,
+      longitude,
+      latitude,
+      property_type: 'residential',
+      residential_building_id: sourceRecordId,
+      residential_building_class: `mappls-category:${categoryCode}`
+    };
+  };
+
+  const materializeMapplsResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const identity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
+    const normalizedRoot = resolve(options.cacheDir, 'normalized');
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const output = resolve(normalizedRoot, `${shard.id}-${version}-${identity}.jsonl`);
+    const candidates = resolve(rawRoot, `${shard.id}-${version}-${identity}-candidates.jsonl`);
+    const checkpointFile = resolve(rawRoot, `${shard.id}-${version}-${identity}-checkpoint.json`);
+    await Promise.all([mkdir(normalizedRoot, { recursive: true }), mkdir(rawRoot, { recursive: true })]);
+    let checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
+    try {
+      const loaded = JSON.parse(await readFile(checkpointFile, 'utf8'));
+      if (loaded.version === version) checkpoint = { ...checkpoint, ...loaded };
+    } catch {}
+    if (checkpoint.complete) {
+      try {
+        const size = (await stat(output)).size;
+        if (await hasMinimumLines(output, Number(shard.qualityGate?.minimumRecords || 1))) {
+          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+        }
+        await rm(output, { force: true });
+        checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
+      } catch {
+        try {
+          if (!await hasMinimumLines(candidates, Number(shard.qualityGate?.minimumRecords || 1))) throw new Error('empty Mappls candidate cache');
+          const temporary = `${output}.${process.pid}.tmp`;
+          await copyFile(candidates, temporary);
+          await replaceFile(temporary, output);
+          const size = (await stat(output)).size;
+          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+        } catch {
+          checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
+        }
+      }
+    }
+    const seeds = (await loadSeedLocations(shard.countryCode))
+      .map((value) => ({ latitude: Number(value.latitude), longitude: Number(value.longitude) }))
+      .filter(({ latitude, longitude }) => Number.isFinite(latitude) && Number.isFinite(longitude));
+    if (!seeds.length) throw Object.assign(new Error('Mappls residential discovery requires postcode or city coordinates'), {
+      code: 'SOURCE_CONFIGURATION_INVALID'
+    });
+    const processed = new Set(checkpoint.processed || []);
+    let acceptedCount = 0;
+    let candidatesPresent = false;
+    try {
+      for (const line of (await readFile(candidates, 'utf8')).split(/\r?\n/u)) {
+        if (!line) continue;
+        candidatesPresent = true;
+        const value = JSON.parse(line);
+        processed.add(String(value.source_record_id || value.id));
+        acceptedCount += 1;
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    if (!candidatesPresent && checkpoint.processed?.length) {
+      checkpoint.processed = [];
+      processed.clear();
+    }
+    const persistCheckpoint = async () => {
+      checkpoint.processed = [...processed];
+      checkpoint.acceptedCount = acceptedCount;
+      checkpoint.updatedAt = new Date().toISOString();
+      await writeJsonAtomic(checkpointFile, checkpoint);
+    };
+    const requestBudget = Math.max(10, Math.min(100_000,
+      Number.parseInt(environment.MAPPLS_MAX_REQUESTS_PER_RUN || '2000', 10) || 2000));
+    const maximumPages = Math.max(1, Math.min(100,
+      Number.parseInt(environment.MAPPLS_MAX_PAGES_PER_SEED || '10', 10) || 10));
+    let requests = 0;
+    let pageCompleted = true;
+    try {
+      while (!checkpoint.complete && acceptedCount < sourceMaximum && requests < requestBudget) {
+        if (checkpoint.seedIndex >= seeds.length) {
+          checkpoint.complete = true;
+          break;
+        }
+        const seed = seeds[checkpoint.seedIndex];
+        const categoryCode = discovery.categoryCodes[checkpoint.categoryIndex];
+        const nearbyUrl = new URL('https://search.mappls.com/search/places/nearby/json');
+        Object.entries({
+          keywords: categoryCode,
+          refLocation: `${seed.latitude},${seed.longitude}`,
+          region: 'IND',
+          radius: '10000',
+          page: String(checkpoint.page),
+          filter: `categoryCode:${categoryCode}`
+        }).forEach(([name, value]) => nearbyUrl.searchParams.set(name, value));
+        const nearbyPayload = await requestMappls(nearbyUrl);
+        requests += 1;
+        const locations = Array.isArray(nearbyPayload?.suggestedLocations) ? nearbyPayload.suggestedLocations : [];
+        pageCompleted = true;
+        for (const nearby of locations) {
+          const eLoc = String(nearby.eLoc || nearby.eloc || '').trim();
+          if (!eLoc || processed.has(eLoc)) continue;
+          if (requests >= requestBudget) { pageCompleted = false; break; }
+          const detailsUrl = new URL(`https://explore.mappls.com/apis/O2O/entity/${encodeURIComponent(eLoc)}`);
+          const details = await requestMappls(detailsUrl);
+          requests += 1;
+          processed.add(eLoc);
+          const record = mapplsAddressRecord(details, nearby, categoryCode, shard.source.name);
+          if (!record) continue;
+          await appendFile(candidates, `${JSON.stringify(record)}\n`, 'utf8');
+          acceptedCount += 1;
+          if (acceptedCount >= sourceMaximum) break;
+        }
+        if (!pageCompleted || acceptedCount >= sourceMaximum) break;
+        const totalPages = Math.min(maximumPages, Math.max(1, Number(nearbyPayload?.pageInfo?.totalPages || 1)));
+        if (locations.length && checkpoint.page < totalPages) checkpoint.page += 1;
+        else {
+          checkpoint.page = 1;
+          checkpoint.categoryIndex += 1;
+          if (checkpoint.categoryIndex >= discovery.categoryCodes.length) {
+            checkpoint.categoryIndex = 0;
+            checkpoint.seedIndex += 1;
+          }
+        }
+        await persistCheckpoint();
+      }
+      if (acceptedCount >= sourceMaximum || checkpoint.seedIndex >= seeds.length) checkpoint.complete = true;
+    } finally {
+      await persistCheckpoint();
+    }
+    if (!acceptedCount) throw Object.assign(new Error('Mappls discovery checkpoint advanced without a publishable record'), {
+      code: checkpoint.complete ? 'SOURCE_QUALITY_FAILED' : 'SOURCE_PARTIAL'
+    });
+    const temporary = `${output}.${process.pid}.tmp`;
+    await copyFile(candidates, temporary);
+    await replaceFile(temporary, output);
+    const size = (await stat(output)).size;
+    return {
+      file: output,
+      format: 'overture-jsonl',
+      cacheBytes: size,
+      checksum: await sha256File(output),
+      sourceChecksum: await sha256File(candidates),
+      cacheHit: false
+    };
+  };
+
+  const materializePdokBag = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = options.maxRecords;
+    const identity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
+    const normalizedRoot = resolve(options.cacheDir, 'normalized');
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const output = resolve(normalizedRoot, `${shard.id}-${version}-${identity}.jsonl`);
+    const candidates = resolve(rawRoot, `${shard.id}-${version}-${identity}-candidates.jsonl`);
+    const checkpointFile = resolve(rawRoot, `${shard.id}-${version}-${identity}-checkpoint.json`);
+    const minimumRecords = Number(shard.qualityGate?.minimumRecords || 1);
+    await Promise.all([mkdir(normalizedRoot, { recursive: true }), mkdir(rawRoot, { recursive: true })]);
+    try {
+      const size = (await stat(output)).size;
+      if (await hasMinimumLines(output, minimumRecords)) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+
+    const seeds = selectDispersedSeeds(await loadSeedLocations(shard.countryCode), 400);
+    if (!seeds.length) throw Object.assign(new Error('PDOK BAG discovery requires Netherlands postcode or city coordinates'), {
+      code: 'SOURCE_CONFIGURATION_INVALID'
+    });
+    let checkpoint = { version, round: 0, seedIndex: 0, nextBySeed: {}, complete: false };
+    try {
+      const loaded = JSON.parse(await readFile(checkpointFile, 'utf8'));
+      if (loaded.version === version) {
+        checkpoint = { ...checkpoint, ...loaded };
+        if (!checkpoint.nextBySeed || typeof checkpoint.nextBySeed !== 'object') checkpoint.nextBySeed = {};
+        if (loaded.nextUrl && !checkpoint.nextBySeed[String(loaded.seedIndex || 0)]) {
+          checkpoint.nextBySeed[String(loaded.seedIndex || 0)] = loaded.nextUrl;
+        }
+        if (loaded.pageInSeed != null && loaded.round == null) checkpoint.round = Number(loaded.pageInSeed || 0);
+      }
+    } catch {}
+    const processed = new Set();
+    let acceptedCount = 0;
+    try {
+      const lines = createInterface({ input: createReadStream(candidates, { encoding: 'utf8' }), crlfDelay: Infinity });
+      for await (const line of lines) {
+        if (!line) continue;
+        const record = JSON.parse(line);
+        const id = String(record.source_record_id || record.id || '');
+        if (id) processed.add(id);
+        acceptedCount += 1;
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    if (!acceptedCount && Number(checkpoint.acceptedCount || 0) > 0) {
+      checkpoint = { version, seedIndex: 0, pageInSeed: 0, nextUrl: null, complete: false };
+    }
+    const persistCheckpoint = () => writeJsonAtomic(checkpointFile, {
+      ...checkpoint, acceptedCount, updatedAt: new Date().toISOString()
+    });
+    const requestBudget = Math.max(1, Math.min(2_000,
+      Number.parseInt(environment.PDOK_BAG_MAX_REQUESTS_PER_RUN || '1000', 10) || 1000));
+    const maximumPages = Math.max(1, Math.min(10,
+      Number.parseInt(environment.PDOK_BAG_MAX_PAGES_PER_SEED || '2', 10) || 2));
+    const pageLimit = Math.max(1, Math.min(250,
+      Math.floor(sourceMaximum / Math.max(1, seeds.length * maximumPages)) || 1));
+    const apiOrigin = new URL(discovery.dataUrl).origin;
+    const apiPath = new URL(discovery.dataUrl).pathname;
+    const checkedItemsUrl = (value) => {
+      const url = new URL(value);
+      if (url.origin !== apiOrigin || url.pathname !== apiPath) {
+        throw Object.assign(new Error(`PDOK BAG returned an invalid pagination URL: ${url}`), {
+          code: 'SOURCE_METADATA_INVALID'
+        });
+      }
+      return url.toString();
+    };
+    let requests = 0;
+    try {
+      while (!checkpoint.complete && acceptedCount < sourceMaximum && requests < requestBudget) {
+        if (checkpoint.seedIndex >= seeds.length) {
+          checkpoint.complete = true;
+          break;
+        }
+        const seedIndex = checkpoint.seedIndex;
+        const seed = seeds[seedIndex];
+        if (checkpoint.round > 0 && !checkpoint.nextBySeed[String(seedIndex)]) {
+          checkpoint.seedIndex += 1;
+          if (checkpoint.seedIndex >= seeds.length) {
+            checkpoint.round += 1;
+            checkpoint.seedIndex = 0;
+            if (checkpoint.round >= maximumPages) checkpoint.complete = true;
+          }
+          await persistCheckpoint();
+          continue;
+        }
+        const firstPage = new URL(discovery.dataUrl);
+        firstPage.searchParams.set('f', 'json');
+        firstPage.searchParams.set('limit', String(pageLimit));
+        firstPage.searchParams.set('bbox', [
+          seed.longitude - 0.06, seed.latitude - 0.04,
+          seed.longitude + 0.06, seed.latitude + 0.04
+        ].map((value) => value.toFixed(6)).join(','));
+        const requestUrl = checkedItemsUrl(checkpoint.round > 0
+          ? checkpoint.nextBySeed[String(seedIndex)] : firstPage);
+        const payload = await jsonRequest(requestUrl, fetchImpl);
+        requests += 1;
+        if (payload?.type !== 'FeatureCollection' || !Array.isArray(payload.features)) {
+          throw Object.assign(new Error('PDOK BAG returned an invalid FeatureCollection'), {
+            code: 'SOURCE_METADATA_INVALID'
+          });
+        }
+        const records = [];
+        for (const feature of payload.features) {
+          const record = normalizePdokBagFeature(feature, shard.source.name);
+          if (!record || processed.has(record.source_record_id)) continue;
+          processed.add(record.source_record_id);
+          records.push(record);
+          acceptedCount += 1;
+          if (acceptedCount >= sourceMaximum) break;
+        }
+        if (records.length) await appendFile(candidates, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+        const next = payload.links?.find((link) => link.rel === 'next')?.href;
+        if (checkpoint.round === 0 && next && acceptedCount < sourceMaximum) {
+          checkpoint.nextBySeed[String(seedIndex)] = checkedItemsUrl(next);
+        } else if (checkpoint.round > 0) {
+          delete checkpoint.nextBySeed[String(seedIndex)];
+        }
+        checkpoint.seedIndex += 1;
+        if (checkpoint.seedIndex >= seeds.length) {
+          checkpoint.seedIndex = 0;
+          checkpoint.round += 1;
+          if (checkpoint.round >= maximumPages || !Object.keys(checkpoint.nextBySeed).length) checkpoint.complete = true;
+        }
+        if (acceptedCount >= sourceMaximum) checkpoint.complete = true;
+        await persistCheckpoint();
+      }
+    } finally {
+      await persistCheckpoint();
+    }
+    if (!checkpoint.complete) throw Object.assign(new Error('PDOK BAG initialization paused at its request budget'), {
+      code: 'SOURCE_PARTIAL'
+    });
+    if (acceptedCount < minimumRecords) throw Object.assign(
+      new Error(`PDOK BAG produced ${acceptedCount} qualifying records; ${minimumRecords} required`), {
+        code: 'SOURCE_QUALITY_FAILED', metrics: { acceptedCount, minimumRecords }
+      });
+    const temporary = `${output}.${process.pid}.tmp`;
+    let sourceChecksum;
+    try {
+      await copyFile(candidates, temporary);
+      await replaceFile(temporary, output);
+      sourceChecksum = await sha256File(candidates);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    await Promise.all([rm(candidates, { force: true }), rm(checkpointFile, { force: true })]);
+    const size = (await stat(output)).size;
+    return {
+      file: output,
+      format: 'overture-jsonl',
+      cacheBytes: size,
+      checksum: await sha256File(output),
+      sourceChecksum,
+      cacheHit: false
+    };
+  };
+
+  const materializeLicensedResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const output = resolve(options.cacheDir, 'normalized',
+      `${shard.id}-${version}-${normalizedCachePolicyIdentity(sourceMaximum, options.perLocality)}.jsonl`);
+    try {
+      const size = (await stat(output)).size;
+      if (await hasMinimumLines(output, Number(shard.qualityGate?.minimumRecords || 1))) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+    const mappingName = shard.source.mappingEnvironment;
+    let mapping;
+    try { mapping = JSON.parse(String(environment[mappingName] || '')); }
+    catch { throw Object.assign(new Error(`${mappingName} must be a JSON field map`), { code: 'SOURCE_CONFIGURATION_INVALID' }); }
+    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+      throw Object.assign(new Error(`${mappingName} must be a JSON field map`), { code: 'SOURCE_CONFIGURATION_INVALID' });
+    }
+    const residentialValues = String(environment[shard.source.residentialValuesEnvironment] || '')
+      .split(',').map((value) => value.trim()).filter(Boolean);
+    const datasetResidential = environmentEnabled(environment[shard.source.datasetResidentialEnvironment]);
+    if ((!mapping.residentialClass || !residentialValues.length) && !datasetResidential) {
+      throw Object.assign(new Error('Licensed feeds require explicit residential evidence'), {
+        code: 'SOURCE_CONFIGURATION_INVALID'
+      });
+    }
+    await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
+    const remote = /^https:\/\//iu.test(discovery.dataUrl);
+    const sourceFile = remote
+      ? resolve(options.cacheDir, 'raw', `${shard.id}-${version}${shard.source.fileExtension || '.feed'}`)
+      : await licensedLocalFile(discovery.dataUrl);
+    if (remote) await download(discovery.dataUrl, sourceFile, {
+      expectedBytes: discovery.sourceBytes,
+      maxBytes: options.maxBytes
+    });
+    const sourceChecksum = discovery.sourceChecksum || await sha256File(sourceFile);
+    const temporary = `${output}.${process.pid}.tmp`;
+    try {
+      await runExecute({
+        file: pythonBin,
+        args: [licensedResidentialExporter,
+          '--input', sourceFile,
+          '--output', temporary,
+          '--country', shard.countryCode,
+          '--source-name', shard.source.name,
+          '--mapping-json', JSON.stringify(mapping),
+          '--format', String(environment[shard.source.formatEnvironment] || 'auto'),
+          '--residential-values', residentialValues.join(','),
+          ...(datasetResidential ? ['--dataset-residential'] : []),
+          '--max-records', String(sourceMaximum)],
+        phase: `materialize:${shard.id}`
+      });
+      await replaceFile(temporary, output);
+    } finally {
+      await rm(temporary, { force: true });
+      if (remote && !options.retainRaw) await rm(sourceFile, { force: true });
+    }
+    const size = (await stat(output)).size;
+    return {
+      file: output,
+      format: 'overture-jsonl',
+      cacheBytes: size,
+      checksum: await sha256File(output),
+      sourceChecksum,
+      cacheHit: false
+    };
+  };
+
   const materialize = (shard, discovery, options) => {
     if (discovery.adapter === 'overture') return materializeOverture(shard, discovery, options);
     if (discovery.adapter === 'geofabrik') return materializeGeofabrik(shard, discovery, options);
@@ -1710,6 +2466,9 @@ export const createSourceAdapters = ({
     if (discovery.adapter === 'cape-town-residential') return materializeCapeTownResidential(shard, discovery, options);
     if (discovery.adapter === 'taiwan-residential') return materializeTaiwanResidential(shard, discovery, options);
     if (discovery.adapter === 'hong-kong-residential') return materializeHongKongResidential(shard, discovery, options);
+    if (discovery.adapter === 'mappls-residential') return materializeMapplsResidential(shard, discovery, options);
+    if (discovery.adapter === 'licensed-residential-feed') return materializeLicensedResidential(shard, discovery, options);
+    if (discovery.adapter === 'pdok-bag') return materializePdokBag(shard, discovery, options);
     throw new Error(`Unsupported source adapter: ${discovery.adapter}`);
   };
 

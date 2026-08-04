@@ -110,4 +110,28 @@ describe('admin address coverage', () => {
     const cities = await listAddressCoverage(database, california?.key);
     expect(cities[0]).toMatchObject({ regionNameEn: 'Los Angeles', residentialCount: 6, childCount: 0 });
   });
+
+  it('uses zero-address catalog nodes in the all-country goal denominator', async () => {
+    const now = new Date().toISOString();
+    await database.batch([
+      database.prepare(`INSERT INTO sync_country_policies(
+        country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,min_per_node,coverage_ratio,level1_min,level2_min,updated_at
+      ) VALUES ('NL',1,1,10,10,10,10,1,1,0,0,?)`).bind(now),
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (21,'NL','NH','Noord-Holland','Noord-Holland','北荷兰省','province',NULL,'/21')`),
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (22,'NL','ZH','Zuid-Holland','Zuid-Holland','南荷兰省','province',NULL,'/22')`),
+      database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (211,'NL',21,'Amsterdam','Amsterdam','阿姆斯特丹','municipality',900000)`),
+      database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (221,'NL',22,'Rotterdam','Rotterdam','鹿特丹','municipality',650000)`),
+      database.prepare(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id)
+        VALUES ('NL','Noord-Holland','Amsterdam',4,?,21,211)`).bind(now)
+    ]);
+    const goal = (await evaluateCountryGoals(database)).get('NL');
+    expect(goal?.rules.administrativeCoverage).toMatchObject({ covered: 1, total: 2, met: false });
+    expect(goal?.rules.regionalMinimums.lowest).toMatchObject({ total: 2, qualified: 1 });
+    expect(goal?.unmetRules).toEqual(['total', 'administrative_coverage', 'regional_minimums']);
+    expect(goal?.complete).toBe(false);
+  });
 });

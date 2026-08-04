@@ -363,6 +363,7 @@ interface ChinaCatalogCityRow { id: number; region_id: number | null; name: stri
 interface ChinaRegionRow { id: number; code: string; name: string; native_name: string; zh_name: string }
 
 export const CN_SYNTHETIC_CITY_PREFIX = 'cn-city-';
+export const CN_SYNTHETIC_DISTRICT_PREFIX = 'cn-district-';
 const cnEthnicPrefectureSuffix = /(?:[一-鿿]{1,8}族)*自治[州县縣旗]$/u;
 const cnCitySuffix = /(?:地区|地區|林区|林區|新区|新區|盟|市)$/u;
 const cnCityStem = (value: string): string => {
@@ -375,6 +376,13 @@ const syntheticCityId = (city: string): string => `${CN_SYNTHETIC_CITY_PREFIX}${
 export const decodeSyntheticCityId = (id: string | undefined): string | undefined => {
   if (!id?.startsWith(CN_SYNTHETIC_CITY_PREFIX)) return undefined;
   const hex = id.slice(CN_SYNTHETIC_CITY_PREFIX.length);
+  if (!/^[0-9a-f]+$/u.test(hex) || hex.length % 2 !== 0) return undefined;
+  return Buffer.from(hex, 'hex').toString('utf8');
+};
+const syntheticDistrictId = (district: string): string => `${CN_SYNTHETIC_DISTRICT_PREFIX}${Buffer.from(district, 'utf8').toString('hex')}`;
+export const decodeSyntheticDistrictId = (id: string | undefined): string | undefined => {
+  if (!id?.startsWith(CN_SYNTHETIC_DISTRICT_PREFIX)) return undefined;
+  const hex = id.slice(CN_SYNTHETIC_DISTRICT_PREFIX.length);
   if (!/^[0-9a-f]+$/u.test(hex) || hex.length % 2 !== 0) return undefined;
   return Buffer.from(hex, 'hex').toString('utf8');
 };
@@ -572,7 +580,7 @@ const queryDistricts = async (db: Database, input: CatalogQuery, limit: number, 
     options: current.rows.map((row) => {
       const availableCount = Number(row.address_count || 0);
       return {
-        value: row.district, label: row.district, availableCount,
+        id: syntheticDistrictId(row.district), value: row.district, label: row.district, availableCount,
         disabled: input.residential && availableCount === 0,
         native: row.district, en: row.district, zhCN: row.district
       };

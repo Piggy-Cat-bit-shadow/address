@@ -24,7 +24,7 @@ const source = {
 const NL_PROVINCES = [
   ['DR', 'Drenthe', 'Drenthe', 52.9067922, 6.6368423],
   ['FL', 'Flevoland', 'Flevoland', 52.4484375, 5.4235397],
-  ['FR', 'Friesland', 'Friesland', 53.0923689, 5.777043],
+  ['FR', 'Friesland', 'Fryslân', 53.0923689, 5.777043],
   ['GE', 'Gelderland', 'Gelderland', 52.1014041, 5.9515701],
   ['GR', 'Groningen', 'Groningen', 53.2193835, 6.5665017],
   ['LI', 'Limburg', 'Limburg', 51.2015196, 5.9046302],

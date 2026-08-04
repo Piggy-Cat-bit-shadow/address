@@ -6,10 +6,9 @@ Address can serve an existing PostgreSQL address pool without third-party keys. 
 
 ## Where credentials are stored
 
-- Put bootstrap values in an ignored `.env` file or `/root/address/runtime/address.env` (`chmod 600`). Never edit an example file with a real value.
-- The administrator console can store AMap, Baidu, Tencent, OneMap, Geoapify, Google Geocoding, Youdao, and AMap browser credentials. They are encrypted in PostgreSQL with `CONFIG_MASTER_KEY`.
-- Environment provider keys are imported at startup if they are not already present. Administrator records then coexist with them; changing an example file never replaces an existing encrypted record.
-- The Korea batch worker currently reads `GEOAPIFY_API_KEY` from the process environment at startup. OneMap-assisted Singapore import also reads `ONEMAP_ACCESS_TOKEN` from the process environment.
+- Configure AMap, Baidu, Tencent, Mappls, OneMap, Geoapify, Google Geocoding, Youdao, and AMap browser credentials in the administrator console. They are encrypted in PostgreSQL with `CONFIG_MASTER_KEY`.
+- Administrator credentials participate directly in the synchronization workers' quota, cooldown, and rotation pools.
+- Keep `config/address.env` empty for normal deployments. It is reserved for advanced licensed-feed URLs, field mappings, and license gates required at process startup; do not store provider keys there unless a future adapter explicitly requires it.
 
 ## Provider credentials
 
@@ -47,6 +46,33 @@ See Baidu's [official Web API documentation](https://lbsyun.baidu.com/faq/api?ti
 4. Set `TENCENT_API_KEY`, a numbered variant, or add each key in the administrator console.
 
 Tencent documents response code `120` as a per-second limit and `121` as a daily limit in its [official status table](https://lbs.qq.com/service/webService/webServiceGuide/status). Current usage may also be reported in `X-LIMIT` response headers; the console remains authoritative.
+
+### Mappls Search API
+
+1. Create an app in the [Mappls Console](https://auth.mappls.com/console/) and enable Nearby Places and Place Details for that app.
+2. Copy the static key from the app's credentials section. Current Nearby API documentation passes it as the mandatory `access_token` query parameter.
+3. Restrict the key to the production server IP where the console permits it.
+4. Set `MAPPLS_API_KEY`, use numbered variants such as `MAPPLS_API_KEY_2`, or add each key in the administrator console.
+
+The India residential adapter remains disabled until the contract explicitly permits residential category codes, restricted address tokens, coordinates, caching, and redistribution. The built-in 1,000/day value is a local protective default, not an official plan entitlement; configure the actual limit from the contract and console. See the [current Nearby API documentation](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-near-by-api-example/Readme).
+
+### Vietnam Post Vpostcode feed
+
+1. Obtain a Vpostcode bulk feed or API contract that permits residential fields, coordinates, server-side caching, and redistribution.
+2. Set `ADDRESS_SYNC_VPOSTCODE_FEED_URL` to an HTTPS feed, or to a file below `ADDRESS_DATA_ROOT`; set its immutable `ADDRESS_SYNC_VPOSTCODE_FEED_VERSION` and format (`csv`, `json`, or `jsonl`).
+3. Set `ADDRESS_SYNC_VPOSTCODE_FIELD_MAP` to JSON mapping `id`, `number`, `street`, `locality`, `admin1`, `postcode`, `longitude`, and `latitude`. If the dataset is not contractually all-residential, also map `residentialClass` and set `ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES`.
+4. Only after the contract and field sample have been reviewed, set `ADDRESS_SYNC_VPOSTCODE_ENABLED=true`, `ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED=true`, and `ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED=true`.
+
+The adapter accepts only five-digit postcodes and remains disabled until a real authorized sample passes the residential quality gate. Synthetic feed throughput tests do not establish Vpostcode capacity.
+
+### Nigeria NIPOST or ProgIS feed
+
+1. Obtain a NIPOST or ProgIS bulk feed contract that permits residential fields, coordinates, server-side caching, and redistribution.
+2. Set `ADDRESS_SYNC_NG_FEED_URL` to an HTTPS feed, or to a file below `ADDRESS_DATA_ROOT`; set `ADDRESS_SYNC_NG_FEED_VERSION` and its format (`csv`, `json`, or `jsonl`).
+3. Set `ADDRESS_SYNC_NG_FIELD_MAP` to JSON mapping `id`, `number`, `street`, `district`, `locality`, `admin1`, `postcode`, `longitude`, and `latitude`. If the dataset is not contractually all-residential, also map `residentialClass` and set `ADDRESS_SYNC_NG_RESIDENTIAL_VALUES`.
+4. Only after the contract and field sample have been reviewed, set `ADDRESS_SYNC_NG_FEED_ENABLED=true`, `ADDRESS_SYNC_NG_LICENSE_CONFIRMED=true`, and `ADDRESS_SYNC_NG_REDISTRIBUTION_ALLOWED=true`.
+
+The adapter requires a six-digit postcode and a district. It remains disabled until a real authorized sample passes the residential quality gate. Synthetic feed throughput tests do not establish NIPOST or ProgIS capacity.
 
 ### Geoapify
 
@@ -119,4 +145,4 @@ Official dashboards and response headers override documentation examples. Review
 3. Test each credential from the administrator console without copying its value into logs or screenshots.
 4. Keep screenshots masked and rotate any credential that was accidentally displayed.
 
-Official pages checked: 2026-08-03. Provider terms, plans, quotas, and console workflows may change.
+Official pages checked: 2026-08-04. Provider terms, plans, quotas, and console workflows may change.

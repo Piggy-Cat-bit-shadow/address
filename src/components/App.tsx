@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
-import { Activity } from 'lucide-react';
+import { Activity, Bookmark } from 'lucide-react';
 import AmapPreview from './AmapPreview';
 import {
   addressDisplayComponents,
@@ -10,6 +10,8 @@ import {
   type AddressDisplayLanguage
 } from '../domain/address-display';
 import { countries, countryByCode, isCountryCode } from '../domain/countries';
+import { favoriteIdFor } from '../domain/favorites';
+import { favoritesCopy } from '../domain/favorites-i18n';
 import { countryCodeFrom, type ClientContext, type GenerationMode } from '../domain/client-context';
 import { messages } from '../domain/i18n';
 import { localeDefinitions, localizedCountryName, pathForLocale, uiTextLocale } from '../domain/locales';
@@ -17,6 +19,7 @@ import { locationOptionLabel } from '../domain/location-options';
 import { localizedProfileValue, profileLanguageControlText, profileLanguageNames, resolvedProfileLocale } from '../domain/profile-localization';
 import { isChineseNativeCountry, nativeProfileLabel } from '../domain/profile-native-labels';
 import { supportedLocales, type AddressComponents, type AddressFilterField, type AddressResultField, type CountryCode, type CountryGroup, type CountryShortcutConfig, type GeneratedBundle, type Locale, type LocationOption, type LocationShortcut, type ProfileLanguage } from '../domain/types';
+import { listFavorites, removeFavorite, saveFavorite, subscribeToFavorites } from '../services/favorite-store';
 
 interface AppProps { locale: Locale; apiBaseUrl: string }
 const monitorLabels: Record<Locale, string> = {
@@ -341,6 +344,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [countriesReady, setCountriesReady] = useState(false);
   const [mapDisplay, setMapDisplay] = useState<MapDisplayConfig | null>(null);
   const [shortcutConfigs, setShortcutConfigs] = useState<Partial<Record<CountryCode, CountryShortcutConfig>>>({});
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [favoriteCount, setFavoriteCount] = useState(0);
   const activeRequest = useRef<{ requestId: string; country: CountryCode; mode: Mode } | null>(null);
   const selectionRef = useRef<{ country: CountryCode; mode: Mode }>({ country: 'US', mode: 'residential' });
   const generationController = useRef<AbortController | null>(null);
@@ -356,6 +361,12 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const prefetchingKey = useRef('');
   const userNavigated = useRef(false);
   const residentialCountriesRef = useRef<Set<CountryCode>>(new Set());
+
+  const refreshFavoriteState = async () => {
+    const { values } = await listFavorites();
+    setFavoriteIds(new Set(values.map(({ id }) => id))); setFavoriteCount(values.length);
+  };
+  useEffect(() => { void refreshFavoriteState(); return subscribeToFavorites(() => void refreshFavoriteState()); }, []);
 
   const residential = mode === 'residential';
   const selectedCountry = countryByCode.get(countryCode) || countries[0];
@@ -776,11 +787,12 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   };
 
   const submit = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => { event.preventDefault(); void generate(); };
-  const showCopyToast = (kind: 'success' | 'error') => {
+  const showToastMessage = (kind: 'success' | 'error', message: string) => {
     window.clearTimeout(copyToastTimer.current);
-    setCopyToast({ kind, message: kind === 'success' ? t.copySuccess : t.copyFailed });
+    setCopyToast({ kind, message });
     copyToastTimer.current = window.setTimeout(() => { setCopyToast(null); setCopied(''); }, 2200);
   };
+  const showCopyToast = (kind: 'success' | 'error') => showToastMessage(kind, kind === 'success' ? t.copySuccess : t.copyFailed);
   const fallbackCopy = (value: string): boolean => {
     const textarea = document.createElement('textarea');
     textarea.value = value;
@@ -836,6 +848,22 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const changeProfileLanguage = (language: ProfileLanguage) => {
     setProfileLanguage(language);
     storeDisplayLanguage(profileLanguageStorageKey, language);
+  };
+  const toggleFavorite = async () => {
+    if (!result) return;
+    const id = favoriteIdFor(result);
+    try {
+      if (favoriteIds.has(id)) {
+        await removeFavorite(id);
+        showToastMessage('success', favoritesCopy[locale].removed);
+      } else {
+        await saveFavorite(result);
+        showToastMessage('success', favoritesCopy[locale].saved);
+      }
+      await refreshFavoriteState();
+    } catch {
+      showToastMessage('error', t.copyFailed);
+    }
   };
 
   // Unified display pipeline for every selected locale: a locale matching the
@@ -935,6 +963,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     <header className="topbar">
       <a className="logo" href={`/${locale}/`}><b>{t.brand}</b></a>
       <nav className="top-links">
+        <a className="favorites-link" href={`/${locale}/favorites/`} aria-label={favoritesCopy[locale].title} title={favoritesCopy[locale].title}><Bookmark size={17} aria-hidden="true"/>{favoriteCount > 0 && <span>{favoriteCount > 99 ? '99+' : favoriteCount}</span>}</a>
         <a className="monitor-link" href={`/${locale}/monitor/`}><Activity size={17} aria-hidden="true" /><span>{monitorLabels[locale]}</span></a>
         <a href={`/${locale}/api/`}>{t.apiDocs}</a>
         <select className="language-select" aria-label="Language" value={locale} onChange={(event) => {
@@ -1004,7 +1033,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
 
           {result && presentation && components && <>
             <section className="address-card panel">
-              <header className="section-heading"><h2>{t.address}</h2><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></header>
+              <header className="section-heading"><h2>{t.address}</h2><span className="address-heading-actions"><button type="button" className={`favorite-toggle ${favoriteIds.has(favoriteIdFor(result)) ? 'active' : ''}`} aria-pressed={favoriteIds.has(favoriteIdFor(result))} aria-label={favoritesCopy[locale].save} title={favoritesCopy[locale].save} onClick={() => void toggleFavorite()}><Bookmark aria-hidden="true"/></button><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></span></header>
               <AddressLanguageControl value={addressLanguage} onChange={changeAddressLanguage} locale={locale} />
               <div className="address-table" aria-busy={translationLoading || undefined} style={translationLoading ? { opacity: 0.55, transition: 'opacity .2s' } : undefined}>
                 {resultFields.map(({ field, label }) => {

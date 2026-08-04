@@ -105,8 +105,10 @@ export const testServiceCredential = async (
   }
   const url = new URL(provider === 'geoapify'
     ? 'https://api.geoapify.com/v1/geocode/reverse?lat=51.50735&lon=-0.12776&limit=1&format=json'
-    : 'https://maps.googleapis.com/maps/api/geocode/json?address=London');
-  url.searchParams.set(provider === 'geoapify' ? 'apiKey' : 'key', secret);
+    : provider === 'mappls'
+      ? 'https://search.mappls.com/search/places/nearby/json?keywords=coffee&refLocation=28.631460,77.217423&region=IND&radius=500'
+      : 'https://maps.googleapis.com/maps/api/geocode/json?address=London');
+  url.searchParams.set(provider === 'geoapify' ? 'apiKey' : provider === 'mappls' ? 'access_token' : 'key', secret);
   let response: Response;
   try {
     response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
@@ -121,6 +123,11 @@ export const testServiceCredential = async (
     if (body.status === 'REQUEST_DENIED') throw new ProviderRequestError('auth', 'REQUEST_DENIED');
     if (body.status === 'OVER_QUERY_LIMIT' || body.status === 'OVER_DAILY_LIMIT') throw new ProviderRequestError('quota', body.status);
     if (body.status !== 'OK' && body.status !== 'ZERO_RESULTS') throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+  }
+  if (provider === 'mappls') {
+    const body = await response.json().catch(() => null) as { suggestedLocations?: unknown[] } | null;
+    if (!body || !Array.isArray(body.suggestedLocations)) throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+    return { success: true, resultCount: body.suggestedLocations.length };
   }
   return { success: true, resultCount: 1 };
 };
@@ -962,12 +969,16 @@ export const authorizeWebRequest = async (control: ControlStore, request: Reques
   catch { return false; }
 };
 
+export const apiScopeForPath = (pathname: string): 'read' | 'generate' =>
+  (pathname === '/api/v1/generate' || pathname.startsWith('/api/v1/generate/') || pathname.endsWith('/address-translation'))
+    ? 'generate' : 'read';
+
 export const authorizeApiRequest = async (control: ControlStore, request: Request): Promise<boolean> => {
   const value = bearer(request.headers.get('authorization') || undefined);
-  return (await control.authorizeApiTokenDetailed(value, new URL(request.url).pathname.endsWith('/generate') ? 'generate' : 'read')).status === 'authorized';
+  return (await control.authorizeApiTokenDetailed(value, apiScopeForPath(new URL(request.url).pathname))).status === 'authorized';
 };
 
 export const apiAuthorization = async (control: ControlStore, request: Request) => {
   const value = bearer(request.headers.get('authorization') || undefined);
-  return control.authorizeApiTokenDetailed(value, new URL(request.url).pathname.endsWith('/generate') ? 'generate' : 'read');
+  return control.authorizeApiTokenDetailed(value, apiScopeForPath(new URL(request.url).pathname));
 };

@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import type { Database } from '../database/database.mjs';
 import { countries, countryByCode, isCountryCode } from '../../src/domain/countries';
+import { publicOpenApiDocument } from '../../src/domain/api-contract';
+import { evaluateCountryGoals } from '../sync/country-goals.mjs';
 import type { ClientContext } from '../../src/domain/client-context';
 import { DomainError, generateBundle } from '../../src/domain/generator';
 import { locationOptions, regionsForCountry } from '../../src/domain/location-options';
@@ -16,7 +18,7 @@ import {
   type AddressFilters
 } from './repositories/address-repository';
 import { loadAddressPoolV2AddressById, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
-import { queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
+import { decodeSyntheticDistrictId, queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
 import { countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
 import { isTranslatableLocale, translateAddressComponents } from './services/address-translation';
 import { clientContextFromRequest } from './services/client-context';
@@ -111,6 +113,19 @@ const poolMetadataCache = new WeakMap<object, {
   v1?: Map<string, number>;
   v2?: Map<string, AddressPoolV2Count>;
 }>();
+const countryGoalCache = new WeakMap<object, { expiresAt: number; promise: ReturnType<typeof evaluateCountryGoals> }>();
+
+const cachedCountryGoals = (db: Database): ReturnType<typeof evaluateCountryGoals> => {
+  const key = db as object;
+  const cached = countryGoalCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  const promise = evaluateCountryGoals(db);
+  countryGoalCache.set(key, { expiresAt: Date.now() + 10_000, promise });
+  void promise.catch(() => {
+    if (countryGoalCache.get(key)?.promise === promise) countryGoalCache.delete(key);
+  });
+  return promise;
+};
 
 type GenerateTimingStage = 'pool' | 'provider' | 'localize';
 type GenerateTimings = Record<GenerateTimingStage, number>;
@@ -285,6 +300,16 @@ app.use('*', async (context, next) => {
 
 app.get('/', (context) => context.json({ service: 'Real Address Generator API', version: 'v1' }));
 app.get('/api/v1/health', (context) => context.json({ status: 'ok' }));
+app.get('/api/v1/ready', async (context) => {
+  try {
+    if (!context.env.ADDRESS_DB) throw new Error('DATABASE_UNAVAILABLE');
+    await context.env.ADDRESS_DB.prepare('SELECT 1 AS ready').first();
+    return context.json({ status: 'ready' });
+  } catch {
+    return context.json({ status: 'unavailable' }, 503);
+  }
+});
+app.get('/api/v1/openapi.json', (context) => context.json(publicOpenApiDocument));
 
 app.get('/api/v1/countries', async (context) => {
   const coverage = new Map<string, number>();
@@ -410,6 +435,47 @@ app.get('/api/v1/locations/search', async (context) => {
   return context.json({ data: responseData });
 });
 
+app.get('/api/v1/locations/hierarchy', async (context) => {
+  if (!context.env.LOCATION_DB) throw new DomainError('DATABASE_UNAVAILABLE', 'The location catalog is unavailable.', 503);
+  const country = context.req.query('country')?.toUpperCase() || '';
+  if (!isCountryCode(country) || !countryByCode.has(country)) throw new DomainError('INVALID_COUNTRY', `Unknown country code: ${country}`);
+  const childType = context.req.query('childType') || '';
+  const parentType = context.req.query('parentType') || 'country';
+  const parentId = context.req.query('parentId')?.trim() || '';
+  if (!['region', 'city', 'district', 'postcode'].includes(childType)) {
+    throw new DomainError('INVALID_FIELD', 'Unknown hierarchy child type.');
+  }
+  if (!['country', 'region', 'city'].includes(parentType)) {
+    throw new DomainError('INVALID_LOCATION', 'Unknown hierarchy parent type.');
+  }
+  const allowedChildren: Record<string, string[]> = {
+    country: ['region'], region: ['city', 'postcode'], city: ['district', 'postcode']
+  };
+  if (!allowedChildren[parentType].includes(childType) || (parentType !== 'country' && !parentId)) {
+    throw new DomainError('INVALID_LOCATION', 'The requested parent and child hierarchy is not supported.');
+  }
+  const catalog = await queryLocationCatalog(context.env.LOCATION_DB, {
+    country,
+    field: childType as CatalogField,
+    query: context.req.query('q')?.trim() || undefined,
+    regionId: parentType === 'region' ? parentId : undefined,
+    cityId: parentType === 'city' ? parentId : undefined,
+    residential: context.req.query('residential') !== 'false',
+    cursor: context.req.query('cursor') || undefined,
+    limit: Number.parseInt(context.req.query('limit') || '100', 10)
+  });
+  context.header('Cache-Control', 'no-store');
+  return context.json({ data: {
+    parent: { type: parentType, id: parentType === 'country' ? country : parentId },
+    childType,
+    children: catalog.options,
+    total: catalog.total,
+    availableTotal: catalog.availableTotal,
+    nextCursor: catalog.nextCursor || null,
+    source: catalog.source
+  } });
+});
+
 app.get('/api/v1/generate', async (context) => {
   const startedAt = performance.now();
   const timings: GenerateTimings = { pool: 0, provider: 0, localize: 0 };
@@ -443,13 +509,19 @@ app.get('/api/v1/generate', async (context) => {
   const strategy = context.req.query('strategy') === 'instant' ? 'instant' : 'random';
   const requestId = context.req.query('requestId') || crypto.randomUUID();
   const mode = ipRegionMode ? 'ip-region' : residential ? 'residential' : 'address';
+  const districtId = context.req.query('districtId') || undefined;
+  const districtFromId = decodeSyntheticDistrictId(districtId);
+  if (districtId && (!districtFromId || countryCode !== 'CN')) {
+    throw new DomainError('INVALID_LOCATION', 'The selected district ID is not present in the location catalog.', 400);
+  }
   const requestedFilters: AddressFilters = {
     q: context.req.query('q') || undefined,
     region: context.req.query('region') || undefined,
     regionId: context.req.query('regionId') || undefined,
     city: context.req.query('city') || undefined,
     cityId: context.req.query('cityId') || undefined,
-    district: context.req.query('district') || undefined,
+    district: context.req.query('district') || districtFromId,
+    districtId,
     postcode: context.req.query('postcode') || undefined,
     postcodeId: context.req.query('postcodeId') || undefined
   };
@@ -460,7 +532,7 @@ app.get('/api/v1/generate', async (context) => {
 
   const hasLocationFilter = Boolean(
     filters.region || filters.regionId || filters.city || filters.cityId
-    || filters.district || filters.postcode || filters.postcodeId
+    || filters.district || filters.districtId || filters.postcode || filters.postcodeId
   );
   const ipCoordinates = ipContext?.latitude !== undefined && ipContext.longitude !== undefined
     ? { latitude: ipContext.latitude, longitude: ipContext.longitude }
@@ -646,6 +718,134 @@ app.get('/api/v1/generate', async (context) => {
       result
     }
   });
+});
+
+app.post('/api/v1/generate/batch', async (context) => {
+  const body = await context.req.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  const filters = body?.filters as Record<string, unknown> | undefined;
+  const options = body?.options as Record<string, unknown> | undefined;
+  const count = body?.count;
+  if (!body || Array.isArray(body) || !Number.isInteger(count) || Number(count) < 1 || Number(count) > 50
+    || !filters || typeof filters !== 'object' || Array.isArray(filters)) {
+    throw new DomainError('INVALID_BATCH_REQUEST', 'Count must be an integer from 1 through 50 and filters must be an object.', 400);
+  }
+  const allowedFilterNames = ['country', 'region', 'regionId', 'city', 'cityId', 'district', 'districtId', 'postcode', 'postcodeId', 'q'] as const;
+  const unknownBodyField = Object.keys(body).find((name) => !['count', 'filters', 'options', 'excludeAddressIds'].includes(name));
+  const unknownFilter = Object.keys(filters).find((name) => !allowedFilterNames.includes(name as typeof allowedFilterNames[number]));
+  if (unknownBodyField || unknownFilter) throw new DomainError('INVALID_BATCH_REQUEST', `Unknown batch field: ${unknownBodyField || `filters.${unknownFilter}`}.`, 400);
+  const stringFilters: Record<string, string> = {};
+  for (const name of allowedFilterNames) {
+    const value = filters[name];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string' || value.length > 300) throw new DomainError('INVALID_BATCH_REQUEST', `${name} must be a string of at most 300 characters.`, 400);
+    stringFilters[name] = value;
+  }
+  const countryCode = stringFilters.country?.toUpperCase() || '';
+  if (!isCountryCode(countryCode) || !countryByCode.has(countryCode)) throw new DomainError('INVALID_COUNTRY', `Unknown country code: ${countryCode}`);
+  stringFilters.country = countryCode;
+  if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options))) throw new DomainError('INVALID_BATCH_REQUEST', 'Options must be an object.', 400);
+  const unknownOption = options && Object.keys(options).find((name) => !['unique', 'seed', 'strategy', 'requestId'].includes(name));
+  if (unknownOption) throw new DomainError('INVALID_BATCH_REQUEST', `Unknown batch field: options.${unknownOption}.`, 400);
+  const unique = options?.unique !== false;
+  if (options?.unique !== undefined && typeof options.unique !== 'boolean') throw new DomainError('INVALID_BATCH_REQUEST', 'options.unique must be a boolean.', 400);
+  const strategy = options?.strategy === undefined ? 'random' : options.strategy;
+  if (!['random', 'instant'].includes(String(strategy))) throw new DomainError('INVALID_BATCH_REQUEST', 'options.strategy must be random or instant.', 400);
+  const requestedSeed = options?.seed;
+  const requestedId = options?.requestId;
+  if (requestedSeed !== undefined && (typeof requestedSeed !== 'string' || requestedSeed.length > 300)) throw new DomainError('INVALID_BATCH_REQUEST', 'options.seed must be a string of at most 300 characters.', 400);
+  if (requestedId !== undefined && (typeof requestedId !== 'string' || requestedId.length > 160)) throw new DomainError('INVALID_BATCH_REQUEST', 'options.requestId must be a string of at most 160 characters.', 400);
+  const exclusions = body.excludeAddressIds === undefined ? [] : body.excludeAddressIds;
+  if (!Array.isArray(exclusions) || exclusions.length > 500 || exclusions.some((value) => typeof value !== 'string' || value.length > 160)) {
+    throw new DomainError('INVALID_BATCH_REQUEST', 'excludeAddressIds must contain at most 500 address ID strings.', 400);
+  }
+
+  const seed = typeof requestedSeed === 'string' && requestedSeed ? requestedSeed : crypto.randomUUID();
+  const requestId = typeof requestedId === 'string' && requestedId ? requestedId : crypto.randomUUID();
+  const excluded = new Set(exclusions as string[]);
+  const selected = new Set<string>();
+  const results: GeneratedBundle[] = [];
+  const maximumAttempts = Math.min(200, Math.max(
+    Number(count) * (unique ? 6 : 1),
+    Number(count) + Math.min(excluded.size, Number(count) * 4)
+  ));
+  let attempts = 0;
+
+  const generateOne = async (attempt: number): Promise<{ result?: GeneratedBundle; error?: { code: string; message: string; status: number } }> => {
+    const url = new URL('/api/v1/generate', 'http://address.internal');
+    for (const [name, value] of Object.entries(stringFilters)) url.searchParams.set(name, value);
+    url.searchParams.set('strategy', String(strategy));
+    url.searchParams.set('seed', `${seed}:${attempt}`);
+    url.searchParams.set('requestId', `${requestId}:${attempt + 1}`);
+    const response = await app.fetch(new Request(url), context.env);
+    const payload = await response.json() as { data?: { result?: GeneratedBundle }; error?: { code?: string; message?: string } };
+    if (!response.ok) return { error: {
+      code: payload.error?.code || 'BATCH_GENERATION_FAILED',
+      message: payload.error?.message || 'Address generation failed.',
+      status: response.status
+    } };
+    return { result: payload.data?.result };
+  };
+
+  while (results.length < Number(count) && attempts < maximumAttempts) {
+    const roundSize = Math.min(10, maximumAttempts - attempts, Math.max(1, (Number(count) - results.length) * 2));
+    const roundStart = attempts;
+    attempts += roundSize;
+    const round = await Promise.all(Array.from({ length: roundSize }, (_, index) => generateOne(roundStart + index)));
+    const failure = round.find((item) => item.error)?.error;
+    if (failure && results.length === 0) throw new DomainError(failure.code, failure.message, failure.status);
+    for (const item of round) {
+      const result = item.result;
+      const id = result?.address.id;
+      if (!result || !id || excluded.has(id) || (unique && selected.has(id))) continue;
+      selected.add(id);
+      results.push(result);
+      if (results.length >= Number(count)) break;
+    }
+  }
+  if (!results.length) throw new DomainError('NO_POOL_COVERAGE', `No synchronized address is available for the selected area in ${countryCode}.`, 404);
+  context.header('Cache-Control', 'no-store');
+  return context.json({ data: {
+    requestId,
+    requestedCount: Number(count),
+    returnedCount: results.length,
+    unique,
+    exhausted: results.length < Number(count),
+    filters: stringFilters,
+    results
+  } });
+});
+
+app.get('/api/v1/addresses/:id', async (context) => {
+  const id = (context.req.param('id') || '').trim();
+  if (!id || id.length > 160) throw new DomainError('INVALID_ADDRESS_ID', 'A valid address ID is required.', 400);
+  const address = await loadAddressPoolV2AddressById(context.env.ADDRESS_DB, id)
+    || await loadChinaCommunityAddressById(context.env.ADDRESS_DB, id);
+  if (!address) throw new DomainError('ADDRESS_NOT_FOUND', 'The address is not present in the published synchronized pool.', 404);
+  context.header('Cache-Control', 'no-store');
+  return context.json({ data: { address } });
+});
+
+app.get('/api/v1/coverage', async (context) => {
+  if (!context.env.ADDRESS_DB) throw new DomainError('DATABASE_UNAVAILABLE', 'The synchronization database is unavailable.', 503);
+  const requestedCountry = context.req.query('country')?.toUpperCase();
+  if (requestedCountry && (!isCountryCode(requestedCountry) || !countryByCode.has(requestedCountry))) {
+    throw new DomainError('INVALID_COUNTRY', `Unknown country code: ${requestedCountry}`);
+  }
+  const includeCompleteValue = context.req.query('includeComplete');
+  if (includeCompleteValue && !['true', 'false'].includes(includeCompleteValue)) {
+    throw new DomainError('INVALID_INCLUDE_COMPLETE', 'includeComplete must be true or false.');
+  }
+  const includeComplete = includeCompleteValue !== 'false';
+  const goals = [...(await cachedCountryGoals(context.env.ADDRESS_DB)).values()]
+    .filter((goal) => goal.enabled && (!requestedCountry || goal.countryCode === requestedCountry) && (includeComplete || !goal.complete))
+    .map((goal) => ({
+      countryCode: goal.countryCode,
+      complete: goal.complete,
+      unmetRules: goal.unmetRules,
+      rules: goal.rules
+    }));
+  context.header('Cache-Control', 'no-store');
+  return context.json({ data: { countries: goals } });
 });
 
 const TRANSLATION_RATE_LIMIT = 30;

@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/compose-root.sh"
+
+if [ -f "$COMPOSE_FILE" ]; then
+  docker compose -f "$COMPOSE_FILE" up -d
+  exit 0
+fi
+
 . "$SCRIPT_DIR/env.sh"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl cat address.service >/dev/null 2>&1; then

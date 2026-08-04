@@ -1,119 +1,169 @@
 ---
 import Layout from '../../layouts/Layout.astro';
+import { apiExample, publicApiEndpoints } from '../../domain/api-contract';
 import type { Locale } from '../../domain/types';
-import { localeDefinitions, localeStaticPaths, uiTextLocale } from '../../domain/locales';
+import { localeDefinitions, localeStaticPaths } from '../../domain/locales';
 
 export const getStaticPaths = localeStaticPaths;
 
 const locale = Astro.params.locale as Locale;
-const zh = uiTextLocale(locale) === 'zh-CN';
-const baseCopy = zh ? {
-  title: '真实住宅地址生成器 API',
-  intro: '每次返回一个带来源证据、坐标和国家格式的真实地址。',
-  back: '返回生成器',
-  endpoints: '接口',
-  authentication: '鉴权',
-  params: '生成参数',
-  response: '响应示例',
-  sources: '数据源规则'
-} : {
-  title: 'Real Residential Address Generator API',
-  intro: 'Each request returns one source-backed address with coordinates and country-specific formatting.',
-  back: 'Back to generator',
-  endpoints: 'Endpoints',
-  authentication: 'Authentication',
-  params: 'Generate parameters',
-  response: 'Response example',
-  sources: 'Source policy'
-};
-const translatedCopy: Partial<Record<Locale, typeof baseCopy>> = {
-  'zh-TW': { title: '真實住宅地址產生器 API', intro: '每次請求都會傳回一個包含來源證據、座標和國家格式的真實地址。', back: '返回產生器', endpoints: '端點', authentication: '驗證', params: '產生參數', response: '回應範例', sources: '資料來源規則' },
-  ja: { title: '実在住宅住所ジェネレーター API', intro: 'リクエストごとに、根拠・座標・国別形式を含む住所を1件返します。', back: 'ジェネレーターに戻る', endpoints: 'エンドポイント', authentication: '認証', params: '生成パラメーター', response: 'レスポンス例', sources: 'データソース方針' },
-  ko: { title: '실제 주거 주소 생성기 API', intro: '각 요청은 출처 근거, 좌표 및 국가별 형식을 포함한 주소 하나를 반환합니다.', back: '생성기로 돌아가기', endpoints: '엔드포인트', authentication: '인증', params: '생성 매개변수', response: '응답 예시', sources: '데이터 소스 정책' },
-  de: { title: 'API für reale Adressen', intro: 'Jede Anfrage liefert eine quellenbasierte Adresse mit Koordinaten und landesüblicher Formatierung.', back: 'Zurück zum Generator', endpoints: 'Endpunkte', authentication: 'Authentifizierung', params: 'Parameter', response: 'Beispielantwort', sources: 'Datenquellen' },
-  fr: { title: "API du générateur d’adresses réelles", intro: 'Chaque requête renvoie une adresse fondée sur des sources, avec coordonnées et format national.', back: 'Retour au générateur', endpoints: 'Points de terminaison', authentication: 'Authentification', params: 'Paramètres', response: 'Exemple de réponse', sources: 'Sources de données' },
-  es: { title: 'API del generador de direcciones reales', intro: 'Cada solicitud devuelve una dirección respaldada por fuentes, con coordenadas y formato nacional.', back: 'Volver al generador', endpoints: 'Endpoints', authentication: 'Autenticación', params: 'Parámetros', response: 'Ejemplo de respuesta', sources: 'Fuentes de datos' },
-  pt: { title: 'API do gerador de endereços reais', intro: 'Cada pedido devolve um endereço baseado em fontes, com coordenadas e formato nacional.', back: 'Voltar ao gerador', endpoints: 'Endpoints', authentication: 'Autenticação', params: 'Parâmetros', response: 'Exemplo de resposta', sources: 'Fontes de dados' }
-};
-const copy = translatedCopy[locale] || baseCopy;
----
-<Layout locale={locale} pagePath="api">
-  <main class="api-page">
-    <header class="api-hero">
-      <a href={`/${locale}/?country=us`}>← {copy.back}</a>
-      <select id="api-locale" class="language-select" aria-label="Language">{localeDefinitions.map((definition) => <option value={definition.code} selected={definition.code === locale}>{definition.label}</option>)}</select>
-      <span>v1</span>
-      <h1>{copy.title}</h1>
-      <p>{copy.intro}</p>
-    </header>
-
-    <section class="api-doc-card">
-      <h2>{copy.authentication}</h2>
-      <p>{zh ? '除健康检查外，外部接口需要管理员在 /admin/ 创建的 Bearer Token。令牌可设置权限、每分钟限速和到期时间，并可在管理员会话中查看、修改或撤销。' : 'Except for the health check, external endpoints require a Bearer token created in /admin/. Tokens support scopes, per-minute limits, expiry, reveal, editing, and revocation in an administrator session.'}</p>
-      <pre><code>{`Authorization: Bearer YOUR_API_TOKEN`}</code></pre>
-      <p>{zh ? '令牌无效或过期返回 401；超过每分钟限速返回 429，并附带 Retry-After: 60。' : 'Invalid or expired tokens return 401. Rate-limit exhaustion returns 429 with Retry-After: 60.'}</p>
-    </section>
-
-    <section class="api-doc-card">
-      <h2>{copy.endpoints}</h2>
-      <div class="endpoint"><b>GET</b><code>/api/v1/countries</code><span>{zh ? '国家、分组、能力、数据量与快捷入口' : 'Countries, groups, capabilities, counts and shortcuts'}</span></div>
-      <div class="endpoint"><b>GET</b><code>/api/v1/locations/search?country=US&amp;field=city&amp;regionId=1416&amp;limit=20000</code><span>{zh ? '按父级一次读取城市；州省与邮编分页' : 'Load cities by parent once; regions and postcodes are paged'}</span></div>
-      <div class="endpoint"><b>GET</b><code>/api/v1/generate?country=US&amp;residential=true&amp;requestId=UUID</code><span>{zh ? '随机生成一个地址' : 'Generate one random address'}</span></div>
-      <div class="endpoint"><b>GET</b><code>/api/v1/generate?mode=ip-region&amp;ip=198.51.100.7</code><span>{zh ? '按 IP 坐标或城市匹配已同步住宅池' : 'Match the synchronized residential pool by IP coordinate or city'}</span></div>
-      <div class="endpoint"><b>GET</b><code>/api/v1/data-health</code><span>{zh ? '逐国数据健康状态' : 'Per-country data health'}</span></div>
-    </section>
-
-    <section class="api-doc-card">
-      <h2>{copy.params}</h2>
-      <div class="parameter-grid">
-        <code>country</code><span>ISO 3166-1 alpha-2 · {zh ? '默认 US' : 'default US'}</span>
-        <code>residential</code><span>true | false · {zh ? '具备住宅能力的国家默认 true' : 'defaults to true where supported'}</span>
-        <code>region</code><span>{zh ? '州、省、都道府县或地区的精确值' : 'Exact state, province, prefecture or area'}</span>
-        <code>regionId</code><span>{zh ? '筛选城市和邮编的父级行政区 ID' : 'Parent region ID used to filter cities and postcodes'}</span>
-        <code>city</code><span>{zh ? '城市精确值' : 'Exact city value'}</span>
-        <code>cityId</code><span>{zh ? '筛选邮编的城市 ID' : 'City ID used to filter postcodes'}</span>
-        <code>postcode</code><span>{zh ? '邮编精确值，空格不敏感' : 'Exact postcode, space-insensitive'}</span>
-        <code>field / q</code><span>{zh ? '目录字段与搜索词：region、city、postcode' : 'Catalog field and search text: region, city or postcode'}</span>
-        <code>cursor / limit</code><span>{zh ? '州省/邮编每页 20—200 条；城市按父级最多 20,000 条' : 'Regions/postcodes: 20–200 per page; cities: up to 20,000 per parent'}</span>
-        <code>seed</code><span>{zh ? '可选的可复现随机种子' : 'Optional reproducible random seed'}</span>
-        <code>requestId</code><span>{zh ? '用于校验响应上下文的请求标识' : 'Request identifier used to validate response context'}</span>
-      </div>
-    </section>
-
-    <section class="api-doc-card">
-      <h2>{copy.response}</h2>
-      <pre><code>{`{
-  "data": {
-    "requestId": "UUID",
-    "mode": "residential",
-    "country": "US",
-    "residential": true,
-    "sourcesTried": ["address-pool-v2"],
-    "result": {
-      "addressFormats": {
-        "native": { "postalLines": ["Avery Chen", "20 W 34th Street", "New York, NY 10001", "UNITED STATES"], "singleLine": "20 W 34th Street, New York, NY 10001, UNITED STATES" },
-        "en": { "postalLines": ["..."], "singleLine": "..." },
-        "zh-CN": { "postalLines": ["..."], "singleLine": "..." }
-      },
-      "profile": { "fullName": "Olivia Carter", "email": "oliviacarter0000@outlook.com" },
-      "card": { "provider": "Stripe", "number": "4242 4242 4242 4242", "sandboxOnly": true },
-      "googleMaps": { "status": "map_query", "embedUrl": "https://www.google.com/maps?q=LAT,LNG&z=17&output=embed" }
-    }
+interface Copy {
+  title: string; intro: string; back: string; overview: string; authentication: string; authBody: string;
+  endpoints: string; parameters: string; request: string; response: string; errors: string; copy: string; copied: string;
+  scope: string; required: string; optional: string; defaultValue: string; type: string; noParameters: string; openApi: string;
+}
+const copies: Record<Locale, Copy> = {
+  en: {
+    title: 'Real Residential Address Generator API', intro: 'Generate and search published residential addresses through a stable JSON API.',
+    back: 'Back to generator', overview: 'Overview', authentication: 'Authentication',
+    authBody: 'All endpoints except health, readiness, and OpenAPI require a Bearer token created in the administrator console. Tokens support read or generate scopes, per-minute limits, and expiry.',
+    endpoints: 'Endpoints', parameters: 'Parameters', request: 'Request examples', response: 'Successful response', errors: 'Errors', copy: 'Copy', copied: 'Copied',
+    scope: 'Scope', required: 'Required', optional: 'Optional', defaultValue: 'Default', type: 'Type', noParameters: 'No request parameters.', openApi: 'OpenAPI 3.1 JSON'
+  },
+  'zh-CN': {
+    title: '真实住宅地址生成器 API', intro: '通过稳定的 JSON API 搜索并生成已发布的真实住宅地址。', back: '返回生成器', overview: '概览',
+    authentication: '鉴权', authBody: '除健康检查、就绪检查和 OpenAPI 外，所有接口都需要管理员控制台创建的 Bearer Token。令牌支持读取或生成权限、每分钟限速和到期时间。',
+    endpoints: '接口', parameters: '参数', request: '调用示例', response: '成功响应', errors: '错误处理', copy: '复制', copied: '已复制',
+    scope: '权限', required: '必填', optional: '可选', defaultValue: '默认值', type: '类型', noParameters: '此接口没有请求参数。', openApi: 'OpenAPI 3.1 JSON'
+  },
+  'zh-TW': {
+    title: '真實住宅地址產生器 API', intro: '透過穩定的 JSON API 搜尋並產生已發布的真實住宅地址。', back: '返回產生器', overview: '概覽',
+    authentication: '驗證', authBody: '除健康檢查、就緒檢查和 OpenAPI 外，所有端點都需要管理員控制台建立的 Bearer Token。權杖支援讀取或產生權限、每分鐘限制和到期時間。',
+    endpoints: '端點', parameters: '參數', request: '呼叫範例', response: '成功回應', errors: '錯誤處理', copy: '複製', copied: '已複製',
+    scope: '權限', required: '必填', optional: '選填', defaultValue: '預設值', type: '類型', noParameters: '此端點沒有請求參數。', openApi: 'OpenAPI 3.1 JSON'
+  },
+  ja: {
+    title: '実在住宅住所ジェネレーター API', intro: '安定した JSON API で公開済み住宅住所を検索・生成します。', back: 'ジェネレーターに戻る', overview: '概要',
+    authentication: '認証', authBody: 'ヘルスチェック、準備状態チェック、OpenAPI を除き、管理画面で作成した Bearer Token が必要です。読み取り・生成スコープ、毎分制限、有効期限を設定できます。',
+    endpoints: 'エンドポイント', parameters: 'パラメーター', request: 'リクエスト例', response: '成功レスポンス', errors: 'エラー', copy: 'コピー', copied: 'コピー済み',
+    scope: 'スコープ', required: '必須', optional: '任意', defaultValue: '既定値', type: '型', noParameters: 'リクエストパラメーターはありません。', openApi: 'OpenAPI 3.1 JSON'
+  },
+  ko: {
+    title: '실제 주거 주소 생성기 API', intro: '안정적인 JSON API로 게시된 주거 주소를 검색하고 생성합니다.', back: '생성기로 돌아가기', overview: '개요',
+    authentication: '인증', authBody: '상태 확인, 준비 상태 확인 및 OpenAPI를 제외한 모든 엔드포인트에는 관리자 콘솔에서 만든 Bearer Token이 필요합니다. 읽기 또는 생성 범위, 분당 제한 및 만료를 설정할 수 있습니다.',
+    endpoints: '엔드포인트', parameters: '매개변수', request: '요청 예시', response: '성공 응답', errors: '오류', copy: '복사', copied: '복사됨',
+    scope: '범위', required: '필수', optional: '선택', defaultValue: '기본값', type: '유형', noParameters: '요청 매개변수가 없습니다.', openApi: 'OpenAPI 3.1 JSON'
+  },
+  de: {
+    title: 'API fuer reale Wohnadressen', intro: 'Veroeffentlichte Wohnadressen ueber eine stabile JSON-API suchen und erzeugen.', back: 'Zurueck zum Generator', overview: 'Uebersicht',
+    authentication: 'Authentifizierung', authBody: 'Ausser Health, Readiness und OpenAPI benoetigen alle Endpunkte ein Bearer-Token aus der Verwaltung. Tokens besitzen Lese- oder Erzeugungsrechte, Minutenlimits und Ablaufzeiten.',
+    endpoints: 'Endpunkte', parameters: 'Parameter', request: 'Aufrufbeispiele', response: 'Erfolgreiche Antwort', errors: 'Fehler', copy: 'Kopieren', copied: 'Kopiert',
+    scope: 'Berechtigung', required: 'Erforderlich', optional: 'Optional', defaultValue: 'Standard', type: 'Typ', noParameters: 'Keine Anfrageparameter.', openApi: 'OpenAPI 3.1 JSON'
+  },
+  fr: {
+    title: "API du generateur d'adresses residentielles reelles", intro: 'Rechercher et generer des adresses publiees via une API JSON stable.', back: 'Retour au generateur', overview: 'Vue ensemble',
+    authentication: 'Authentification', authBody: "Sauf pour l'etat, la disponibilite et OpenAPI, chaque endpoint exige un Bearer Token cree dans la console. Les jetons gerent les droits de lecture ou generation, la limite par minute et expiration.",
+    endpoints: 'Endpoints', parameters: 'Parametres', request: "Exemples d'appel", response: 'Reponse reussie', errors: 'Erreurs', copy: 'Copier', copied: 'Copie',
+    scope: 'Droit', required: 'Requis', optional: 'Facultatif', defaultValue: 'Par defaut', type: 'Type', noParameters: 'Aucun parametre de requete.', openApi: 'OpenAPI 3.1 JSON'
+  },
+  es: {
+    title: 'API del generador de direcciones residenciales reales', intro: 'Busca y genera direcciones publicadas mediante una API JSON estable.', back: 'Volver al generador', overview: 'Resumen',
+    authentication: 'Autenticacion', authBody: 'Salvo salud, disponibilidad y OpenAPI, todos los endpoints requieren un Bearer Token creado en la consola. Los tokens admiten permisos de lectura o generacion, limite por minuto y caducidad.',
+    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Ejemplos de llamada', response: 'Respuesta correcta', errors: 'Errores', copy: 'Copiar', copied: 'Copiado',
+    scope: 'Permiso', required: 'Obligatorio', optional: 'Opcional', defaultValue: 'Predeterminado', type: 'Tipo', noParameters: 'No hay parametros de solicitud.', openApi: 'OpenAPI 3.1 JSON'
+  },
+  pt: {
+    title: 'API do gerador de enderecos residenciais reais', intro: 'Pesquise e gere enderecos publicados por uma API JSON estavel.', back: 'Voltar ao gerador', overview: 'Visao geral',
+    authentication: 'Autenticacao', authBody: 'Exceto saude, prontidao e OpenAPI, todos os endpoints exigem um Bearer Token criado no painel. Os tokens aceitam permissoes de leitura ou geracao, limite por minuto e expiracao.',
+    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Exemplos de chamada', response: 'Resposta bem-sucedida', errors: 'Erros', copy: 'Copiar', copied: 'Copiado',
+    scope: 'Permissao', required: 'Obrigatorio', optional: 'Opcional', defaultValue: 'Padrao', type: 'Tipo', noParameters: 'Sem parametros de solicitacao.', openApi: 'OpenAPI 3.1 JSON'
   }
-}`}</code></pre>
-    </section>
+};
+const copy = copies[locale];
+const isChinese = locale === 'zh-CN' || locale === 'zh-TW';
+const scopeLabel = (scope: string) => scope === 'public' ? 'public' : scope;
+---
+<Layout locale={locale} pagePath="api" title={copy.title} description={copy.intro}>
+  <header class="api-topbar">
+    <a href={`/${locale}/?country=us`}>← {copy.back}</a>
+    <div>
+      <a class="api-openapi-link" href="/api/v1/openapi.json">{copy.openApi}</a>
+      <select id="api-locale" class="language-select" aria-label="Language">{localeDefinitions.map((definition) => <option value={definition.code} selected={definition.code === locale}>{definition.label}</option>)}</select>
+    </div>
+  </header>
+  <main class="api-page">
+    <aside class="api-navigation" aria-label={copy.endpoints}>
+      <strong>{copy.endpoints}</strong>
+      {publicApiEndpoints.map((endpoint) => <a href={`#${endpoint.id}`}><span class={`api-method ${endpoint.method.toLowerCase()}`}>{endpoint.method}</span><code>{endpoint.path.replace('/api/v1/', '/')}</code></a>)}
+    </aside>
 
-    <section class="api-doc-card">
-      <h2>{copy.sources}</h2>
-      <p>{zh
-        ? '公开生成和 IP 区域生成只读取服务器已同步、已清洗的 PostgreSQL 住宅地址池，运行时不调用在线 Provider、翻译或地理编码。IP 区域模式只接受坐标附近或同城市记录；没有覆盖时返回无结果。第三方平台仅用于后台同步。'
-        : 'Public and IP-region generation read only the synchronized, cleaned PostgreSQL residential pool, with no runtime provider, translation or geocoding call. IP-region mode accepts only nearby or same-city records and returns no result when uncovered. Third-party platforms are used only by background synchronization.'}</p>
-    </section>
+    <div class="api-content">
+      <section class="api-overview-section" aria-labelledby="api-auth-title">
+        <h2 id="api-auth-title">{copy.authentication}</h2>
+        <p>{copy.authBody}</p>
+        <div class="api-inline-code"><code>Authorization: Bearer YOUR_API_TOKEN</code><button type="button" class="api-copy" data-copy-code>{copy.copy}</button></div>
+      </section>
+
+      {publicApiEndpoints.map((endpoint) => {
+        const requestParameters = endpoint.parameters;
+        return <article class="api-endpoint-section" id={endpoint.id}>
+          <header class="api-endpoint-heading">
+            <div><span class={`api-method ${endpoint.method.toLowerCase()}`}>{endpoint.method}</span><code>{endpoint.path}</code></div>
+            <span class="api-scope">{copy.scope}: <b>{scopeLabel(endpoint.scope)}</b></span>
+          </header>
+          <p class="api-endpoint-summary">{endpoint.summary[locale]}</p>
+
+          <section>
+            <h3>{copy.parameters}</h3>
+            {requestParameters.length ? <div class="api-parameter-table" role="table">
+              {requestParameters.map((parameter) => <div class="api-parameter-row" role="row">
+                <code>{parameter.name}</code>
+                <span class="api-param-meta">{parameter.required ? copy.required : copy.optional} · {parameter.location} · {parameter.type}{parameter.defaultValue !== undefined ? ` · ${copy.defaultValue}: ${parameter.defaultValue}` : ''}{parameter.minimum !== undefined ? ` · ${parameter.minimum}-${parameter.maximum}` : ''}</span>
+                <span>{isChinese ? parameter.descriptionZh : parameter.description}</span>
+              </div>)}
+            </div> : <p>{copy.noParameters}</p>}
+          </section>
+
+          <section class="api-example" data-code-example>
+            <h3>{copy.request}</h3>
+            <div class="api-code-tabs" role="tablist" aria-label={copy.request}>
+              {(['curl', 'python', 'javascript'] as const).map((language, index) => <button type="button" role="tab" aria-selected={index === 0 ? 'true' : 'false'} data-language={language}>{language === 'javascript' ? 'JavaScript' : language}</button>)}
+            </div>
+            <div class="api-code-panel">
+              {(['curl', 'python', 'javascript'] as const).map((language, index) => <pre role="tabpanel" hidden={index !== 0} data-language={language}><code data-api-example>{apiExample(endpoint, language)}</code></pre>)}
+              <button type="button" class="api-copy" data-copy-code>{copy.copy}</button>
+            </div>
+          </section>
+
+          <section>
+            <h3>{copy.response}</h3>
+            <pre class="api-response"><code>{JSON.stringify(endpoint.successExample, null, 2)}</code></pre>
+          </section>
+        </article>;
+      })}
+
+      <section class="api-errors" id="errors">
+        <h2>{copy.errors}</h2>
+        <div><code>400</code><span>INVALID_REQUEST</span></div>
+        <div><code>401</code><span>UNAUTHORIZED</span></div>
+        <div><code>404</code><span>NO_POOL_COVERAGE / ADDRESS_NOT_FOUND</span></div>
+        <div><code>429</code><span>RATE_LIMITED · Retry-After: 60</span></div>
+        <div><code>500 / 503</code><span>INTERNAL_ERROR / SERVICE_UNAVAILABLE</span></div>
+      </section>
+    </div>
   </main>
-  <script is:inline>
+  <script is:inline define:vars={{ copiedLabel: copy.copied, copyLabel: copy.copy }}>
     document.querySelector('#api-locale')?.addEventListener('change', (event) => {
-      const target = event.target.value;
-      location.assign(`/${target}/api/${location.search}${location.hash}`);
+      location.assign(`/${event.target.value}/api/${location.search}${location.hash}`);
     });
+    document.querySelectorAll('[data-api-example]').forEach((code) => {
+      code.textContent = code.textContent?.replaceAll('https://address.example', location.origin) || '';
+    });
+    document.querySelectorAll('[data-code-example]').forEach((example) => {
+      const tabs = [...example.querySelectorAll('[role="tab"]')];
+      const panels = [...example.querySelectorAll('[role="tabpanel"]')];
+      tabs.forEach((tab) => tab.addEventListener('click', () => {
+        tabs.forEach((candidate) => candidate.setAttribute('aria-selected', String(candidate === tab)));
+        panels.forEach((panel) => { panel.hidden = panel.dataset.language !== tab.dataset.language; });
+      }));
+    });
+    document.querySelectorAll('[data-copy-code]').forEach((button) => button.addEventListener('click', async () => {
+      const root = button.closest('.api-code-panel, .api-inline-code');
+      const code = root?.querySelector('pre:not([hidden]) code, code');
+      if (!code?.textContent) return;
+      await navigator.clipboard.writeText(code.textContent);
+      button.textContent = copiedLabel;
+      setTimeout(() => { button.textContent = copyLabel; }, 1400);
+    }));
   </script>
 </Layout>

@@ -174,7 +174,7 @@ const server = serve({
       return securityHeaders(await app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node }));
     }
     if (url.pathname.startsWith('/api/')) {
-      if (url.pathname !== '/api/v1/health') {
+      if (!['/api/v1/health', '/api/v1/ready', '/api/v1/openapi.json'].includes(url.pathname)) {
         const authorization = await apiAuthorization(control, request);
         if (authorization.status !== 'authorized') {
           const rateLimited = authorization.status === 'rate_limited';

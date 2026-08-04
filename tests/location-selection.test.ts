@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { filterLocationOptions } from '../src/components/App';
 import { resolveCatalogTarget } from '../server/api/repositories/address-repository';
-import { CN_SYNTHETIC_CITY_PREFIX, decodeSyntheticCityId, queryLocationCatalog } from '../server/api/repositories/location-catalog';
+import { CN_SYNTHETIC_CITY_PREFIX, decodeSyntheticCityId, decodeSyntheticDistrictId, queryLocationCatalog } from '../server/api/repositories/location-catalog';
 import { locationOptionLabel } from '../src/domain/location-options';
 
 type TargetDb = Parameters<typeof resolveCatalogTarget>[0];
@@ -331,9 +331,10 @@ describe('stable location selection', () => {
     expect(result.total).toBe(2);
     expect(result.availableTotal).toBe(2);
     expect(result.options).toEqual([
-      expect.objectContaining({ value: '天河区', label: '天河区', availableCount: 12, disabled: false }),
-      expect.objectContaining({ value: '越秀区', label: '越秀区', availableCount: 3, disabled: false })
+      expect.objectContaining({ id: expect.stringMatching(/^cn-district-/u), value: '天河区', label: '天河区', availableCount: 12, disabled: false }),
+      expect.objectContaining({ id: expect.stringMatching(/^cn-district-/u), value: '越秀区', label: '越秀区', availableCount: 3, disabled: false })
     ]);
+    expect(decodeSyntheticDistrictId(result.options[0].id)).toBe('天河区');
   });
 
   it('returns an empty district page for countries without a district catalog', async () => {

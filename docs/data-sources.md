@@ -1,6 +1,6 @@
 # 数据源、准确性与自动同步
 
-更新：2026-08-03。本文汇总各国家和地区使用的数据源、发布规则与自动同步流程。字段、坐标系、去重和验证细节见 [`strategies/`](strategies/)。
+更新：2026-08-04。本文汇总各国家和地区使用的数据源、发布规则与自动同步流程。字段、坐标系、去重和验证细节见 [`strategies/`](strategies/)。
 
 ## 1. 发布原则
 
@@ -25,7 +25,7 @@
 | 法国 FR | Overture + Geofabrik 27 区域分片 | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [FR](strategies/FR-address-strategy.md) |
 | 意大利 IT | Overture + Geofabrik OSM | 源字段 + catalog；5 位 CAP | 明确住宅建筑/用途 | [IT](strategies/IT-address-strategy.md) |
 | 西班牙 ES | Overture | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [ES](strategies/ES-address-strategy.md) |
-| 荷兰 NL | Overture | 源字段 + catalog；`1234 AB` | 明确住宅建筑/用途 | [NL](strategies/NL-address-strategy.md) |
+| 荷兰 NL | Kadaster BAG（PDOK OGC Features）+ Overture | BAG 源字段 + catalog；`1234 AB` | BAG 严格在用 `woonfunctie`；Overture 明确住宅建筑/用途 | [NL](strategies/NL-address-strategy.md) |
 | 俄罗斯 RU | Geofabrik OSM | 源字段 + catalog；6 位邮编 | OSM 住宅建筑 | [RU](strategies/RU-address-strategy.md) |
 | 中国 CN | AreaCity 行政区 + 高德住宅小区；百度/腾讯只作可选增强验证 | AreaCity + 民政部版本对照；6 位源邮编 | 高德住宅分类、行政区一致、数字门牌和机构黑名单门禁 | [CN](strategies/CN-China-address-generation.md) |
 | 中国香港 HK | 屋宇署住宅/综合用途 Tower；房委会单位 + ALS；OSM 补充 | 官方 18 区双语映射与香港坐标；无通用邮编 | 屋宇署住宅用途或房委会公屋库存 | [HK](strategies/HK-address-strategy.md) |
@@ -36,20 +36,24 @@
 | 马来西亚 MY | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [MY](strategies/MY-address-strategy.md) |
 | 泰国 TH | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [TH](strategies/TH-address-strategy.md) |
 | 菲律宾 PH | Geofabrik OSM | 源字段 + catalog；4 位邮编 | OSM 住宅建筑 | [PH](strategies/PH-address-strategy.md) |
-| 越南 VN | Geofabrik OSM | 源字段 + catalog；5–6 位源值 | OSM 住宅建筑 | [VN](strategies/VN-address-strategy.md) |
+| 越南 VN | Geofabrik OSM；可选 Vpostcode 授权 feed（默认关闭、容量未验收） | 源字段 + catalog；五位邮编 | OSM 住宅建筑；授权 feed 的逐条/合同级住宅分类 | [VN](strategies/VN-address-strategy.md) |
 | 土耳其 TR | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [TR](strategies/TR-address-strategy.md) |
 | 沙特阿拉伯 SA | 全国地址点保全包 + Overture + Geofabrik OSM | 源字段 + catalog；5 位或 `5-4` 邮编 | 地址点精确落入明确住宅建筑面 | [SA](strategies/SA-address-strategy.md) |
-| 印度 IN | Geofabrik OSM | 源字段 + catalog；6 位 PIN | OSM 住宅建筑 | [IN](strategies/IN-address-strategy.md) |
+| 印度 IN | Geofabrik OSM；可选 Mappls Nearby + Place Details（默认关闭、容量未验收） | 源字段 + catalog；6 位 PIN | OSM 住宅建筑；合同授权的 Mappls 住宅分类 | [IN](strategies/IN-address-strategy.md) |
 | 澳大利亚 AU | Overture | 源字段 + catalog；4 位邮编 | 明确住宅建筑/用途 | [AU](strategies/AU-address-strategy.md) |
 | 巴西 BR | Geofabrik OSM | 源字段 + catalog；CEP | OSM 住宅建筑 | [BR](strategies/BR-address-strategy.md) |
-| 尼日利亚 NG | Geofabrik OSM | 源字段 + catalog；6 位源值 | OSM 住宅建筑 | [NG](strategies/NG-address-strategy.md) |
+| 尼日利亚 NG | 默认无可发布源；可选 NIPOST/ProgIS 授权 feed（默认关闭、容量未验收） | 来源字段；6 位邮编 | 授权 feed 的逐条/合同级住宅分类 | [NG](strategies/NG-address-strategy.md) |
 | 南非 ZA | eThekwini 官方地址点 + Cape Town 官方地块 + Geofabrik OSM | SAPO 官方 4 位邮编精确唯一匹配 | 官方住宅分区精确点/地块关联；OSM 明确住宅建筑 | [ZA](strategies/ZA-address-strategy.md) |
 
 OpenAddresses 只用于发现可用上游；每个上游需单独核验许可和质量。libpostal 只用于解析/规范化，不证明地址真实或属于住宅。
 
+### 授权住宅 feed 配置
+
+Vpostcode 与 NIPOST/ProgIS 适配器默认关闭。启用前必须同时设置 `*_ENABLED=true`、`*_LICENSE_CONFIRMED=true` 和 `*_REDISTRIBUTION_ALLOWED=true`，并取得允许住宅字段、坐标、缓存和再分发的合同。远程 feed 只接受 HTTPS；本地 feed 只能放在 `ADDRESS_DATA_ROOT` 内。`*_FIELD_MAP` 是 JSON 对象，至少映射 `id`、`number`、`street`、`locality`、`admin1`、`postcode`、`longitude`、`latitude`，还要映射 `district`（NG 必需）；如果不是整库住宅，还必须映射 `residentialClass` 并在 `*_RESIDENTIAL_VALUES` 列出允许值。支持 `csv`、`json`（数组或 `records`/`data`）和 `jsonl`。容量审计见被忽略的 `docs/source-capacity-audit.md`，其中的合成吞吐结果不代表供应商容量。
+
 ## 3. 自动同步
 
-国家完成条件为“总量目标 + 最低行政层覆盖率/每节点最低数 + 一级行政区保底 + 二级行政区保底 + 单节点目标”全部启用规则同时达标。
+国家完成条件为“总量目标 + 完整官方行政目录最低层覆盖率（零地址节点也计入分母）+ 最低层/一级/二级节点最低数 + 自定义节点目标”全部启用规则同时达标；任一规则未达标都保持未完成。
 
 1. 最多 10 个国家并行发现、下载和准备；重型解析默认 4 路（可设 1–4），PostgreSQL 使用按国家隔离的事务发布。
 2. 下载/调用上游到服务器 staging；相同 URL 与版本的原始包只下载一次，本地只做小型脱敏测试。
@@ -60,7 +64,7 @@ OpenAddresses 只用于发现可用上游；每个上游需单独核验许可和
 7. 只比较最新候选与当前 active 快照；候选不足显示缺口，不放宽门禁。行政区划和邮编目录不受地址数量限制。
 8. 发布后以官方行政区 ID 重建住宅覆盖和前端筛选；读取层再次执行同一规则，旧库脏记录立即停止返回；同步失败保留上一份已通过相同门禁的快照。
 9. 按月检查批量源；中国行政区跟随 AreaCity 版本，小区按免费额度增量同步。高德只按 `types=120302` 查询，原始结果非空但全部被过滤时标记 `adapter_rejected_all`，不写成地区已耗尽。
-10. 数据源确认耗尽的国家保持未完成但不进入执行队列，只有导入版本或来源版本变化才重新评估；日/月额度和 QPS 冷却保留重置时间并自动恢复。中国未完成时拥有最高调度优先级；后台同步队列使用独立页面。
+10. 数据源确认耗尽的国家保持未完成但不进入执行队列，只有相同输入成功运行且所有未达规则均无进展时才锁定；总量不变但覆盖或节点达标数增加仍算进展，策略、目录、适配器、导入逻辑或来源版本变化会自动解锁。日/月额度和 QPS 冷却保留重置时间并自动恢复。中国未完成时拥有最高调度优先级；后台同步队列使用独立页面。
 
 API Key 的申请、配置、轮换与冷却规则见 [API Key 配置文档](API_KEYS.zh-CN.md)。
 

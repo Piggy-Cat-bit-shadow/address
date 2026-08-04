@@ -234,7 +234,9 @@ export class SyncCoordinator {
   async recoverLock() {
     const lock = await this.readLock();
     if (!lock) return null;
-    const ownerAlive = Number.isSafeInteger(lock.pid) && lock.pid > 0
+    const ownerAlive = lock.pid === process.pid
+      ? false
+      : Number.isSafeInteger(lock.pid) && lock.pid > 0
       ? this.processIsAlive(lock.pid)
       : null;
     if (ownerAlive === false || await this.lockIsStale()) {

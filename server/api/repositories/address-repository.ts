@@ -26,6 +26,7 @@ export interface AddressFilters {
   city?: string;
   cityId?: string;
   district?: string;
+  districtId?: string;
   postcode?: string;
   postcodeId?: string;
 }

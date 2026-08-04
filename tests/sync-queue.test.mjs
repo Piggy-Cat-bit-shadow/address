@@ -7,7 +7,7 @@ import { openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { createSyncApi } from '../server/sync/api.mjs';
 import {
   computeQueueSnapshot, countryFingerprint, createQueueSources, createSyncQueue, evaluateAttempt,
-  nextQuotaResetTime, nextWakeAt, orderRunnable, QueueStateStore
+  legacyCountryFingerprint, nextQuotaResetTime, nextWakeAt, orderRunnable, QueueStateStore
 } from '../server/sync/queue.mjs';
 
 const directories = [];
@@ -54,6 +54,12 @@ describe('attempt evaluation and latching', () => {
     expect(result).toMatchObject({ action: 'latch', reason: 'source_limited_cache', fingerprint: 'fp-1' });
   });
 
+  it('keeps running when the total is capped but administrative goals improve', () => {
+    const result = evaluateAttempt({ ...base, jobSucceeded: true, netGrowth: 0,
+      goalDeficitBefore: 25, goalDeficitAfter: 23 });
+    expect(result.action).toBe('checked');
+  });
+
   it('latches deterministic quality failures immediately', () => {
     const result = evaluateAttempt({ ...base, jobSucceeded: false, netGrowth: 0, deterministicFailure: true });
     expect(result.action).toBe('latch');
@@ -73,7 +79,7 @@ describe('attempt evaluation and latching', () => {
     expect(first.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 5 * 60_000));
     const eighth = evaluateAttempt({ ...base, jobSucceeded: false, netGrowth: 0, consecutiveFailures: 7 });
     expect(eighth).toMatchObject({ action: 'suspend', consecutiveFailures: 8, reason: 'retry_suspended' });
-    expect(eighth.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 24 * 60 * 60_000));
+    expect(eighth.nextAttemptAt).toBeNull();
   });
 
   it('suspends a country after two consecutive timeout failures', () => {
@@ -95,14 +101,21 @@ describe('attempt evaluation and latching', () => {
     expect(result).toMatchObject({ action: 'waiting_quota', nextAttemptAt: '2026-08-03T00:03:00Z' });
   });
 
-  it('changes the source fingerprint only when the import revision or source version changes', () => {
-    const inputs = { importRevision: 'rev-1', policyUpdatedAt: 'p1', nodeFloorsUpdatedAt: 'n1', sourceVersions: [['shard-a', 'v1']] };
+  it('changes the source fingerprint only when that source version or adapter capability changes', () => {
+    const inputs = {
+      importRevision: 'rev-1', policyUpdatedAt: 'p1', nodeTargetsUpdatedAt: 'n1', catalogVersion: 'c1',
+      adapterRevisions: [['shard-a', 'adapter-v1']], sourceVersions: [['shard-a', 'v1']]
+    };
     const fingerprint = countryFingerprint(inputs);
     expect(countryFingerprint({ ...inputs })).toBe(fingerprint);
-    expect(countryFingerprint({ ...inputs, importRevision: 'rev-2' })).not.toBe(fingerprint);
+    expect(countryFingerprint({ ...inputs, importRevision: 'rev-2' })).toBe(fingerprint);
     expect(countryFingerprint({ ...inputs, policyUpdatedAt: 'p2' })).toBe(fingerprint);
-    expect(countryFingerprint({ ...inputs, nodeFloorsUpdatedAt: 'n2' })).toBe(fingerprint);
+    expect(countryFingerprint({ ...inputs, nodeTargetsUpdatedAt: 'n2' })).toBe(fingerprint);
+    expect(countryFingerprint({ ...inputs, catalogVersion: 'c2' })).toBe(fingerprint);
+    expect(countryFingerprint({ ...inputs, adapterRevisions: [['shard-a', 'adapter-v2']] })).not.toBe(fingerprint);
     expect(countryFingerprint({ ...inputs, sourceVersions: [['shard-a', 'v2']] })).not.toBe(fingerprint);
+    expect(legacyCountryFingerprint({ importRevision: 'rev-1', sourceVersions: inputs.sourceVersions }))
+      .not.toBe(legacyCountryFingerprint({ importRevision: 'rev-2', sourceVersions: inputs.sourceVersions }));
   });
 });
 
@@ -228,15 +241,33 @@ describe('queue snapshot', () => {
     expect(queued[0].position).toBe(1);
   });
 
+  it('keeps an unmetered source runnable while another source in the country waits for quota', async () => {
+    const facts = stubFacts();
+    facts.shards.KR.push({ shardId: 'geofabrik-osm-kr', status: 'ready', sourceVersion: 'v1', failureCode: null });
+    const catalog = [...stubCatalogShards, { id: 'geofabrik-osm-kr', countryCode: 'KR' }];
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {
+        geoapify: { provider: 'geoapify', known: true, available: false, nextResetAt: '2026-08-03T00:03:00Z' }
+      }),
+      catalogShards: catalog,
+      queueState: { schemaVersion: 1, countries: {} },
+      now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'KR')).toMatchObject({
+      state: 'queued', runnableShardId: 'geofabrik-osm-kr', quotaBound: false
+    });
+  });
+
   it('honours a latch only while the fingerprint matches and reflects the running job', async () => {
     const facts = stubFacts();
     const fingerprint = countryFingerprint({
-      policyUpdatedAt: facts.policies.NL.updatedAt,
-      nodeFloorsUpdatedAt: '',
+      adapterRevisions: [['oa-nl', '']],
       sourceVersions: [['oa-nl', 'v1']]
     });
     const queueState = { schemaVersion: 1, countries: {
-      NL: { latched: true, reason: 'source_limited_cache', fingerprint, latchedAt: '2026-08-01T00:00:00Z' }
+      NL: { shards: { 'oa-nl': {
+        state: 'latched', latched: true, reason: 'source_limited_cache', fingerprint, latchedAt: '2026-08-01T00:00:00Z'
+      } } }
     } };
     const latched = await computeQueueSnapshot({
       sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now,
@@ -252,6 +283,88 @@ describe('queue snapshot', () => {
       sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
     });
     expect(unlatched.entries.find((entry) => entry.countryCode === 'NL').state).toBe('queued');
+  });
+
+  it('keeps a v2 country latch compatible without letting policy edits unlock it', async () => {
+    const facts = stubFacts();
+    const fingerprint = legacyCountryFingerprint({ sourceVersions: [['oa-nl', 'v1']] });
+    const queueState = { schemaVersion: 1, countries: {
+      NL: { state: 'latched', latched: true, reason: 'source_limited_cache', fingerprint }
+    } };
+    const first = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(first.entries.find((entry) => entry.countryCode === 'NL').state).toBe('source_limited');
+    facts.policies.NL.updatedAt = 'policy-edited';
+    const afterPolicyEdit = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(afterPolicyEdit.entries.find((entry) => entry.countryCode === 'NL').state).toBe('source_limited');
+  });
+
+  it('does not migrate an old Netherlands BAG latch across an adapter capability revision', async () => {
+    const facts = stubFacts();
+    facts.shards.NL = [{
+      shardId: 'pdok-bag-nl-residential', status: 'ready',
+      sourceVersion: '2026-08-01-strict-active-residential-coverage-round-robin-v1', failureCode: null
+    }];
+    const catalog = [{
+      id: 'pdok-bag-nl-residential', countryCode: 'NL', source: { adapter: 'pdok-bag' }
+    }];
+    const queueState = { schemaVersion: 1, countries: { NL: {
+      state: 'latched', latched: true, reason: 'source_limited_cache',
+      fingerprint: legacyCountryFingerprint({ sourceVersions: [[
+        'pdok-bag-nl-residential', '2026-08-01-strict-active-residential-coverage-round-robin-v1'
+      ]] })
+    } } };
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: catalog, queueState, now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
+      state: 'queued', runnableShardId: 'pdok-bag-nl-residential', legacyMigration: null
+    });
+  });
+
+  it('runs only the changed source when another source in the country is exhausted', async () => {
+    const facts = stubFacts();
+    facts.shards.NL.push({ shardId: 'nl-new', status: 'ready', sourceVersion: 'v2', failureCode: null });
+    const catalog = [...stubCatalogShards, { id: 'nl-new', countryCode: 'NL' }];
+    const exhausted = countryFingerprint({ adapterRevisions: [['oa-nl', '']], sourceVersions: [['oa-nl', 'v1']] });
+    const queueState = { schemaVersion: 1, countries: { NL: { shards: {
+      'oa-nl': { state: 'latched', latched: true, reason: 'source_limited_cache', fingerprint: exhausted }
+    } } } };
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: catalog, queueState, now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
+      state: 'queued', runnableShardId: 'nl-new'
+    });
+  });
+
+  it('stops terminal failures for identical inputs and resumes after a source version change', async () => {
+    const facts = stubFacts();
+    const initial = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards,
+      queueState: { schemaVersion: 1, countries: {} }, now
+    });
+    const nl = initial.entries.find((entry) => entry.countryCode === 'NL');
+    const queueState = { schemaVersion: 1, countries: { NL: { shards: { 'oa-nl': {
+      state: 'suspended', reason: 'retry_suspended', fingerprint: nl.failureFingerprints['oa-nl'],
+      consecutiveFailures: 3, nextAttemptAt: null
+    } } } } };
+    const stopped = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(stopped.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
+      state: 'source_limited', reason: 'retry_suspended', nextAttemptAt: null
+    });
+    facts.shards.NL[0].sourceVersion = 'v2';
+    const resumed = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(resumed.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
+      state: 'queued', runnableShardId: 'oa-nl', consecutiveFailures: 0
+    });
   });
 });
 
@@ -271,6 +384,34 @@ describe('queue engine', () => {
     return coordinator;
   };
 
+  it('migrates a legacy country latch to the most recently executed source shard', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['NL']);
+    facts.shards.NL.push({
+      shardId: 'nl-secondary', status: 'ready', sourceVersion: 'v1', failureCode: null,
+      updatedAt: '2026-08-01T00:00:00Z'
+    });
+    facts.shards.NL[0].updatedAt = '2026-08-02T00:00:00Z';
+    const catalog = [...stubCatalogShards, { id: 'nl-secondary', countryCode: 'NL' }];
+    const queue = createSyncQueue({
+      environment: {}, coordinator: fakeCoordinator(), stateDir: stateDir(),
+      sources: stubSources(facts, {}), loadCatalog: async () => ({ shards: catalog }),
+      cooldownMs: 0, log: { log: () => {}, error: () => {} }
+    });
+    await queue.store.save({ schemaVersion: 1, countries: { NL: {
+      state: 'latched', latched: true, reason: 'source_limited_cache',
+      fingerprint: legacyCountryFingerprint({ sourceVersions: [['oa-nl', 'v1'], ['nl-secondary', 'v1']] })
+    } } });
+    const snapshot = await queue.snapshot();
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
+      state: 'queued', runnableShardId: 'nl-secondary'
+    });
+    const migrated = (await queue.store.load()).countries.NL;
+    expect(migrated.latched).toBeUndefined();
+    expect(Object.keys(migrated.shards)).toEqual(['oa-nl']);
+    expect(migrated.shards['oa-nl']).toMatchObject({ state: 'latched', latched: true });
+  });
+
   it('runs the deepest deficit, latches a fruitless country, and unlatches on a source change', async () => {
     const facts = stubFacts();
     facts.deficits.belowTarget = new Set(['NL']);
@@ -286,9 +427,9 @@ describe('queue engine', () => {
     });
 
     expect(await queue.tick()).toBe(0);
-    expect(coordinator.calls).toEqual([{ trigger: 'scheduled', shards: ['NL'] }]);
+    expect(coordinator.calls).toEqual([{ trigger: 'scheduled', shards: ['oa-nl'] }]);
     const state = await queue.store.load();
-    expect(state.countries.NL).toMatchObject({ latched: true, reason: 'source_limited_cache' });
+    expect(state.countries.NL.shards['oa-nl']).toMatchObject({ latched: true, reason: 'source_limited_cache' });
 
     const idle = await queue.tick();
     expect(coordinator.calls).toHaveLength(1);
@@ -317,7 +458,7 @@ describe('queue engine', () => {
     });
     await queue.tick();
     const afterFailure = await queue.store.load();
-    expect(afterFailure.countries.US).toMatchObject({ latched: false, consecutiveFailures: 1 });
+    expect(afterFailure.countries.US.shards['oa-us']).toMatchObject({ latched: false, consecutiveFailures: 1 });
     const entry = (await queue.snapshot()).entries.find((value) => value.countryCode === 'US');
     expect(entry.state).toBe('queued');
     expect(entry.reason).toBe('retry_backoff');
@@ -327,12 +468,16 @@ describe('queue engine', () => {
     coordinator.trigger = async (trigger, { shards }) => {
       coordinator.calls.push({ trigger, shards });
       facts.counts.US += 40;
+      facts.rules.US.total.current += 40;
       return { accepted: true, job: { id: 'sync-growth' } };
     };
     // Force the retry to be due immediately.
-    await queue.store.apply('US', { action: 'backoff', consecutiveFailures: 1, nextAttemptAt: new Date(Date.now() - 1000).toISOString() }, new Date().toISOString());
+    await queue.store.apply('US', {
+      action: 'backoff', consecutiveFailures: 1, fingerprint: afterFailure.countries.US.shards['oa-us'].fingerprint,
+      nextAttemptAt: new Date(Date.now() - 1000).toISOString()
+    }, new Date().toISOString(), 'oa-us');
     await queue.tick();
-    expect((await queue.store.load()).countries.US).toMatchObject({
+    expect((await queue.store.load()).countries.US.shards['oa-us']).toMatchObject({
       state: 'checked', reason: 'source_version_checked', consecutiveFailures: 0
     });
     expect((await queue.snapshot()).entries.find((value) => value.countryCode === 'US'))
@@ -419,6 +564,8 @@ describe('queue admin surface structure', () => {
     expect(adminSource).toContain("minimums: '层级/节点最低数量'");
     expect(adminSource).toContain('rules.administrativeCoverage');
     expect(adminSource).toContain('rules.regionalMinimums');
+    expect(adminSource).toContain("'administrative_coverage'");
+    expect(adminSource).toContain("'regional_minimums'");
     expect(adminSource.match(/queueTitle:/gu)).toHaveLength(10);
     expect(adminSource.match(/queueResetIn:/gu)).toHaveLength(10);
   });

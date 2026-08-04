@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 
 CREATE TABLE IF NOT EXISTS provider_credentials (
   id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding')),
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding','mappls')),
   label TEXT NOT NULL,
   secret_ciphertext TEXT NOT NULL,
   secret_iv TEXT NOT NULL,
@@ -139,6 +139,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_credentials_pick ON provider_credentials
 CREATE INDEX IF NOT EXISTS idx_sync_runs_created ON sync_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 
+ALTER TABLE provider_credentials DROP CONSTRAINT IF EXISTS provider_credentials_provider_check;
+ALTER TABLE provider_credentials ADD CONSTRAINT provider_credentials_provider_check
+  CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding','mappls'));
+
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 8) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 9) AS version
 ON CONFLICT (version) DO NOTHING;

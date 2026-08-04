@@ -443,6 +443,26 @@ CREATE INDEX IF NOT EXISTS idx_sync_node_overrides_country ON sync_node_override
 CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates
   ON address_pool(country_code,latitude,longitude) WHERE active=1;
 
+UPDATE catalog_regions SET native_name='Fryslân'
+WHERE country_code='NL' AND code='FR' AND native_name IN ('Frieland','Friesland');
+
+UPDATE address_pool SET
+  admin1='Fryslân',
+  admin1_key='fryslân',
+  component_variants_json=jsonb_set(
+    jsonb_set(component_variants_json::jsonb, '{native,admin1}', to_jsonb('Fryslân'::text), true),
+    '{en,admin1}', to_jsonb('Friesland'::text), true
+  )::text,
+  address_variants_json=jsonb_set(
+    jsonb_set(address_variants_json::jsonb, '{native}',
+      to_jsonb(replace(address_variants_json::jsonb->>'native', 'Frieland', 'Fryslân')), true),
+    '{en}', to_jsonb(replace(address_variants_json::jsonb->>'en', 'Frieland', 'Friesland')), true
+  )::text
+WHERE country_code='NL' AND admin1='Frieland';
+
+UPDATE residential_coverage SET region_name='Fryslân'
+WHERE country_code='NL' AND region_name='Frieland';
+
 DROP VIEW IF EXISTS address_pool_runtime;
 CREATE VIEW address_pool_runtime AS
 SELECT
@@ -486,5 +506,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 6) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 7) AS version
 ON CONFLICT (version) DO NOTHING;
