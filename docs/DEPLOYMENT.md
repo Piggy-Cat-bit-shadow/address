@@ -128,9 +128,6 @@ Expose only HTTP/HTTPS. Do not publish the PostgreSQL or synchronization service
 
 ## Docker Hub Publishing
 
-`.github/workflows/docker-publish.yml` builds AMD64/ARM64 images after updates to `main`, version tags, or manual dispatch. Configure these GitHub repository secrets:
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
+`.github/workflows/docker-publish.yml` builds AMD64/ARM64 images after updates to `main`, version tags, or manual dispatch. Configure the `DOCKERHUB_TOKEN` GitHub repository secret with a Docker Hub read/write access token. The public Docker Hub username is fixed to `daimon23` in the workflow.
 
 Keep the token only in GitHub Actions Secrets. Never put it in the repository, Compose, screenshots, or logs.

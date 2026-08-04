@@ -128,9 +128,6 @@ server {
 
 ## Docker Hub 发布
 
-`.github/workflows/docker-publish.yml` 在 `main` 更新、版本标签或手动触发时构建 AMD64/ARM64 镜像。GitHub 仓库需要配置：
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
+`.github/workflows/docker-publish.yml` 在 `main` 更新、版本标签或手动触发时构建 AMD64/ARM64 镜像。GitHub 仓库只需配置 `DOCKERHUB_TOKEN`，内容为具有读写权限的 Docker Hub Access Token；公开用户名 `daimon23` 已固定在工作流中。
 
 Token 只保存在 GitHub Actions Secrets，禁止写入仓库、Compose、截图或日志。
