@@ -17,20 +17,6 @@
 
 **Address is a real residential address generator.** Its published residential base addresses come from official open data, national or regional address registers, map-registered buildings, and open-map records with explicit residential evidence. It does not pass randomly assembled streets, house numbers, or postcodes off as real addresses. Every record retains source coordinates for positioning in services such as Google Maps or AMap where they cover the relevant region; text-search results depend on each platform's coverage, indexed names, and update cycle.
 
-## Docker Compose quick start
-
-Docker Compose is the simplest deployment path. It supports Linux AMD64 and ARM64 and uses the published `daimon23/address` image.
-
-```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
-docker compose up -d
-docker compose ps
-```
-
-Compose starts PostgreSQL, runs schema migrations once, and then starts the API and automatic synchronization services. The generated administrator password is stored in the ignored `config/secrets/admin_bootstrap_password` file. Application and PostgreSQL data use `./data/address` and `./data/postgres`. See the [deployment guide](docs/DEPLOYMENT.md) for requirements, upgrades, reverse proxy, backup, and restore procedures.
-
 ## Highlights
 
 - 27 configured countries and regions with country, administrative-area, city, district, and postcode filters where supported.
@@ -94,37 +80,6 @@ This table reflects the current synchronization implementation. Except for the e
 
 See [data sources](docs/data-sources.md) and the [country/region strategies](docs/strategies/) for source versions, coordinate systems, deduplication, and publication gates.
 
-## Architecture
-
-```text
-Astro static pages + React UI
-             │
-             ▼
-       Hono Node.js API
-        ├─ PostgreSQL address and control data
-        ├─ in-memory random/filter indexes rebuilt from PostgreSQL
-        └─ local formatting, profile generation, and optional translation
-
-Synchronization supervisor
-        ├─ resumable bulk/API adapters
-        ├─ country-specific validation and residential evidence gates
-        ├─ transactional PostgreSQL publication
-        └─ coverage statistics and bounded queue state
-```
-
-## Automated synchronization
-
-A country is complete only when every enabled rule passes:
-
-1. total eligible-record target;
-2. lowest administrative-level coverage and per-node minimums;
-3. level-1 and level-2 minimums where configured;
-4. every explicit node override.
-
-Reaching only the total target does not mark a country complete. Conversely, a source proven to be exhausted is kept visible as incomplete but removed from active work until its source/version fingerprint changes.
-
-The queue applies bounded retries, exponential backoff, cooldown/quota reset times, no-progress latching, and suspension after repeated failures. It cannot run the same unchanged no-progress source indefinitely. China receives the highest automatic priority while it remains eligible.
-
 ## Screenshots
 
 <table>
@@ -156,12 +111,53 @@ The queue applies bounded retries, exponential backoff, cooldown/quota reset tim
 
 <img src="image/admin-map-keys.png" alt="Masked map-key and quota administration" />
 
+## Architecture
+
+```text
+Astro static pages + React UI
+             │
+             ▼
+       Hono Node.js API
+        ├─ PostgreSQL address and control data
+        ├─ in-memory random/filter indexes rebuilt from PostgreSQL
+        └─ local formatting, profile generation, and optional translation
+
+Synchronization supervisor
+        ├─ resumable bulk/API adapters
+        ├─ country-specific validation and residential evidence gates
+        ├─ transactional PostgreSQL publication
+        └─ coverage statistics and bounded queue state
+```
+
+## Automated synchronization
+
+A country is complete only when every enabled rule passes:
+
+1. total eligible-record target;
+2. lowest administrative-level coverage and per-node minimums;
+3. level-1 and level-2 minimums where configured;
+4. every explicit node override.
+
+Reaching only the total target does not mark a country complete. Conversely, a source proven to be exhausted is kept visible as incomplete but removed from active work until its source/version fingerprint changes.
+
+The queue applies bounded retries, exponential backoff, cooldown/quota reset times, no-progress latching, and suspension after repeated failures. It cannot run the same unchanged no-progress source indefinitely. China receives the highest automatic priority while it remains eligible.
+
+## Deployment
+
+```bash
+git clone https://github.com/daimon3332/address.git
+cd address
+sh ops/init-compose.sh
+docker compose up -d
+```
+
+See the [deployment guide](docs/DEPLOYMENT.md) for complete instructions.
+
 ## Configuration and API keys
 
-- Deployment works without `.env`; copy `ops/compose.env.example` only to override the image, bind address, port, origin, or HTTPS cookie settings.
+- Frontend and administrator passwords, API tokens, provider credentials, quotas, and quick locations are managed in the administrator console.
 - Provider keys are optional unless the selected synchronization strategy needs them.
 - Multiple credentials rotate independently. A failing key is cooled down while another available key is tried; when all keys are unavailable, work waits for the earliest reset.
-- Encrypted administrator credentials depend on a stable `CONFIG_MASTER_KEY`.
 - Follow the dedicated [API key configuration guide](docs/API_KEYS.md) for official application links, variable names, restrictions, and rotation behavior.
 
 ## Documentation

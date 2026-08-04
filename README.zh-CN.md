@@ -17,20 +17,6 @@
 
 **Address 是真实住宅地址生成器。** 发布池中的住宅基础地址来自官方开放数据、国家或地区地址登记、地图登记建筑及具有明确住宅用途证据的开放地图数据，不使用随机街道、门牌或邮编冒充真实地址。每条记录保留来源坐标，可用于 Google Maps、高德地图等覆盖相应地区的地图服务定位；具体平台的文字搜索结果取决于其地区覆盖、索引名称和更新时间。
 
-## Docker Compose 快速部署
-
-Docker Compose 是最简单的部署方式，支持 Linux AMD64 和 ARM64，直接使用已发布的 `daimon23/address` 镜像。
-
-```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
-docker compose up -d
-docker compose ps
-```
-
-Compose 会启动 PostgreSQL、单次数据库迁移、API 和自动同步服务。随机生成的管理员初始密码保存在已忽略的 `config/secrets/admin_bootstrap_password`。应用与 PostgreSQL 数据分别使用 `./data/address` 和 `./data/postgres`。运行要求、升级、反向代理、备份与恢复见[部署文档](docs/DEPLOYMENT.zh-CN.md)。
-
 ## 核心功能
 
 - 配置 27 个国家和地区，并按国家实际行政结构提供州省、城市、区县和邮编筛选。
@@ -94,37 +80,6 @@ Compose 会启动 PostgreSQL、单次数据库迁移、API 和自动同步服务
 
 更详细的数据源版本、坐标系、去重和发布门禁见[数据源文档](docs/data-sources.md)及[各国家/地区策略](docs/strategies/)。
 
-## 架构
-
-```text
-Astro 静态页面 + React 界面
-             │
-             ▼
-       Hono Node.js API
-        ├─ PostgreSQL 地址与控制数据
-        ├─ 从 PostgreSQL 构建的随机/筛选内存索引
-        └─ 本地格式化、资料生成与可选翻译
-
-同步监督进程
-        ├─ 可续跑的批量/API 适配器
-        ├─ 按国家执行验证与住宅证据门禁
-        ├─ PostgreSQL 事务发布
-        └─ 覆盖统计与有界同步队列
-```
-
-## 全自动同步规则
-
-一个国家只有在所有已启用规则都满足时才算完成：
-
-1. 合格地址总量达到目标；
-2. 最低行政层覆盖率和每节点最低数量达到目标；
-3. 已配置的一级、二级行政区最低数量达到目标；
-4. 所有单节点覆盖目标达到要求。
-
-仅达到国家总量不能标记完成。若数据源已经被证明耗尽，则该国家继续显示未完成，但不会反复进入执行队列；只有来源或版本指纹变化后才重新评估。
-
-队列包含有限重试、指数退避、额度/冷却恢复时间、无增长锁存和连续失败暂停机制，因此不会对同一个没有变化的数据源无限循环。中国在仍具备同步条件时拥有最高自动优先级。
-
 ## 界面截图
 
 <table>
@@ -156,12 +111,53 @@ Astro 静态页面 + React 界面
 
 <img src="image/admin-map-keys.png" alt="已完全遮罩的地图密钥和额度管理" />
 
+## 架构
+
+```text
+Astro 静态页面 + React 界面
+             │
+             ▼
+       Hono Node.js API
+        ├─ PostgreSQL 地址与控制数据
+        ├─ 从 PostgreSQL 构建的随机/筛选内存索引
+        └─ 本地格式化、资料生成与可选翻译
+
+同步监督进程
+        ├─ 可续跑的批量/API 适配器
+        ├─ 按国家执行验证与住宅证据门禁
+        ├─ PostgreSQL 事务发布
+        └─ 覆盖统计与有界同步队列
+```
+
+## 全自动同步规则
+
+一个国家只有在所有已启用规则都满足时才算完成：
+
+1. 合格地址总量达到目标；
+2. 最低行政层覆盖率和每节点最低数量达到目标；
+3. 已配置的一级、二级行政区最低数量达到目标；
+4. 所有单节点覆盖目标达到要求。
+
+仅达到国家总量不能标记完成。若数据源已经被证明耗尽，则该国家继续显示未完成，但不会反复进入执行队列；只有来源或版本指纹变化后才重新评估。
+
+队列包含有限重试、指数退避、额度/冷却恢复时间、无增长锁存和连续失败暂停机制，因此不会对同一个没有变化的数据源无限循环。中国在仍具备同步条件时拥有最高自动优先级。
+
+## 部署
+
+```bash
+git clone https://github.com/daimon3332/address.git
+cd address
+sh ops/init-compose.sh
+docker compose up -d
+```
+
+完整说明见[部署文档](docs/DEPLOYMENT.zh-CN.md)。
+
 ## 配置与 API Key
 
-- 默认无需 `.env`；只有覆盖镜像、监听地址、端口、来源或 HTTPS Cookie 设置时才复制 `ops/compose.env.example`。
+- 前端密码、管理员密码、API Token、平台密钥、额度和快捷区域均在管理员后台设置。
 - 平台密钥默认可选；只有所选同步策略需要时才必须配置。
 - 多个 Key 独立轮换。当前 Key 失败时先冷却并尝试其他 Key；全部不可用时等待最早恢复时间。
-- 后台加密凭据依赖稳定的 `CONFIG_MASTER_KEY`。
 - 各平台申请入口、变量名、限制和轮换规则见独立的 [API Key 配置文档](docs/API_KEYS.zh-CN.md)。
 
 ## 文档

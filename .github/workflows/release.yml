@@ -107,47 +107,41 @@ jobs:
             exit 1
           fi
           (cd release && sha256sum -c SHA256SUMS.txt)
-      - name: Write bilingual release notes
+      - name: Write release notes
         shell: bash
         run: |
           version='${{ steps.version.outputs.value }}'
           cat > release/RELEASE_NOTES.md <<NOTES
           ## Address $version
 
-          ### Docker Compose deployment
-          Docker Compose is the recommended installation path. It pulls \`daimon23/address\`, starts PostgreSQL, runs migrations, and starts the API and automatic synchronization services.
+          > 自托管真实住宅地址生成器，支持 27 个国家和地区。
 
-              git clone https://github.com/daimon3332/address.git
-              cd address
-              sh ops/init-compose.sh
-              docker compose up -d
+          本版本新增地址收藏和完整 API 文档，统一 Docker Compose 部署，并进一步完善地址同步、凭据轮换与异常恢复。
 
-          ### Highlights
-          - Real residential address and test-profile generation for 27 configured countries and regions.
-          - Browser-persistent address favorites with continent/country grouping, filters, drag-and-drop ordering, numeric ordering, copy, delete, and map links.
-          - Full-pool random selection, strict location filters, multilingual presentation, and persistent language preferences.
-          - Expanded JSON API with Python, cURL, and JavaScript examples.
-          - Administrator controls for frontend and administrator passwords, API tokens, provider keys, quotas, quick locations, address rules, and the synchronization queue.
-          - PostgreSQL storage and automated synchronization with multi-rule completion, bounded retries, cooldowns, source-exhaustion handling, and temporary-file cleanup.
-
-          ### Docker Compose 部署
-          推荐使用 Docker Compose。它会拉取 \`daimon23/address\`，启动 PostgreSQL、数据库迁移、API 和自动同步服务。
-
-              git clone https://github.com/daimon3332/address.git
-              cd address
-              sh ops/init-compose.sh
-              docker compose up -d
-
-          ### 主要功能
-          - 为 27 个已配置国家和地区生成真实住宅地址与测试资料。
+          ### 新增功能
           - 地址收藏保存在浏览器中，支持按大洲或国家分组与筛选、拖动排序、序号排序、复制、删除和地图跳转。
-          - 支持完整地址池随机选择、严格地区筛选、多语言展示和语言偏好记忆。
-          - 提供扩展 JSON API，以及 Python、cURL 和 JavaScript 调用示例。
-          - 管理员后台可设置前端密码、管理员密码、API Token、平台 Key、额度、快捷区域、地址规则和同步队列。
-          - 使用 PostgreSQL，并通过多重完成规则、有限重试、冷却、来源耗尽判定和临时文件清理实现自动同步。
+          - 扩展 JSON API，新增地区搜索、行政层级、批量生成、地址详情、翻译和数据健康状态等接口。
+          - API 文档新增 Python、cURL 和 JavaScript 示例，并按认证范围展示参数与响应。
+          - 新增 Docker Compose 部署和 Docker Hub AMD64/ARM64 镜像。
 
-          ### License / 许可证
-          Project source code is MIT-licensed. Upstream datasets retain their own licenses and attribution requirements.
+          ### 优化改进
+          - 管理员后台集中管理前端密码、管理员密码、API Token、平台密钥、额度、快捷区域、地址规则和同步队列。
+          - 同步状态同时判断地址总量、行政区覆盖率和节点最低数量，任一规则未达标都不会标记完成。
+          - 多个平台密钥独立轮换；当前密钥不可用时切换其他密钥，全部冷却时等待最早恢复时间。
+          - 已耗尽来源不再重复下载；仍有新增能力的其他来源可以继续执行。
+
+          ### Bug 修复
+          - 修复同步任务异常终止后残留锁可能阻止后续任务的问题。
+          - 修复无增长或重复失败的来源可能被反复加入队列的问题。
+          - 增加任务硬超时、有限重试、指数退避和失败签名暂停机制。
+          - 增加同步暂存文件、超时产物和失败备份的自动清理与恢复。
+
+          ### 升级方式
+
+              docker compose pull
+              docker compose up -d
+
+          完整安装、升级和备份说明见 [部署文档](https://github.com/daimon3332/address/blob/main/docs/DEPLOYMENT.zh-CN.md)。
           NOTES
       - name: Publish stable GitHub release
         shell: bash
