@@ -4,18 +4,7 @@
 
 项目只维护一种生产部署方式：Docker Compose。应用、PostgreSQL、迁移和自动同步均由仓库根目录的 `docker-compose.yml` 管理。
 
-## 运行要求
-
-- Linux AMD64 或 ARM64
-- Docker Engine 与 Docker Compose v2
-- OpenSSL，用于首次生成随机启动密钥
-- 4 GB 内存；执行大型国家首次同步建议 8 GB 或更多
-- 足够容纳 PostgreSQL、地址数据、同步暂存和备份的磁盘空间
-- HTTPS 反向代理
-
-开发电脑无需安装 Docker。正式镜像由 GitHub Actions 构建并发布到 Docker Hub：`daimon23/address`。
-
-## 首次启动
+## Docker Compose 快速部署
 
 ```bash
 git clone https://github.com/daimon3332/address.git
@@ -33,6 +22,17 @@ cat config/secrets/admin_bootstrap_password
 ```
 
 登录 `/admin/` 后可修改前端密码、管理员密码、API 调用令牌、地图平台 Key、额度与其他业务设置。
+
+## 运行要求
+
+- Linux AMD64 或 ARM64
+- Docker Engine 与 Docker Compose v2
+- OpenSSL，用于首次生成随机启动密钥
+- 4 GB 内存；执行大型国家首次同步建议 8 GB 或更多
+- 足够容纳 PostgreSQL、地址数据、同步暂存和备份的磁盘空间
+- HTTPS 反向代理
+
+开发电脑无需安装 Docker。正式镜像由 GitHub Actions 构建并发布到 Docker Hub：`daimon23/address`。
 
 ## 目录结构
 

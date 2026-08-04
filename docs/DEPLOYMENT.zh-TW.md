@@ -4,18 +4,7 @@
 
 專案只維護一種生產部署方式：Docker Compose。根目錄的 `docker-compose.yml` 統一管理應用、PostgreSQL、遷移與自動同步。
 
-## 執行要求
-
-- Linux AMD64 或 ARM64
-- Docker Engine 與 Docker Compose v2
-- OpenSSL，用於首次產生隨機啟動密鑰
-- 4 GB 記憶體；執行大型國家首次同步建議 8 GB 或更多
-- 足以容納 PostgreSQL、地址資料、同步暫存與備份的磁碟空間
-- HTTPS 反向代理
-
-開發電腦不需要安裝 Docker。正式映像由 GitHub Actions 建置並發佈到 Docker Hub：`daimon23/address`。
-
-## 首次啟動
+## Docker Compose 快速部署
 
 ```bash
 git clone https://github.com/daimon3332/address.git
@@ -33,6 +22,17 @@ cat config/secrets/admin_bootstrap_password
 ```
 
 登入 `/admin/` 後可修改前端密碼、管理員密碼、API 呼叫權杖、地圖平台 Key、額度與其他業務設定。
+
+## 執行要求
+
+- Linux AMD64 或 ARM64
+- Docker Engine 與 Docker Compose v2
+- OpenSSL，用於首次產生隨機啟動密鑰
+- 4 GB 記憶體；執行大型國家首次同步建議 8 GB 或更多
+- 足以容納 PostgreSQL、地址資料、同步暫存與備份的磁碟空間
+- HTTPS 反向代理
+
+開發電腦不需要安裝 Docker。正式映像由 GitHub Actions 建置並發佈到 Docker Hub：`daimon23/address`。
 
 ## 目錄結構
 

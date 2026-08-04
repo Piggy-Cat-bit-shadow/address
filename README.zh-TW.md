@@ -17,6 +17,20 @@
 
 **Address 是真實住宅位址產生器。** 發布池中的住宅基礎位址來自官方開放資料、國家或地區位址登記、地圖登記建築及具有明確住宅用途證據的開放地圖資料，不使用隨機街道、門牌或郵遞區號冒充真實位址。每筆記錄保留來源座標，可用於 Google Maps、高德地圖等覆蓋相應地區的地圖服務定位；具體平台的文字搜尋結果取決於其地區覆蓋、索引名稱與更新時間。
 
+## Docker Compose 快速部署
+
+Docker Compose 是最簡單的部署方式，支援 Linux AMD64 與 ARM64，直接使用已發布的 `daimon23/address` 映像。
+
+```bash
+git clone https://github.com/daimon3332/address.git
+cd address
+sh ops/init-compose.sh
+docker compose up -d
+docker compose ps
+```
+
+Compose 會啟動 PostgreSQL、單次資料庫遷移、API 與自動同步服務。隨機產生的管理員初始密碼保存在已忽略的 `config/secrets/admin_bootstrap_password`。應用與 PostgreSQL 資料分別使用 `./data/address` 和 `./data/postgres`。執行要求、升級、反向代理、備份與還原見[部署文件](docs/DEPLOYMENT.zh-TW.md)。
+
 ## 核心功能
 
 - 設定 27 個國家和地區，依實際行政結構提供州省、城市、區縣及郵遞區號篩選。
@@ -24,8 +38,10 @@
 - 從目前篩選範圍的全部合格位址快速隨機選擇，不會重複讀取資料庫前幾筆。
 - 支援原文、英文、簡體中文、繁體中文、日語、韓語、德語、法語、西班牙語及葡萄牙語展示路徑。
 - 位址語言和資料語言分別記憶；瀏覽器首次開啟預設 English，產生和切換國家不會重設選擇。
+- 位址收藏保存在瀏覽器中，支援依大洲或國家分組與篩選、拖曳或序號排序、複製、刪除，以及跳轉 Google Maps 或高德地圖。
 - 每個國家可設定熱門行政區、熱門城市與特殊區域；美國包含無州級銷售稅州。
 - 提供公開覆蓋監控，以及管理員儀表板、位址資料規則、同步佇列、快捷區域、平台憑據、存取控制、黑名單與 API Token 頁面。
+- JSON API 提供健康檢查、國家、可用性、地區選項、搜尋、位址/資料產生、批次產生與監控介面，並包含 Python、cURL 與 JavaScript 範例。
 - 執行階段完全使用 PostgreSQL，包含連線池、交易發布、地區索引與預先建立的隨機位址索引。
 
 ## 支援範圍
@@ -139,20 +155,6 @@ Astro 靜態頁面 + React 介面
 </table>
 
 <img src="image/admin-map-keys.png" alt="已完整遮罩的地圖金鑰與額度管理" />
-
-## 快速開始
-
-需要 Docker Engine、Compose v2，以及足以容納所選資料源的磁碟空間。
-
-```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
-docker compose up -d
-docker compose ps
-```
-
-Compose 會拉取 `daimon23/address`，啟動 PostgreSQL、單次資料庫遷移、API 與自動同步服務。隨機產生的管理員初始密碼保存在已忽略的 `config/secrets/admin_bootstrap_password`。應用與 PostgreSQL 資料分別使用 `./data/address` 和 `./data/postgres`。生產升級、反向代理、備份與還原見[部署文件](docs/DEPLOYMENT.zh-TW.md)。
 
 ## 設定與 API Key
 

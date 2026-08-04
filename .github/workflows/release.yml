@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v2.0.0
+        description: Release version, for example v2.0.1
         required: true
-        default: v2.0.0
+        default: v2.0.1
 
 permissions:
   contents: read
@@ -114,23 +114,37 @@ jobs:
           cat > release/RELEASE_NOTES.md <<NOTES
           ## Address $version
 
-          ### New features
-          - Self-hosted address and test-profile generation for 27 countries and regions.
-          - Full-pool random selection, strict location filters, and persistent language preferences.
-          - Automated synchronization with multi-rule completion, bounded retries, and source-exhaustion handling.
-          - PostgreSQL storage, public coverage monitoring, and a complete administrator console.
+          ### Docker Compose deployment
+          Docker Compose is the recommended installation path. It pulls \`daimon23/address\`, starts PostgreSQL, runs migrations, and starts the API and automatic synchronization services.
 
-          ### Quick start
-          Download either archive, verify it with \`SHA256SUMS.txt\`, then follow the deployment guide.
+              git clone https://github.com/daimon3332/address.git
+              cd address
+              sh ops/init-compose.sh
+              docker compose up -d
 
-          ### 新功能
-          - 支持 27 个国家和地区的自托管地址与测试资料生成。
-          - 支持完整地址池随机选择、严格地区筛选和语言偏好记忆。
-          - 支持多规则完成判定、有限重试和来源耗尽处理的自动同步。
-          - 提供 PostgreSQL 存储、公开覆盖监控和完整管理员界面。
+          ### Highlights
+          - Real residential address and test-profile generation for 27 configured countries and regions.
+          - Browser-persistent address favorites with continent/country grouping, filters, drag-and-drop ordering, numeric ordering, copy, delete, and map links.
+          - Full-pool random selection, strict location filters, multilingual presentation, and persistent language preferences.
+          - Expanded JSON API with Python, cURL, and JavaScript examples.
+          - Administrator controls for frontend and administrator passwords, API tokens, provider keys, quotas, quick locations, address rules, and the synchronization queue.
+          - PostgreSQL storage and automated synchronization with multi-rule completion, bounded retries, cooldowns, source-exhaustion handling, and temporary-file cleanup.
 
-          ### 快速开始
-          下载任一压缩包，使用 \`SHA256SUMS.txt\` 校验，然后按照部署文档操作。
+          ### Docker Compose 部署
+          推荐使用 Docker Compose。它会拉取 \`daimon23/address\`，启动 PostgreSQL、数据库迁移、API 和自动同步服务。
+
+              git clone https://github.com/daimon3332/address.git
+              cd address
+              sh ops/init-compose.sh
+              docker compose up -d
+
+          ### 主要功能
+          - 为 27 个已配置国家和地区生成真实住宅地址与测试资料。
+          - 地址收藏保存在浏览器中，支持按大洲或国家分组与筛选、拖动排序、序号排序、复制、删除和地图跳转。
+          - 支持完整地址池随机选择、严格地区筛选、多语言展示和语言偏好记忆。
+          - 提供扩展 JSON API，以及 Python、cURL 和 JavaScript 调用示例。
+          - 管理员后台可设置前端密码、管理员密码、API Token、平台 Key、额度、快捷区域、地址规则和同步队列。
+          - 使用 PostgreSQL，并通过多重完成规则、有限重试、冷却、来源耗尽判定和临时文件清理实现自动同步。
 
           ### License / 许可证
           Project source code is MIT-licensed. Upstream datasets retain their own licenses and attribution requirements.

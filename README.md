@@ -17,6 +17,20 @@
 
 **Address is a real residential address generator.** Its published residential base addresses come from official open data, national or regional address registers, map-registered buildings, and open-map records with explicit residential evidence. It does not pass randomly assembled streets, house numbers, or postcodes off as real addresses. Every record retains source coordinates for positioning in services such as Google Maps or AMap where they cover the relevant region; text-search results depend on each platform's coverage, indexed names, and update cycle.
 
+## Docker Compose quick start
+
+Docker Compose is the simplest deployment path. It supports Linux AMD64 and ARM64 and uses the published `daimon23/address` image.
+
+```bash
+git clone https://github.com/daimon3332/address.git
+cd address
+sh ops/init-compose.sh
+docker compose up -d
+docker compose ps
+```
+
+Compose starts PostgreSQL, runs schema migrations once, and then starts the API and automatic synchronization services. The generated administrator password is stored in the ignored `config/secrets/admin_bootstrap_password` file. Application and PostgreSQL data use `./data/address` and `./data/postgres`. See the [deployment guide](docs/DEPLOYMENT.md) for requirements, upgrades, reverse proxy, backup, and restore procedures.
+
 ## Highlights
 
 - 27 configured countries and regions with country, administrative-area, city, district, and postcode filters where supported.
@@ -24,8 +38,10 @@
 - Fast database-backed random selection across the complete eligible scope; it does not repeatedly read the first rows.
 - Source/native, English, Simplified Chinese, Traditional Chinese, Japanese, Korean, German, French, Spanish, and Portuguese presentation paths.
 - Address and profile language choices persist independently in the browser; first use defaults to English.
+- Browser-persistent address favorites with continent/country grouping, filters, drag-and-drop or numeric ordering, copy, delete, and Google Maps/AMap links.
 - Popular administrative areas, popular cities, and special areas are configurable per country. The United States includes states without statewide sales tax.
 - Public coverage monitor plus administrator dashboard, address-data rules, synchronization queue, quick-location editor, provider credentials, access control, blacklist, and API tokens.
+- JSON API for health, readiness, countries, availability, location options, search, address/profile generation, batch generation, and monitoring, with Python, cURL, and JavaScript examples.
 - PostgreSQL-only runtime with pooled connections, transactional publication, indexed location search, and prebuilt random-address indexes.
 
 ## Supported scope
@@ -139,20 +155,6 @@ The queue applies bounded retries, exponential backoff, cooldown/quota reset tim
 </table>
 
 <img src="image/admin-map-keys.png" alt="Masked map-key and quota administration" />
-
-## Quick start
-
-Requirements: Docker Engine with Compose v2 and enough disk space for the datasets you choose to import.
-
-```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
-docker compose up -d
-docker compose ps
-```
-
-Compose pulls `daimon23/address`, starts PostgreSQL, runs schema migrations once, and then starts the API and automatic synchronization services. The generated administrator password is stored in the ignored `config/secrets/admin_bootstrap_password` file. Application and PostgreSQL data use `./data/address` and `./data/postgres`. Production upgrades, reverse proxy, backup, and restore procedures are in the [deployment guide](docs/DEPLOYMENT.md).
 
 ## Configuration and API keys
 

@@ -4,18 +4,7 @@
 
 The project maintains one production deployment path: Docker Compose. The root `docker-compose.yml` manages the application, PostgreSQL, migrations, and automatic synchronization.
 
-## Requirements
-
-- Linux AMD64 or ARM64
-- Docker Engine and Docker Compose v2
-- OpenSSL for one-time secret generation
-- 4 GB RAM; 8 GB or more is recommended for large initial country imports
-- Enough disk space for PostgreSQL, address data, synchronization staging, and backups
-- An HTTPS reverse proxy
-
-The development computer does not need Docker. GitHub Actions builds the production image and publishes it to Docker Hub as `daimon23/address`.
-
-## First Start
+## Docker Compose quick deployment
 
 ```bash
 git clone https://github.com/daimon3332/address.git
@@ -33,6 +22,17 @@ cat config/secrets/admin_bootstrap_password
 ```
 
 After signing in to `/admin/`, manage the frontend password, administrator password, API token, provider keys, quotas, and business settings there.
+
+## Requirements
+
+- Linux AMD64 or ARM64
+- Docker Engine and Docker Compose v2
+- OpenSSL for one-time secret generation
+- 4 GB RAM; 8 GB or more is recommended for large initial country imports
+- Enough disk space for PostgreSQL, address data, synchronization staging, and backups
+- An HTTPS reverse proxy
+
+The development computer does not need Docker. GitHub Actions builds the production image and publishes it to Docker Hub as `daimon23/address`.
 
 ## Directory Layout
 
