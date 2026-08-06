@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
 import { evaluateCountryGoals } from './country-goals.mjs';
@@ -8,10 +8,14 @@ import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
 export const LATCH_REASON = 'source_limited_cache';
 export const CHECKED_REASON = 'source_version_checked';
 export const SUSPENDED_REASON = 'retry_suspended';
+export const BACKOFF_REASON = 'retry_backoff';
 const DEFAULT_SOURCE_PROBE_MS = 24 * 60 * 60_000;
 // Failure codes that deterministically repeat for identical inputs; the ETL
 // skips same-signature retries itself, so a fruitless pass latches immediately.
 const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED']);
+const timeoutFailureCodes = new Set([
+  '57014', 'QUERY_CANCELED', 'SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'
+]);
 // Countries whose synchronization consumes a metered provider quota. A shard
 // may declare `quotaProvider` in source-shards.json to extend this; the
 // korea-kapt shard does not yet, so KR -> geoapify is kept here on purpose.
@@ -40,6 +44,10 @@ export const nextQuotaResetTime = (period, offsetMinutes, date = new Date()) => 
   else shifted.setUTCDate(shifted.getUTCDate() + 1);
   shifted.setUTCHours(0, 0, 0, 0);
   return new Date(shifted.getTime() - offset * 60_000);
+};
+const quotaPeriodStart = (period, offsetMinutes, date = new Date()) => {
+  const shifted = new Date(date.getTime() + (Number(offsetMinutes) || 0) * 60_000).toISOString();
+  return period === 'month' ? shifted.slice(0, 7) : shifted.slice(0, 10);
 };
 
 const sortedPairs = (pairs) => [...pairs].map(([key, value]) => [String(key), String(value || '')])
@@ -93,8 +101,17 @@ export const orderRunnable = (entries) => [...entries].sort((left, right) => {
     const rightReset = timestamp(right.quotaResetAt) || Number.MAX_SAFE_INTEGER;
     if (leftReset !== rightReset) return leftReset - rightReset;
   }
-  return (right.deficit - left.deficit) || left.countryCode.localeCompare(right.countryCode);
+  const lastDispatched = timestamp(left.lastDispatchedAt) - timestamp(right.lastDispatchedAt);
+  return lastDispatched || (right.deficit - left.deficit) || left.countryCode.localeCompare(right.countryCode);
 });
+
+export const estimateDuration = (samples, minimumSamples = 3) => {
+  const values = (samples || []).map(Number).filter((value) => Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right);
+  if (values.length < minimumSamples) return null;
+  const percentile = (value) => values[Math.max(0, Math.ceil(values.length * value) - 1)];
+  return { sampleCount: values.length, medianMs: percentile(0.5), p80Ms: percentile(0.8) };
+};
 
 const goalDeficit = (rules) => {
   if (!rules) return Number.MAX_SAFE_INTEGER;
@@ -173,7 +190,7 @@ export const evaluateAttempt = ({
     return { action: 'latch', reason: LATCH_REASON, fingerprint: fingerprintAfter, latchedAt: completedAt };
   }
   const failures = consecutiveFailures + 1;
-  const timeoutFailure = ['SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'].includes(String(failureCode || ''));
+  const timeoutFailure = timeoutFailureCodes.has(String(failureCode || '').toUpperCase());
   if (failures >= Math.max(1, timeoutFailure ? maxTimeoutFailures : maxConsecutiveFailures)) {
     return {
       action: 'suspend',
@@ -285,7 +302,14 @@ export class QueueStateStore {
   async clear(countryCodes) {
     const state = await this.load();
     if (countryCodes.some((countryCode) => String(countryCode).toLowerCase() === 'all')) state.countries = {};
-    else for (const countryCode of countryCodes) delete state.countries[String(countryCode).toUpperCase()];
+    else for (const value of countryCodes) {
+      const identifier = String(value);
+      if (/^[a-z]{2}$/iu.test(identifier)) delete state.countries[identifier.toUpperCase()];
+      else for (const [countryCode, country] of Object.entries(state.countries)) {
+        delete country.shards?.[identifier];
+        if (!Object.keys(country.shards || {}).length) delete state.countries[countryCode];
+      }
+    }
     await this.save(state);
     return state;
   }
@@ -298,6 +322,134 @@ export class QueueStateStore {
       updatedAt: migratedAt
     };
     await this.save(state);
+  }
+}
+
+export class PostgresQueueStateStore {
+  constructor(database, legacyFile = null) {
+    this.database = database;
+    this.legacyFile = legacyFile ? resolve(legacyFile) : null;
+    this.initialized = false;
+  }
+
+  async initialize() {
+    if (this.initialized) return;
+    if (!this.legacyFile) {
+      this.initialized = true;
+      return;
+    }
+    const total = Number(await this.database.prepare('SELECT COUNT(*) AS total FROM sync_source_execution_state').first('total') || 0);
+    if (total) {
+      await rm(this.legacyFile, { force: true });
+      this.initialized = true;
+      return;
+    }
+    let legacy;
+    try {
+      legacy = JSON.parse(await readFile(this.legacyFile, 'utf8'));
+    } catch {
+      this.initialized = true;
+      return;
+    }
+    for (const [countryCode, country] of Object.entries(legacy?.countries || {})) {
+      const shards = country?.shards || { [countryCode]: country };
+      for (const [sourceId, entry] of Object.entries(shards)) {
+        if (!entry || typeof entry !== 'object') continue;
+        await this.writeEntry(countryCode, sourceId, entry, entry.updatedAt || new Date().toISOString());
+      }
+    }
+    await rm(this.legacyFile, { force: true });
+    this.initialized = true;
+  }
+
+  async load() {
+    await this.initialize();
+    const rows = (await this.database.prepare(`SELECT country_code,source_id,state,reason,source_fingerprint,
+      failure_fingerprint,consecutive_failures,failure_code,next_attempt_at,exhausted_at,updated_at
+      FROM sync_source_execution_state`).all()).results;
+    const state = { schemaVersion: 1, countries: {} };
+    for (const row of rows) {
+      const country = state.countries[row.country_code] ||= { shards: {}, updatedAt: row.updated_at };
+      const savedState = row.state === 'exhausted' ? 'latched' : row.state;
+      country.shards[row.source_id] = {
+        state: savedState,
+        latched: savedState === 'latched',
+        reason: row.reason || null,
+        fingerprint: ['suspended', 'backoff'].includes(savedState) ? row.failure_fingerprint : row.source_fingerprint,
+        latchedAt: row.exhausted_at || null,
+        consecutiveFailures: Number(row.consecutive_failures || 0),
+        failureCode: row.failure_code || null,
+        nextAttemptAt: row.next_attempt_at || null,
+        updatedAt: row.updated_at
+      };
+      if (timestamp(row.updated_at) > timestamp(country.updatedAt)) country.updatedAt = row.updated_at;
+    }
+    return state;
+  }
+
+  async writeEntry(countryCode, sourceId, entry, evaluatedAt) {
+    const savedState = String(entry.state || (entry.latched ? 'latched' : ''));
+    if (!['latched', 'checked', 'backoff', 'suspended'].includes(savedState)) return;
+    const databaseState = savedState === 'latched' ? 'exhausted' : savedState;
+    const failureState = ['backoff', 'suspended'].includes(savedState);
+    await this.database.prepare(`INSERT INTO sync_source_execution_state(
+      country_code,source_id,state,reason,source_fingerprint,failure_fingerprint,consecutive_failures,
+      failure_code,next_attempt_at,exhausted_at,last_attempt_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(country_code,source_id) DO UPDATE SET
+      state=excluded.state,reason=excluded.reason,source_fingerprint=excluded.source_fingerprint,
+      failure_fingerprint=excluded.failure_fingerprint,consecutive_failures=excluded.consecutive_failures,
+      failure_code=excluded.failure_code,next_attempt_at=excluded.next_attempt_at,
+      exhausted_at=excluded.exhausted_at,last_attempt_at=excluded.last_attempt_at,updated_at=excluded.updated_at`)
+      .bind(
+        countryCode, sourceId, databaseState, entry.reason || null,
+        failureState ? null : entry.fingerprint || null,
+        failureState ? entry.fingerprint || null : null,
+        Number(entry.consecutiveFailures || 0), entry.failureCode || null, entry.nextAttemptAt || null,
+        savedState === 'latched' ? entry.latchedAt || evaluatedAt : null, evaluatedAt, evaluatedAt
+      ).run();
+  }
+
+  async apply(countryCode, evaluation, evaluatedAt, shardId = null) {
+    await this.initialize();
+    const sourceId = shardId || countryCode;
+    if (evaluation.action === 'waiting_quota' || !['latch', 'checked', 'suspend', 'backoff'].includes(evaluation.action)) {
+      await this.database.prepare('DELETE FROM sync_source_execution_state WHERE country_code=? AND source_id=?')
+        .bind(countryCode, sourceId).run();
+      return this.load();
+    }
+    const state = evaluation.action === 'latch' ? 'latched'
+      : evaluation.action === 'suspend' ? 'suspended' : evaluation.action;
+    await this.writeEntry(countryCode, sourceId, {
+      state,
+      reason: evaluation.reason || (state === 'latched' ? LATCH_REASON
+        : state === 'checked' ? CHECKED_REASON : state === 'backoff' ? BACKOFF_REASON : SUSPENDED_REASON),
+      fingerprint: evaluation.fingerprint || null,
+      latchedAt: evaluation.latchedAt || null,
+      consecutiveFailures: evaluation.consecutiveFailures || 0,
+      failureCode: evaluation.failureCode || null,
+      nextAttemptAt: evaluation.nextAttemptAt || null
+    }, evaluatedAt);
+    return this.load();
+  }
+
+  async clear(countryCodes) {
+    await this.initialize();
+    if (countryCodes.some((countryCode) => String(countryCode).toLowerCase() === 'all')) {
+      await this.database.prepare('DELETE FROM sync_source_execution_state').run();
+    } else {
+      const countries = [...new Set(countryCodes.map(String).filter((value) => /^[a-z]{2}$/iu.test(value)).map((value) => value.toUpperCase()))];
+      const sources = [...new Set(countryCodes.map(String).filter((value) => !/^[a-z]{2}$/iu.test(value)))];
+      if (countries.length) await this.database.prepare(`DELETE FROM sync_source_execution_state
+        WHERE country_code IN (${countries.map(() => '?').join(',')})`).bind(...countries).run();
+      if (sources.length) await this.database.prepare(`DELETE FROM sync_source_execution_state
+        WHERE source_id IN (${sources.map(() => '?').join(',')})`).bind(...sources).run();
+    }
+    return this.load();
+  }
+
+  async migrateCountry(countryCode, shardId, entry, migratedAt) {
+    await this.initialize();
+    await this.writeEntry(countryCode, shardId, entry, migratedAt);
   }
 }
 
@@ -315,7 +467,7 @@ export const createQueueSources = ({
   };
 
   const addressFacts = () => withDatabase(addressDatabase, {
-    policies: {}, counts: {}, rules: {}, shards: {},
+    policies: {}, counts: {}, rules: {}, shards: {}, durationSamples: { countries: {}, sources: {} },
     nodeTargetsUpdatedAt: {}, catalogVersion: '',
     deficits: { belowTarget: new Set(), belowFloor: new Set() }
   }, async (database) => {
@@ -364,13 +516,32 @@ export const createQueueSources = ({
       catalogVersion = rows.map((row) => [String(row.source), String(row.source_version || ''), String(row.source_checksum || '')])
         .map((row) => row.join(':')).join('|');
     } catch {}
+    const durationSamples = { countries: {}, sources: {} };
+    try {
+      const rows = (await database.prepare(`SELECT history.country_code,history.source_id,history.started_at,
+          history.completed_at,run.target_json
+        FROM sync_run_countries history JOIN sync_runs run ON run.id=history.run_id
+        WHERE history.status IN ('succeeded','failed','paused_quota') AND history.source_id<>''
+          AND history.started_at IS NOT NULL AND history.completed_at IS NOT NULL
+        ORDER BY history.completed_at DESC LIMIT 1000`).all()).results;
+      for (const row of rows) {
+        let target = {};
+        try { target = JSON.parse(String(row.target_json || '{}')); } catch {}
+        const shards = Array.isArray(target.shards) ? target.shards.map(String) : [];
+        if (shards.length !== 1 || shards[0].toLowerCase() === 'all' || shards[0] !== String(row.source_id)) continue;
+        const duration = timestamp(row.completed_at) - timestamp(row.started_at);
+        if (duration <= 0) continue;
+        (durationSamples.countries[String(row.country_code)] ||= []).push(duration);
+        (durationSamples.sources[String(row.source_id)] ||= []).push(duration);
+      }
+    } catch {}
     const deficits = { belowTarget: new Set(), belowFloor: new Set() };
     for (const goal of goals.values()) {
       if (goal.countryCode === 'CN' || !goal.enabled) continue;
       if (!goal.countMet) deficits.belowTarget.add(goal.countryCode);
       if (!goal.coverageMet || !goal.overrideMet) deficits.belowFloor.add(goal.countryCode);
     }
-    return { policies, counts, rules, shards, nodeTargetsUpdatedAt, catalogVersion, deficits };
+    return { policies, counts, rules, shards, nodeTargetsUpdatedAt, catalogVersion, durationSamples, deficits };
   });
 
   // Availability mirrors ControlStore.acquireCredential filters conservatively:
@@ -379,7 +550,7 @@ export const createQueueSources = ({
   // worker key supplied purely via environment) the quota is treated as
   // available so the country is never starved by missing bookkeeping.
   const quotaStatus = (provider, now = new Date()) => withDatabase(controlDatabase, {
-    provider, known: false, available: true, nextResetAt: null, revision: ''
+    provider, known: false, available: true, nextResetAt: null, waitState: null, revision: ''
   }, async (database) => {
     const rows = (await database.prepare(`SELECT id,status,cooldown_until,quota_period,quota_timezone_offset,
         provider_reported_reset_at,updated_at
@@ -389,28 +560,62 @@ export const createQueueSources = ({
       known: false,
       available: provider !== 'mappls',
       nextResetAt: null,
+      waitState: provider === 'mappls' ? 'blocked' : null,
       revision: ''
     };
     let available = false;
     let nextResetAt = 0;
+    let waitState = null;
+    const revisions = [];
     for (const row of rows) {
+      if (String(row.status || '') === 'needs_review') continue;
       const cooldownAt = timestamp(row.cooldown_until);
       const cooling = cooldownAt > now.getTime();
       const status = String(row.status || '');
-      if (status === 'healthy' && !cooling) available = true;
-      if ((status === 'cooldown' || status === 'quota_exhausted') && cooldownAt && !cooling) available = true;
-      const reported = timestamp(row.provider_reported_reset_at);
-      const reset = cooling ? cooldownAt : reported > now.getTime()
-        ? reported
-        : nextQuotaResetTime(String(row.quota_period || 'day'), Number(row.quota_timezone_offset || 0), now).getTime();
-      if (!nextResetAt || reset < nextResetAt) nextResetAt = reset;
+      const windows = (await database.prepare(`SELECT quota_window.service,quota_window.scope_id,quota_window.period,
+        quota_window.limit_count,quota_window.timezone_offset,quota_window.updated_at,
+        observation.used_count,observation.limit_count AS observed_limit,observation.reset_at,observation.observed_at
+        FROM provider_quota_windows quota_window LEFT JOIN provider_quota_observations observation
+          ON observation.credential_id=quota_window.credential_id AND observation.service=quota_window.service
+            AND observation.period=quota_window.period
+        WHERE quota_window.credential_id=? AND quota_window.enabled=1`).bind(row.id).all()).results;
+      let quotaBlockedUntil = 0;
+      for (const window of windows) {
+        const period = String(window.period || 'day');
+        const offset = Number(window.timezone_offset || 0);
+        const localUsed = Number(await database.prepare(`SELECT COALESCE(SUM(usage.accepted_count+usage.rejected_count),0) AS total
+          FROM provider_credentials credential JOIN provider_usage_periods usage ON usage.credential_id=credential.id
+          WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
+          .bind(window.scope_id, window.service, quotaPeriodStart(period, offset, now)).first('total') || 0);
+        const observed = window.observed_at && (!window.reset_at || timestamp(window.reset_at) > now.getTime());
+        const used = Math.max(localUsed, observed ? Number(window.used_count || 0) : 0);
+        const limit = observed && window.observed_limit !== null ? Number(window.observed_limit) : Number(window.limit_count);
+        if (used >= limit) {
+          const reset = observed && timestamp(window.reset_at) > now.getTime()
+            ? timestamp(window.reset_at) : nextQuotaResetTime(period, offset, now).getTime();
+          quotaBlockedUntil = Math.max(quotaBlockedUntil, reset);
+        }
+        revisions.push([row.id, window.service, period, used, limit, window.updated_at, window.observed_at]);
+      }
+      const blockedUntil = Math.max(cooling ? cooldownAt : 0, quotaBlockedUntil);
+      if (!blockedUntil && (status === 'healthy' || ['cooldown', 'quota_exhausted'].includes(status))) {
+        available = true;
+        continue;
+      }
+      if (blockedUntil && (!nextResetAt || blockedUntil < nextResetAt)) {
+        nextResetAt = blockedUntil;
+        waitState = quotaBlockedUntil >= (cooling ? cooldownAt : 0) ? 'quota_wait' : 'cooldown_wait';
+      }
     }
     return {
       provider,
       known: true,
       available,
       nextResetAt: nextResetAt ? new Date(nextResetAt).toISOString() : null,
-      revision: sha256(JSON.stringify(rows.map((row) => [row.id, row.status, row.updated_at]).sort()))
+      waitState,
+      revision: sha256(JSON.stringify([
+        ...rows.map((row) => [row.id, row.status, row.updated_at]), ...revisions
+      ].sort()))
     };
   });
 
@@ -570,7 +775,6 @@ export const computeQueueSnapshot = async ({
       : 0;
     const pausedWakeAt = sourceEntries.map((source) => source.paused ? source.nextAttempt : 0)
       .filter((value) => value > now.getTime()).sort((left, right) => left - right)[0] || 0;
-    const failedShards = selectedSource?.stored.status === 'failed' ? [selectedSource.stored] : [];
     const entry = {
       countryCode,
       deficit: Math.max(0, target - current),
@@ -604,55 +808,68 @@ export const computeQueueSnapshot = async ({
       quotaProvider: provider,
       quotaAvailable: quota ? quota.available : true,
       quotaResetAt: quota?.nextResetAt || null,
-      deterministicFailure: failedShards.length > 0
-        && failedShards.every((shard) => deterministicFailureCodes.has(shard.failureCode)),
       intervalDays: Number(selectedSource?.shard.intervalDays || 1),
       consecutiveFailures: selectedSource?.matches ? Number(selectedSource.saved.consecutiveFailures || 0) : 0,
       failureCode: selectedSource?.matches ? selectedSource.saved.failureCode || null : null,
       nextAttemptAt: null,
       reason: null,
+      lastDispatchedAt: persisted.updatedAt || null,
       position: null
     };
+    const sourceDurations = facts.durationSamples?.sources?.[selectedSource?.shard.id] || [];
+    const countryDurations = facts.durationSamples?.countries?.[countryCode] || [];
+    entry.eta = estimateDuration(sourceDurations) || estimateDuration(countryDurations);
     if (running.has(countryCode)) {
       entry.state = 'running';
       entry.jobId = runningJob?.id || null;
       entry.jobPhase = runningJob?.phase || null;
       entry.heartbeatAt = runningJob?.heartbeatAt || null;
       entry.deadlineAt = runningJob?.deadlineAt || null;
+      if (entry.eta && runningJob?.startedAt) {
+        entry.eta = {
+          ...entry.eta,
+          estimatedCompletionAt: new Date(timestamp(runningJob.startedAt) + entry.eta.p80Ms).toISOString(),
+          remainingMedianMs: Math.max(0, timestamp(runningJob.startedAt) + entry.eta.medianMs - now.getTime()),
+          remainingP80Ms: Math.max(0, timestamp(runningJob.startedAt) + entry.eta.p80Ms - now.getTime())
+        };
+      }
     } else if (!belowTarget && !belowFloor) {
       entry.state = 'done';
     } else if (legacyPauseActive) {
-      entry.state = 'source_limited';
+      entry.state = persistedState === 'checked' ? 'scheduled_wait'
+        : persistedState === 'suspended' ? 'suspended' : 'source_limited';
       entry.reason = persisted.reason || (persistedState === 'checked' ? CHECKED_REASON : LATCH_REASON);
       entry.latchedAt = persisted.latchedAt || null;
       entry.nextAttemptAt = persistedNextAttempt ? new Date(persistedNextAttempt).toISOString() : null;
     } else if (!configuredShards.length || !shardCountries.has(countryCode)) {
-      entry.state = 'source_limited';
+      entry.state = 'no_source';
       entry.reason = 'no_source_shard';
     } else if (!selectedSource) {
-      entry.state = 'source_limited';
       const suspended = sourceEntries.find((source) => source.savedState === 'suspended');
       const checked = sourceEntries.find((source) => source.savedState === 'checked');
-      entry.reason = suspended?.saved.reason || checked?.saved.reason || LATCH_REASON;
+      const exhausted = sourceEntries.find((source) => source.savedState === 'latched');
+      entry.state = suspended ? 'suspended' : checked ? 'scheduled_wait' : 'source_limited';
+      entry.reason = suspended?.saved.reason || checked?.saved.reason || exhausted?.saved.reason || LATCH_REASON;
       entry.nextAttemptAt = pausedWakeAt ? new Date(pausedWakeAt).toISOString() : null;
     } else if (provider && quota && !quota.available) {
-      entry.state = 'waiting_quota';
+      entry.state = quota.waitState === 'cooldown_wait' ? 'cooldown_wait' : 'quota_wait';
       entry.nextAttemptAt = quota.nextResetAt;
       entry.reason = provider;
+    } else if (delayedUntil) {
+      entry.state = 'retry_wait';
+      entry.nextAttemptAt = new Date(delayedUntil).toISOString();
+      entry.reason = BACKOFF_REASON;
     } else {
       entry.state = 'queued';
-      if (delayedUntil) {
-        entry.nextAttemptAt = new Date(delayedUntil).toISOString();
-        entry.reason = 'retry_backoff';
-      }
     }
     entries.push(entry);
   }
-  const ready = orderRunnable(entries.filter((entry) => entry.state === 'queued' && !entry.nextAttemptAt));
-  const delayed = entries.filter((entry) => entry.state === 'queued' && entry.nextAttemptAt)
-    .sort((left, right) => timestamp(left.nextAttemptAt) - timestamp(right.nextAttemptAt));
-  [...ready, ...delayed].forEach((entry, index) => { entry.position = index + 1; });
-  const stateRank = { running: 0, queued: 1, waiting_quota: 2, source_limited: 3, done: 4 };
+  const ready = orderRunnable(entries.filter((entry) => entry.state === 'queued'));
+  ready.forEach((entry, index) => { entry.position = index + 1; });
+  const stateRank = {
+    running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, scheduled_wait: 5,
+    source_limited: 6, suspended: 7, no_source: 8, done: 9
+  };
   entries.sort((left, right) => (stateRank[left.state] - stateRank[right.state])
     || ((left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER))
     || left.countryCode.localeCompare(right.countryCode));
@@ -679,6 +896,7 @@ export const createSyncQueue = ({
   stateDir,
   addressDatabase,
   controlDatabase,
+  history = null,
   sources: providedSources,
   loadCatalog = loadSourceCatalog,
   now = () => new Date(),
@@ -688,7 +906,10 @@ export const createSyncQueue = ({
   backoffBaseMs = integer(environment.SYNC_QUEUE_BACKOFF_BASE_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
   backoffCapMs = integer(environment.SYNC_QUEUE_BACKOFF_CAP_MS, 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000)
 }) => {
-  const store = new QueueStateStore(resolve(stateDir, 'queue-state.json'));
+  const legacyStateFile = resolve(stateDir, 'queue-state.json');
+  const store = addressDatabase
+    ? new PostgresQueueStateStore(addressDatabase, legacyStateFile)
+    : new QueueStateStore(legacyStateFile);
   const sources = providedSources || createQueueSources({
     addressDatabase, controlDatabase
   });
@@ -752,7 +973,7 @@ export const createSyncQueue = ({
         const countryCode = configuredShard?.countryCode || requested.toUpperCase();
         if (!/^[A-Z]{2}$/u.test(countryCode)) continue;
         const entry = await countryEntry(countryCode);
-        if (!entry || ['done', 'source_limited'].includes(entry.state)) continue;
+        if (!entry || ['done', 'source_limited', 'suspended', 'no_source'].includes(entry.state)) continue;
         const shardId = configuredShard?.id || entry.runnableShardId;
         if (!shardId) continue;
         const completedAt = job.completedAt || now().toISOString();
@@ -777,7 +998,13 @@ export const createSyncQueue = ({
   // coordinator, evaluate the outcome. Returns milliseconds to sleep before
   // the next pass (0 means continue immediately).
   const tick = async () => {
+    await history?.schedulerHeartbeat(coordinator.currentJob?.id || null);
     const snap = await queueSnapshot();
+    await Promise.all(snap.entries.filter((entry) => entry.state === 'quota_wait' && entry.runnableShardId)
+      .map((entry) => history?.repairQuotaWait?.({
+        countryCode: entry.countryCode,
+        sourceId: entry.runnableShardId
+      })));
     if (coordinator.currentJob) {
       await coordinator.waitForIdle();
       return 0;
@@ -798,7 +1025,7 @@ export const createSyncQueue = ({
     log.log?.(`[sync-queue] ${pick.countryCode} start deficit=${pick.deficit} current=${pick.current} target=${pick.target}`);
     const shardId = pick.runnableShardId;
     if (!shardId) return rescanMs;
-    const result = await coordinator.trigger('scheduled', { shards: [shardId] });
+    const result = await coordinator.trigger('queue', { shards: [shardId] });
     if (!result.accepted) {
       await coordinator.waitForIdle();
       return 0;
@@ -815,7 +1042,7 @@ export const createSyncQueue = ({
       fingerprintBefore: pick.sourceFingerprints[shardId],
       fingerprintAfter: after?.sourceFingerprints?.[shardId] ?? pick.sourceFingerprints[shardId],
       failureFingerprintAfter: after?.failureFingerprints?.[shardId] ?? pick.failureFingerprints[shardId],
-      deterministicFailure: Boolean(after?.deterministicFailure),
+      deterministicFailure: deterministicFailureCodes.has(String(job?.errorCode || '')),
       quotaBound: pick.quotaBound,
       quotaAvailable: after?.quotaAvailable ?? true,
       quotaResetAt: after?.quotaResetAt ?? null,
@@ -829,6 +1056,13 @@ export const createSyncQueue = ({
       probeIntervalMs: Math.max(60_000, Number(pick.intervalDays || 1) * 24 * 60 * 60_000)
     });
     await store.apply(pick.countryCode, evaluation, completedAt, shardId);
+    if (evaluation.action === 'waiting_quota') {
+      await history?.pauseForQuota({
+        runId: result.job.id,
+        countryCode: pick.countryCode,
+        sourceId: shardId
+      });
+    }
     log.log?.(`[sync-queue] ${pick.countryCode} ${evaluation.action} growth=${(after?.current ?? pick.current) - pick.current}`);
     return cooldownMs;
   };

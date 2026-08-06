@@ -5,9 +5,10 @@ import { createSyncApi } from './api.mjs';
 import { createSyncArtifactCleanup } from './artifact-cleanup.mjs';
 import { createPostgresPool, initializePostgres, PostgresDatabase } from '../database/postgres.mjs';
 import { SyncCoordinator } from './coordinator.mjs';
+import { SyncHistoryStore } from './history-store.mjs';
 import { createSyncQueue } from './queue.mjs';
 import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync.mjs';
-import { startDailyScheduler, startInitialScheduler, triggerStartupSync } from './scheduler.mjs';
+import { startDailyScheduler } from './scheduler.mjs';
 import { loadSourceCatalog } from './source-adapters.mjs';
 
 const integer = (value, fallback, minimum, maximum) => {
@@ -50,14 +51,20 @@ export const createSyncRuntime = async ({
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
-  const initialStateFile = resolve(stateDir, 'initial-schedule.json');
+  let catalogPromise;
+  const catalogShards = () => (catalogPromise ||= loadSourceCatalog(undefined, environment).then((catalog) => catalog.shards));
+  const history = new SyncHistoryStore(queueDatabase, { catalogShards, now });
+  await history.repairInterruptedRuns();
+  await history.repairLegacyProjections();
   const coordinator = new SyncCoordinator({
     stateDir,
     now,
+    history,
     jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 90 * 60_000, 60_000, 24 * 60 * 60_000),
-    runSync: ({ id, trigger, shards, signal }) => runSync({
+    runSync: ({ id, trigger, shards, signal, onProgress }) => runSync({
       releaseId: id,
       signal,
+      onProgress,
       database,
       environment: {
         ...environment,
@@ -83,7 +90,8 @@ export const createSyncRuntime = async ({
     now,
     addressDatabase: queueDatabase,
     controlDatabase: queueDatabase,
-    loadCatalog: () => loadSourceCatalog(undefined, environment)
+    history,
+    loadCatalog: async () => ({ shards: await catalogShards() })
   });
   const handler = createSyncApi({
     coordinator,
@@ -93,7 +101,6 @@ export const createSyncRuntime = async ({
   });
   const api = (request) => handler(stripPrefix(request));
   let stopScheduler;
-  let stopInitialScheduler;
   let stopQueue;
   return {
     api,
@@ -104,27 +111,18 @@ export const createSyncRuntime = async ({
       if (!enabled(environment.SYNC_SCHEDULER_ENABLED)) return () => {};
       if (stopScheduler) return stopScheduler;
       stopQueue = queue.start();
-      stopScheduler = startDailyScheduler({ coordinator, stateFile: scheduleStateFile, utcHour, now });
-      if (startup) {
-        stopInitialScheduler = startInitialScheduler({
-          coordinator,
-          stateFile: initialStateFile,
-          now,
-          retryBaseMs: integer(environment.SYNC_INITIAL_RETRY_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
-          onComplete: () => void triggerStartupSync(coordinator, {
-            stateFile: scheduleStateFile,
-            utcHour,
-            now,
-            maxAttempts: integer(environment.SYNC_DAILY_MAX_ATTEMPTS, 3, 1, 10),
-            retryBaseMs: integer(environment.SYNC_DAILY_RETRY_MS, 60_000, 1_000, 60 * 60_000)
-          }).catch((error) => {
-            console.error('Address synchronization startup check failed', error);
-          })
-        });
-      }
+      stopScheduler = startDailyScheduler({
+        coordinator,
+        stateFile: scheduleStateFile,
+        utcHour,
+        now,
+        wakePlanner: async () => {
+          await history.schedulerHeartbeat(coordinator.currentJob?.id || null);
+          queue.poke();
+        }
+      });
+      if (startup) queue.poke();
       return () => {
-        stopInitialScheduler?.();
-        stopInitialScheduler = undefined;
         stopScheduler?.();
         stopScheduler = undefined;
         stopQueue?.();
@@ -134,8 +132,6 @@ export const createSyncRuntime = async ({
     close: async () => {
       stopScheduler?.();
       stopScheduler = undefined;
-      stopInitialScheduler?.();
-      stopInitialScheduler = undefined;
       stopQueue = undefined;
       await artifactCleanup?.stop();
       await queue.stop();

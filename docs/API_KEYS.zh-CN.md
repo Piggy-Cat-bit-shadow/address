@@ -21,6 +21,8 @@
 
 服务端同步 Key 不得与浏览器地图 Key 共用。
 
+高德[基础服务价格与配额页](https://lbs.amap.com/pages/base_service_price)列出的个人认证基础搜索默认值为每月 `5,000` 次、`3 QPS`。官方[错误码表](https://lbs.amap.com/api/webservice/guide/tools/info/)中，`10003` 为日访问量超限并于次日 `00:00` 解封，`10004` 为单位时间访问超限并于下一分钟解封；`40000` 属于余额或套餐额度耗尽。系统分别记录分钟冷却、日窗口和月窗口，不会用一分钟冷却覆盖日/月额度状态。
+
 ### 高德 JavaScript 地图
 
 1. 单独创建 **JavaScript API** Key 和安全密钥。
@@ -38,6 +40,8 @@
 
 请参考[百度 Web API 官方文档](https://lbsyun.baidu.com/faq/api?title=webapi%2Fguide%2Fwebservice-placeapi)。额度、无效 AK、服务未开启及 IP/签名错误只影响对应凭据。
 
+百度[开发者权益说明](https://lbsyun.baidu.com/solutions/privilege)列出的个人地点检索默认值为每日 `100` 次、`3 QPS`。套餐或控制台显示不同值时，以当前账户控制台为准。
+
 ### 腾讯位置服务
 
 1. 进入[腾讯位置服务控制台](https://lbs.qq.com/dev/console/application/mine)创建应用和 Key。
@@ -46,6 +50,8 @@
 4. 设置 `TENCENT_API_KEY`、编号变量，或在后台逐个添加。
 
 腾讯[官方状态码表](https://lbs.qq.com/service/webService/webServiceGuide/status)说明：`120` 为每秒请求量上限，`121` 为每日调用量上限。响应头 `X-LIMIT` 可提供实时用量，最终以控制台为准。
+
+腾讯[WebService 配额说明](https://lbs.qq.com/webservice_v1/guide-quota.html)列出的初始默认值为每日 `10,000` 次、`5 QPS`。若 `X-LIMIT` 或控制台返回更小或更大的实际值，系统保存该日窗口的实际值并优先采用。
 
 ### Mappls Search API
 
@@ -77,10 +83,10 @@
 ### Geoapify
 
 1. 在 [Geoapify MyProjects](https://myprojects.geoapify.com/) 创建账号和项目。
-2. 复制项目 Key，并查看[官方价格与额度](https://www.geoapify.com/pricing/)。
-3. 设置 `GEOAPIFY_API_KEY`；API 侧需要轮换时也可以在后台添加。
+2. 复制项目 Key，并查看[反向地理编码文档](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/)和[官方价格与额度](https://www.geoapify.com/pricing/)。
+3. 在“后台 → 服务凭据 → Geoapify”逐个添加 Key。`GEOAPIFY_API_KEY`、`GEOAPIFY_API_KEY_2` 等环境变量只用于首次部署导入。
 
-韩国 K-apt 首次导入需要该环境变量来核验邮编。不要在配置文档中写死额度，套餐和接口 credits 可能变化。
+韩国 K-apt 每次核验邮编前都从加密凭据池取 Key，并分别回写认证失败、限速、额度等待和暂时失败。全部 Key 不可用时，同步等待数据库记录的最早恢复时间。同一项目或账户共享额度的 Key 必须配置相同的额度作用域。Geoapify 当前每次 Reverse Geocoding 消耗一个 credit；套餐可能变化，因此后台额度仍可编辑。`429` 响应优先遵循 `Retry-After`；平台没有返回重置时间时，按该凭据配置的时区计算本地日额度窗口。
 
 ### 新加坡 OneMap
 
@@ -134,7 +140,7 @@ openssl rand -base64 36   # 管理员与 PostgreSQL 密码
 
 ## 轮换与冷却
 
-系统按启用状态、QPS、额度、有效期、冷却时间和最近使用时间选择凭据。单个 Key 失败后，本轮只排除该 Key，并继续使用其他可用 Key。额度耗尽时等待平台返回的恢复时间或配置周期边界；短暂错误使用有上限的指数冷却。全部 Key 暂不可用时，任务等待最早恢复的 Key，而不会永久停用整个平台。
+系统按启用状态、QPS、额度、有效期、冷却时间和最近使用时间选择凭据。一个 Key 可以同时拥有日/月多个额度窗口，任一窗口耗尽都会轮换到其他 Key。单个 Key 失败后，本轮只排除该 Key，并继续使用其他可用 Key。额度耗尽时等待平台返回的恢复时间或对应周期边界；QPS 和分钟限制只进入短冷却。全部 Key 暂不可用时，任务等待最早恢复的 Key，而不会永久停用整个平台。
 
 官方控制台和响应头优先于文档示例。创建凭据时应在后台正确配置服务名称、周期、上限、时区边界和可选的共享额度组。
 
@@ -145,4 +151,4 @@ openssl rand -base64 36   # 管理员与 PostgreSQL 密码
 3. 只在管理后台测试凭据，不把完整值复制到日志或截图。
 4. 若凭据曾被显示，立即轮换。
 
-官方页面核对日期：2026-08-04。平台条款、套餐、额度和控制台流程可能变化。
+官方页面核对日期：2026-08-05。平台条款、套餐、额度和控制台流程可能变化。

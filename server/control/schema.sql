@@ -90,6 +90,33 @@ CREATE TABLE IF NOT EXISTS provider_usage_periods (
   PRIMARY KEY (credential_id, period_start)
 );
 
+CREATE TABLE IF NOT EXISTS provider_quota_windows (
+  id BIGSERIAL PRIMARY KEY,
+  credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
+  service TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  period TEXT NOT NULL CHECK (period IN ('day','month')),
+  limit_count INTEGER NOT NULL CHECK (limit_count BETWEEN 1 AND 100000000),
+  timezone_offset INTEGER NOT NULL DEFAULT 480 CHECK (timezone_offset BETWEEN -720 AND 840),
+  source TEXT NOT NULL DEFAULT 'default' CHECK (source IN ('default','admin','provider')),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (credential_id, service, period)
+);
+
+CREATE TABLE IF NOT EXISTS provider_quota_observations (
+  credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
+  service TEXT NOT NULL,
+  period TEXT NOT NULL CHECK (period IN ('day','month')),
+  used_count INTEGER NOT NULL CHECK (used_count >= 0),
+  limit_count INTEGER NOT NULL CHECK (limit_count > 0),
+  reset_at TEXT,
+  observed_at TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'provider' CHECK (source IN ('provider','local')),
+  PRIMARY KEY (credential_id, service, period)
+);
+
 CREATE TABLE IF NOT EXISTS browser_map_credentials (
   provider TEXT PRIMARY KEY CHECK (provider = 'amap'),
   label TEXT NOT NULL,
@@ -119,6 +146,42 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_run_countries (
+  run_id TEXT NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
+  country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  source_id TEXT NOT NULL DEFAULT '',
+  trigger_name TEXT NOT NULL DEFAULT 'scheduled',
+  status TEXT NOT NULL CHECK (status IN ('queued','running','paused_quota','needs_review','succeeded','failed','cancelled')),
+  started_at TEXT,
+  completed_at TEXT,
+  heartbeat_at TEXT,
+  deadline_at TEXT,
+  before_count INTEGER,
+  after_count INTEGER,
+  net_growth INTEGER,
+  candidate_count INTEGER,
+  accepted_count INTEGER,
+  rejected_count INTEGER,
+  rejection_reasons_json TEXT NOT NULL DEFAULT '{}' CHECK (rejection_reasons_json IS JSON),
+  metrics_json TEXT NOT NULL DEFAULT '{}' CHECK (metrics_json IS JSON),
+  before_goals_json TEXT NOT NULL DEFAULT '{}' CHECK (before_goals_json IS JSON),
+  after_goals_json TEXT NOT NULL DEFAULT '{}' CHECK (after_goals_json IS JSON),
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, country_code, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_scheduler_state (
+  scheduler_id TEXT PRIMARY KEY,
+  leader_token TEXT,
+  heartbeat_at TEXT,
+  last_planned_at TEXT,
+  active_run_id TEXT REFERENCES sync_runs(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
   id BIGSERIAL PRIMARY KEY,
   actor TEXT NOT NULL,
@@ -136,13 +199,30 @@ CREATE TABLE IF NOT EXISTS rate_limit_buckets (
 
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_provider_credentials_pick ON provider_credentials(provider,enabled,status,cooldown_until,last_used_at);
+CREATE INDEX IF NOT EXISTS idx_provider_quota_windows_credential ON provider_quota_windows(credential_id,enabled,period);
+CREATE INDEX IF NOT EXISTS idx_provider_quota_observations_reset ON provider_quota_observations(reset_at);
 CREATE INDEX IF NOT EXISTS idx_sync_runs_created ON sync_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_run_countries_history ON sync_run_countries(country_code,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_run_countries_status ON sync_run_countries(status,heartbeat_at);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 
 ALTER TABLE provider_credentials DROP CONSTRAINT IF EXISTS provider_credentials_provider_check;
 ALTER TABLE provider_credentials ADD CONSTRAINT provider_credentials_provider_check
   CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding','mappls'));
 
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS candidate_count INTEGER;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS accepted_count INTEGER;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS rejected_count INTEGER;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS rejection_reasons_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS metrics_json TEXT NOT NULL DEFAULT '{}';
+
+INSERT INTO provider_quota_windows(
+  credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+)
+SELECT id,quota_service,quota_scope_id,quota_period,quota_limit,quota_timezone_offset,'default',enabled,created_at,updated_at
+FROM provider_credentials
+ON CONFLICT (credential_id,service,period) DO NOTHING;
+
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 9) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 11) AS version
 ON CONFLICT (version) DO NOTHING;

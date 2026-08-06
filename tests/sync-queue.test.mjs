@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openTestDatabase } from './helpers/postgres-test-database.mjs';
+import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { createSyncApi } from '../server/sync/api.mjs';
 import {
   computeQueueSnapshot, countryFingerprint, createQueueSources, createSyncQueue, evaluateAttempt,
-  legacyCountryFingerprint, nextQuotaResetTime, nextWakeAt, orderRunnable, QueueStateStore
+  estimateDuration, legacyCountryFingerprint, nextQuotaResetTime, nextWakeAt, orderRunnable,
+  PostgresQueueStateStore, QueueStateStore
 } from '../server/sync/queue.mjs';
 
 const directories = [];
@@ -39,6 +40,55 @@ describe('queue ordering', () => {
       { countryCode: 'BB', deficit: 900, quotaBound: true, quotaAvailable: true, quotaResetAt: '2026-08-03T00:00:00Z' }
     ]);
     expect(ordered.map((entry) => entry.countryCode)).toEqual(['BB', 'AA']);
+  });
+
+  it('rotates unmetered work to a country that has not run recently', () => {
+    const ordered = orderRunnable([
+      { countryCode: 'US', deficit: 40_000, lastDispatchedAt: '2026-08-05T05:00:00Z' },
+      { countryCode: 'ZA', deficit: 100, lastDispatchedAt: null }
+    ]);
+    expect(ordered.map((entry) => entry.countryCode)).toEqual(['ZA', 'US']);
+  });
+});
+
+describe('duration estimates', () => {
+  it('requires three clean samples and reports median and p80', () => {
+    expect(estimateDuration([30_000, 60_000])).toBeNull();
+    expect(estimateDuration([30_000, 60_000, 90_000, 120_000, 150_000])).toEqual({
+      sampleCount: 5, medianMs: 90_000, p80Ms: 120_000
+    });
+  });
+
+  it('builds ETA samples only from exact single-source runs', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    await database.prepare(`INSERT INTO sync_country_policies(
+      country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,updated_at
+    ) VALUES ('US',1,100,0,0,0,0,'2026-08-01T00:00:00Z')`).run();
+    const samples = [10, 20, 30];
+    for (const [index, minutes] of samples.entries()) {
+      const id = `exact-${index}`;
+      const completedAt = new Date(Date.UTC(2026, 7, 5, 0, minutes)).toISOString();
+      await database.prepare(`INSERT INTO sync_runs(
+        id,kind,target_json,status,progress_json,created_at,started_at,completed_at,updated_at
+      ) VALUES (?,'address-pool',?,'succeeded','{}','2026-08-05T00:00:00Z','2026-08-05T00:00:00Z',?,?)`)
+        .bind(id, JSON.stringify({ shards: ['oa-us'] }), completedAt, completedAt).run();
+      await database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,started_at,completed_at,created_at,updated_at
+      ) VALUES (?,'US','oa-us','queue','succeeded','2026-08-05T00:00:00Z',?,'2026-08-05T00:00:00Z',?)`)
+        .bind(id, completedAt, completedAt).run();
+    }
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,created_at,started_at,completed_at,updated_at
+    ) VALUES ('legacy-all','address-pool','{"shards":["all"]}','failed','{}','2026-08-04T00:00:00Z',
+      '2026-08-04T00:00:00Z','2026-08-04T12:00:00Z','2026-08-04T12:00:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,started_at,completed_at,created_at,updated_at
+    ) VALUES ('legacy-all','US','oa-us','startup','failed','2026-08-04T00:00:00Z','2026-08-04T12:00:00Z',
+      '2026-08-04T00:00:00Z','2026-08-04T12:00:00Z')`).run();
+    const facts = await createQueueSources({ addressDatabase: database, controlDatabase: database }).addressFacts();
+    expect(facts.durationSamples.sources['oa-us']).toEqual([30 * 60_000, 20 * 60_000, 10 * 60_000]);
+    database.close();
   });
 });
 
@@ -93,6 +143,17 @@ describe('attempt evaluation and latching', () => {
     expect(second).toMatchObject({ action: 'suspend', consecutiveFailures: 2, failureCode: 'SYNC_PROCESS_TIMEOUT' });
   });
 
+  it('treats PostgreSQL statement cancellation as a bounded timeout failure', () => {
+    const first = evaluateAttempt({
+      ...base, jobSucceeded: false, netGrowth: 0, failureCode: '57014', consecutiveFailures: 0
+    });
+    expect(first).toMatchObject({ action: 'backoff', consecutiveFailures: 1, failureCode: '57014' });
+    const second = evaluateAttempt({
+      ...base, jobSucceeded: false, netGrowth: 0, failureCode: '57014', consecutiveFailures: 1
+    });
+    expect(second).toMatchObject({ action: 'suspend', consecutiveFailures: 2, failureCode: '57014' });
+  });
+
   it('moves quota-bound countries to waiting_quota instead of latching when the quota is spent', () => {
     const result = evaluateAttempt({
       ...base, jobSucceeded: false, netGrowth: 0,
@@ -116,6 +177,63 @@ describe('attempt evaluation and latching', () => {
     expect(countryFingerprint({ ...inputs, sourceVersions: [['shard-a', 'v2']] })).not.toBe(fingerprint);
     expect(legacyCountryFingerprint({ importRevision: 'rev-1', sourceVersions: inputs.sourceVersions }))
       .not.toBe(legacyCountryFingerprint({ importRevision: 'rev-2', sourceVersions: inputs.sourceVersions }));
+  });
+});
+
+describe('PostgreSQL queue state', () => {
+  it('imports the legacy state once and persists per-source execution state', async () => {
+    const database = openTestDatabase();
+    const directory = stateDir();
+    const legacyFile = resolve(directory, 'queue-state.json');
+    await mkdir(directory, { recursive: true });
+    await writeFile(legacyFile, JSON.stringify({ schemaVersion: 1, countries: {
+      NL: { shards: { 'oa-nl': {
+        state: 'latched', latched: true, reason: 'source_limited_cache', fingerprint: 'fp-nl',
+        latchedAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z'
+      } } }
+    } }));
+    const store = new PostgresQueueStateStore(database, legacyFile);
+    expect(await store.load()).toMatchObject({ countries: { NL: { shards: { 'oa-nl': {
+      state: 'latched', fingerprint: 'fp-nl'
+    } } } } });
+    await expect(readFile(legacyFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await database.prepare(`SELECT state,source_fingerprint FROM sync_source_execution_state
+      WHERE country_code='NL' AND source_id='oa-nl'`).first()).toEqual({ state: 'exhausted', source_fingerprint: 'fp-nl' });
+    await store.apply('NL', { action: 'backoff', fingerprint: 'failure-fp', consecutiveFailures: 1,
+      failureCode: 'NETWORK', nextAttemptAt: '2026-08-02T01:00:00Z' }, '2026-08-02T00:00:00Z', 'oa-nl');
+    expect(await store.load()).toMatchObject({ countries: { NL: { shards: { 'oa-nl': {
+      state: 'backoff', fingerprint: 'failure-fp', consecutiveFailures: 1
+    } } } } });
+    database.close();
+  });
+
+  it('removes an obsolete legacy file when PostgreSQL already has state', async () => {
+    const database = openTestDatabase();
+    const directory = stateDir();
+    const legacyFile = resolve(directory, 'queue-state.json');
+    await mkdir(directory, { recursive: true });
+    await writeFile(legacyFile, JSON.stringify({ countries: { US: { state: 'latched' } } }));
+    await database.prepare(`INSERT INTO sync_source_execution_state(
+      country_code,source_id,state,consecutive_failures,updated_at
+    ) VALUES ('NL','oa-nl','checked',0,'2026-08-01T00:00:00Z')`).run();
+    const store = new PostgresQueueStateStore(database, legacyFile);
+    expect(await store.load()).toMatchObject({ countries: { NL: { shards: { 'oa-nl': { state: 'checked' } } } } });
+    await expect(readFile(legacyFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    database.close();
+  });
+
+  it('clears one exact source without unlocking the other sources in its country', async () => {
+    const database = openTestDatabase();
+    const store = new PostgresQueueStateStore(database, resolve(stateDir(), 'queue-state.json'));
+    await store.apply('US', { action: 'latch', fingerprint: 'fp-a', latchedAt: '2026-08-01T00:00:00Z' },
+      '2026-08-01T00:00:00Z', 'oa-us-a');
+    await store.apply('US', { action: 'latch', fingerprint: 'fp-b', latchedAt: '2026-08-01T00:00:00Z' },
+      '2026-08-01T00:00:00Z', 'oa-us-b');
+    await store.clear(['oa-us-a']);
+    const state = await store.load();
+    expect(state.countries.US.shards['oa-us-a']).toBeUndefined();
+    expect(state.countries.US.shards['oa-us-b']).toMatchObject({ state: 'latched' });
+    database.close();
   });
 });
 
@@ -215,8 +333,8 @@ describe('queue snapshot', () => {
     expect(byCountry.CN).toBeUndefined();
     expect(byCountry.TR).toBeUndefined();
     expect(byCountry.SG.state).toBe('done');
-    expect(byCountry.NG).toMatchObject({ state: 'source_limited', reason: 'no_source_shard', position: null });
-    expect(byCountry.KR).toMatchObject({ state: 'waiting_quota', nextAttemptAt: '2026-08-03T00:03:00Z', quotaBound: true });
+    expect(byCountry.NG).toMatchObject({ state: 'no_source', reason: 'no_source_shard', position: null });
+    expect(byCountry.KR).toMatchObject({ state: 'quota_wait', nextAttemptAt: '2026-08-03T00:03:00Z', quotaBound: true });
     expect(byCountry.NL).toMatchObject({ state: 'queued', position: 1, deficit: 18_554 });
     expect(byCountry.US).toMatchObject({ state: 'queued', position: 2, deficit: 62, target: 50_000, current: 49_938 });
     expect(byCountry.US.rules).toMatchObject({
@@ -356,7 +474,7 @@ describe('queue snapshot', () => {
       sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
     });
     expect(stopped.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
-      state: 'source_limited', reason: 'retry_suspended', nextAttemptAt: null
+      state: 'suspended', reason: 'retry_suspended', nextAttemptAt: null
     });
     facts.shards.NL[0].sourceVersion = 'v2';
     const resumed = await computeQueueSnapshot({
@@ -427,7 +545,7 @@ describe('queue engine', () => {
     });
 
     expect(await queue.tick()).toBe(0);
-    expect(coordinator.calls).toEqual([{ trigger: 'scheduled', shards: ['oa-nl'] }]);
+    expect(coordinator.calls).toEqual([{ trigger: 'queue', shards: ['oa-nl'] }]);
     const state = await queue.store.load();
     expect(state.countries.NL.shards['oa-nl']).toMatchObject({ latched: true, reason: 'source_limited_cache' });
 
@@ -460,9 +578,10 @@ describe('queue engine', () => {
     const afterFailure = await queue.store.load();
     expect(afterFailure.countries.US.shards['oa-us']).toMatchObject({ latched: false, consecutiveFailures: 1 });
     const entry = (await queue.snapshot()).entries.find((value) => value.countryCode === 'US');
-    expect(entry.state).toBe('queued');
+    expect(entry.state).toBe('retry_wait');
     expect(entry.reason).toBe('retry_backoff');
     expect(Date.parse(entry.nextAttemptAt)).toBeGreaterThan(Date.now());
+    expect(entry.position).toBeNull();
 
     coordinator.jobStatus = 'succeeded';
     coordinator.trigger = async (trigger, { shards }) => {
@@ -481,7 +600,69 @@ describe('queue engine', () => {
       state: 'checked', reason: 'source_version_checked', consecutiveFailures: 0
     });
     expect((await queue.snapshot()).entries.find((value) => value.countryCode === 'US'))
-      .toMatchObject({ state: 'source_limited', reason: 'source_version_checked' });
+      .toMatchObject({ state: 'scheduled_wait', reason: 'source_version_checked' });
+  });
+
+  it('updates exact-source history only after the queue confirms quota exhaustion', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['KR']);
+    let quotaAvailable = true;
+    const historyCalls = [];
+    const coordinator = fakeCoordinator();
+    coordinator.jobStatus = 'failed';
+    coordinator.trigger = async (trigger, { shards }) => {
+      coordinator.calls.push({ trigger, shards });
+      quotaAvailable = false;
+      return { accepted: true, job: { id: 'sync-quota' } };
+    };
+    coordinator.getJob = async () => ({
+      id: 'sync-quota', status: 'failed', errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE'
+    });
+    const queue = createSyncQueue({
+      environment: {}, coordinator, stateDir: stateDir(),
+      sources: {
+        ...stubSources(facts, {}),
+        quotaStatus: async () => ({
+          provider: 'geoapify', known: true, available: quotaAvailable,
+          nextResetAt: '2026-08-03T00:03:00Z'
+        })
+      },
+      history: {
+        schedulerHeartbeat: async () => {},
+        pauseForQuota: async (value) => { historyCalls.push(value); }
+      },
+      loadCatalog: async () => ({ shards: stubCatalogShards }),
+      cooldownMs: 0,
+      log: { log: () => {}, error: () => {} }
+    });
+    await queue.tick();
+    expect(historyCalls).toEqual([{
+      runId: 'sync-quota', countryCode: 'KR', sourceId: 'korea-kapt-residential'
+    }]);
+  });
+
+  it('repairs a pre-deployment quota failure from the confirmed queue snapshot', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['KR']);
+    const repairs = [];
+    const queue = createSyncQueue({
+      environment: {}, coordinator: fakeCoordinator(), stateDir: stateDir(),
+      sources: stubSources(facts, {
+        geoapify: {
+          provider: 'geoapify', known: true, available: false,
+          nextResetAt: '2026-08-03T00:03:00Z'
+        }
+      }),
+      history: {
+        schedulerHeartbeat: async () => {},
+        repairQuotaWait: async (value) => { repairs.push(value); }
+      },
+      loadCatalog: async () => ({ shards: stubCatalogShards }),
+      cooldownMs: 0,
+      log: { log: () => {}, error: () => {} }
+    });
+    expect(await queue.tick()).toBeGreaterThan(0);
+    expect(repairs).toEqual([{ countryCode: 'KR', sourceId: 'korea-kapt-residential' }]);
   });
 });
 

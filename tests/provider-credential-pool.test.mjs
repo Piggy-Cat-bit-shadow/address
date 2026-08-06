@@ -61,4 +61,33 @@ describe('provider credential pool', () => {
     expect(await database.prepare('SELECT accepted_count,rejected_count FROM provider_usage_periods WHERE credential_id=?')
       .bind(id).first()).toEqual({ accepted_count: 1, rejected_count: 1 });
   });
+
+  it('persists provider observations and creates missing quota windows', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Observed', secret: 'amap-observed' });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await pool.report(id, 'quota', { period: 'day', service: 'place-search-v5', retryAt: resetAt });
+    expect(await pool.acquire('amap')).toBeNull();
+    expect(await database.prepare(`SELECT period,reset_at FROM provider_quota_observations
+      WHERE credential_id=? AND service='place-search-v5' AND period='day'`).bind(id).first())
+      .toEqual({ period: 'day', reset_at: resetAt });
+    expect(await database.prepare(`SELECT period FROM provider_quota_windows
+      WHERE credential_id=? AND service='place-search-v5' ORDER BY period`).bind(id).all())
+      .toMatchObject({ results: [{ period: 'day' }, { period: 'month' }] });
+  });
+
+  it('enforces a shared Geoapify quota scope across multiple keys', async () => {
+    const shared = 'geoapify:shared-project';
+    const firstId = await store.addCredential({
+      provider: 'geoapify', label: 'First project key', secret: 'geoapify-first',
+      qpsLimit: 10_000, quotaLimit: 1, quotaScopeId: shared
+    });
+    await store.addCredential({
+      provider: 'geoapify', label: 'Second project key', secret: 'geoapify-second',
+      qpsLimit: 10_000, quotaLimit: 1, quotaScopeId: shared
+    });
+    const credential = await pool.acquire('geoapify');
+    expect(credential.id).toBe(firstId);
+    await pool.report(credential.id, 'success');
+    expect(await pool.acquire('geoapify')).toBeNull();
+  });
 });

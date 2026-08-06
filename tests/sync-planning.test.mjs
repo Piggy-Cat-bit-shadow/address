@@ -176,7 +176,7 @@ describe('country sync planning', () => {
     };
     const catalog = { schemaVersion: 1, shards: [{ ...shards[0], source: { id: 'fixture' } }] };
     const metrics = { candidateCount: 1, previousCount: 10, rejectionReasons: { invalid_postcode: 3 } };
-    await expect(runAddressEtl({
+    const options = {
       cacheDir, dataRoot: cacheDir, catalog, stateStore, syncMode: 'manual', measureStorage: async () => 0,
       adapters: {
         discover: async () => ({ adapter: 'overture', version: 'fixture-v1', sourceBytes: 0, buildingAssets: ['building'] }),
@@ -188,10 +188,15 @@ describe('country sync planning', () => {
           rejectionReasons: metrics.rejectionReasons, metrics
         });
       } }
-    })).rejects.toThrow('Address sync failed for 1 country shard');
+    };
+    await expect(runAddressEtl(options)).rejects.toThrow('Address sync failed for 1 country shard');
     expect(persisted.shards['fixture-us']).toMatchObject({
       errorCode: 'SNAPSHOT_QUALITY_FAILED', rejectionReasons: { invalid_postcode: 3 }, metrics
     });
+    const repeated = await runAddressEtl(options);
+    expect(repeated.reports).toContainEqual(expect.objectContaining({
+      status: 'source-quality-failed', skipped: true, errorCode: 'SNAPSHOT_QUALITY_FAILED'
+    }));
   });
 
   it('persists 30-day country state in PostgreSQL without double-counting repeated failures', async () => {

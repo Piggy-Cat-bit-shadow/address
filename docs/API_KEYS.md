@@ -21,6 +21,8 @@ Address can serve an existing PostgreSQL address pool without third-party keys. 
 
 Do not reuse this server key for browser maps.
 
+AMap's [base-service quota page](https://lbs.amap.com/pages/base_service_price) lists `5,000` requests per month and `3 QPS` for personal verified basic search. Its [official error table](https://lbs.amap.com/api/webservice/guide/tools/info/) identifies `10003` as a daily limit that unlocks at `00:00` the next day, `10004` as a per-minute limit that unlocks in the next minute, and `40000` as exhausted balance or plan quota. The system tracks short cooldown, daily, and monthly windows independently.
+
 ### AMap JavaScript map
 
 1. Create a dedicated **JavaScript API** key and security code in the AMap console.
@@ -38,6 +40,8 @@ The browser key is visible to browsers by design. The security code remains serv
 
 See Baidu's [official Web API documentation](https://lbsyun.baidu.com/faq/api?title=webapi%2Fguide%2Fwebservice-placeapi). Codes for quota, invalid AK, disabled service, and IP/signature validation are handled per credential.
 
+Baidu's [developer entitlement page](https://lbsyun.baidu.com/solutions/privilege) lists `100` place-search requests per day and `3 QPS` for personal accounts. Use the current account console when it reports a different entitlement.
+
 ### Tencent Location Service
 
 1. Register in the [Tencent Location Service console](https://lbs.qq.com/dev/console/application/mine).
@@ -46,6 +50,8 @@ See Baidu's [official Web API documentation](https://lbsyun.baidu.com/faq/api?ti
 4. Set `TENCENT_API_KEY`, a numbered variant, or add each key in the administrator console.
 
 Tencent documents response code `120` as a per-second limit and `121` as a daily limit in its [official status table](https://lbs.qq.com/service/webService/webServiceGuide/status). Current usage may also be reported in `X-LIMIT` response headers; the console remains authoritative.
+
+Tencent's [WebService quota guide](https://lbs.qq.com/webservice_v1/guide-quota.html) lists an initial default of `10,000` requests per day and `5 QPS`. When `X-LIMIT` or the console reports a different effective value, the system stores and uses that daily-window observation instead.
 
 ### Mappls Search API
 
@@ -77,10 +83,10 @@ The adapter requires a six-digit postcode and a district. It remains disabled un
 ### Geoapify
 
 1. Create an account and project at [Geoapify MyProjects](https://myprojects.geoapify.com/).
-2. Copy the project API key and review the current [official pricing and quotas](https://www.geoapify.com/pricing/).
-3. Set `GEOAPIFY_API_KEY`. Add API-side keys in the administrator console when appropriate.
+2. Copy the project API key and review the current [Reverse Geocoding documentation](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/) and [official pricing and quotas](https://www.geoapify.com/pricing/).
+3. Add every key separately under **Admin → Service credentials → Geoapify**. Environment values named `GEOAPIFY_API_KEY`, `GEOAPIFY_API_KEY_2`, and so on are imported for bootstrap deployments.
 
-The Korea K-apt initial import requires this environment variable for postcode verification. Do not hard-code a quota: plans and endpoint credit costs can change.
+The Korea K-apt worker obtains a credential from the encrypted rotation pool for every postcode request. Authentication failures, rate limits, quota waits, and transient failures are reported per key; when no key is ready, synchronization waits for the earliest persisted recovery time. Keys that share a project or account quota must use the same quota scope. Geoapify currently prices one Reverse Geocoding request as one credit; configured limits remain editable because plans can change. A `429` response honours `Retry-After`, while local daily accounting uses the credential's configured timezone when the provider supplies no reset timestamp.
 
 ### Singapore OneMap
 
@@ -134,7 +140,7 @@ openssl rand -base64 36   # administrator and PostgreSQL passwords
 
 ## Rotation and cooldown behavior
 
-Credentials are selected by least-recent use while respecting enabled state, QPS, quota, expiry, and cooldown. A request failure excludes only that credential from the current attempt and lets another available credential run. Quota failures wait until the provider-reported retry time or configured period reset; transient failures use bounded exponential cooldown. If every key is unavailable, work waits for the earliest eligible credential instead of permanently disabling the provider.
+Credentials are selected by least-recent use while respecting enabled state, QPS, quota, expiry, and cooldown. A key may have simultaneous daily and monthly windows; exhausting either rotates to another key. A request failure excludes only that credential from the current attempt and lets another available credential run. Quota failures wait until the provider-reported retry time or the matching period reset, while QPS and per-minute limits use short cooldowns. If every key is unavailable, work waits for the earliest eligible credential instead of permanently disabling the provider.
 
 Official dashboards and response headers override documentation examples. Review current limits when creating a credential and configure its service, quota period, limit, time-zone boundary, and optional shared quota scope in the administrator console.
 
@@ -145,4 +151,4 @@ Official dashboards and response headers override documentation examples. Review
 3. Test each credential from the administrator console without copying its value into logs or screenshots.
 4. Keep screenshots masked and rotate any credential that was accidentally displayed.
 
-Official pages checked: 2026-08-04. Provider terms, plans, quotas, and console workflows may change.
+Official pages checked: 2026-08-05. Provider terms, plans, quotas, and console workflows may change.

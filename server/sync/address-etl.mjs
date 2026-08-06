@@ -604,6 +604,7 @@ export const runAddressEtl = async ({
   maxPrepareConcurrency = integer(process.env.ADDRESS_SYNC_MAX_PREPARE_CONCURRENCY, 1),
   maxCpuConcurrency = integer(process.env.ADDRESS_SYNC_MAX_CPU_CONCURRENCY, 1),
   signal,
+  onProgress = () => {},
   now = () => new Date(),
   catalog: providedCatalog,
   adapters: providedAdapters,
@@ -613,6 +614,9 @@ export const runAddressEtl = async ({
   stateStore: providedStateStore,
   measureStorage = measureStorageBytes
 } = {}) => {
+  const reportProgress = async (progress) => {
+    try { await onProgress(progress); } catch (error) { console.error('[address-sync] progress reporting failed', error); }
+  };
   const catalog = providedCatalog || await loadSourceCatalog(undefined, environment);
   const requested = selectShards(catalog, requestedShards);
   const stateFile = resolve(cacheDir, 'manifest.json');
@@ -674,6 +678,7 @@ export const runAddressEtl = async ({
   let plannedStorageBytes = storageBytesBefore;
   let storageBudget = assertStorageBudget({ currentBytes: storageBytesBefore, softLimitBytes, hardLimitBytes });
   const selectedIds = new Set(selected.map((shard) => shard.id));
+  await reportProgress({ phase: 'planned', selectedShards: [...selectedIds] });
   const reports = requested.filter((shard) => !selectedIds.has(shard.id)).map((shard) => {
     const previous = state.shards[shard.id];
     return {
@@ -728,7 +733,13 @@ export const runAddressEtl = async ({
       await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
     }
     if (syncMode === 'initial' || syncMode === 'manual') syncErrors.push(error);
-    else if (!estimate) throw error;
+    else if (!estimate) {
+      const failure = error && (typeof error === 'object' || typeof error === 'function')
+        ? error : new Error(String(error));
+      failure.selectedShards = selected.map((shard) => shard.id);
+      failure.reports = reports;
+      throw failure;
+    }
   };
   try {
     const work = [];
@@ -757,6 +768,7 @@ export const runAddressEtl = async ({
 
     const discovered = await mapConcurrent(work, runtimePolicy.prepareConcurrency, async (task) => {
       try {
+        await reportProgress({ phase: 'discover', countryCode: task.shard.countryCode, sourceId: task.shard.id });
         console.log(`[address-sync] ${task.shard.countryCode} discover`);
         const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir });
         const discovery = {
@@ -769,7 +781,7 @@ export const runAddressEtl = async ({
     const planned = [];
     for (const task of discovered) {
       if (task.error) { await recordFailure(task, task.error); continue; }
-      if (task.previous?.errorCode === 'SOURCE_QUALITY_FAILED'
+      if (['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED'].includes(task.previous?.errorCode)
         && task.previous.failureSignature === task.discovery.failureSignature) {
         reports.push({
           ...task.previous,
@@ -819,6 +831,7 @@ export const runAddressEtl = async ({
       try {
         const materializedStorageBytes = await measureStorage([dataRoot]);
         storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
+        await reportProgress({ phase: 'import', countryCode: task.shard.countryCode, sourceId: task.shard.id });
         console.log(`[address-sync] ${task.shard.countryCode} import`);
         const imported = await importer.importShard({
           shard: task.shard, discovery: task.discovery, materialized: task.materialized,
@@ -872,6 +885,7 @@ export const runAddressEtl = async ({
       }
       const preparedWave = await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
         try {
+          await reportProgress({ phase: 'materialize', countryCode: task.shard.countryCode, sourceId: task.shard.id });
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
           const shardTarget = task.report.targetCount;
           const candidateLimit = Math.min(300_000, Math.max(shardTarget + 1_000, shardTarget * 3));
@@ -888,11 +902,17 @@ export const runAddressEtl = async ({
     }
     if (database && activeRun && !providedImporter) {
       for (const countryCode of changedCountries) {
+        await reportProgress({ phase: 'coverage', countryCode });
         const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString());
         console.log(`[address-sync] ${countryCode} coverage mapped=${coverage.matchedAddresses} unmatched=${coverage.unmatchedAddresses}`);
       }
     }
-    if (syncErrors.length) throw new AggregateError(syncErrors, `Address sync failed for ${syncErrors.length} country shard(s)`);
+    if (syncErrors.length) {
+      const error = new AggregateError(syncErrors, `Address sync failed for ${syncErrors.length} country shard(s)`);
+      error.selectedShards = selected.map((shard) => shard.id);
+      error.reports = reports;
+      throw error;
+    }
     if (syncMode === 'initial' && requireResidential) {
       const missingResidential = requested.filter((shard) => !disabledCountries.has(shard.countryCode)
         && Number(state.shards[shard.id]?.residentialCount || 0) < 1);

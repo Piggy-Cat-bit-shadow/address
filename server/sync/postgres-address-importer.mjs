@@ -564,32 +564,20 @@ export class PostgresAddressImporter {
           .bind(localized.length, rejectedCount, datasetId),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
           WHERE country_code=? AND active=1 AND id NOT IN (
-            SELECT evidence.address_id FROM address_pool scoped
-            JOIN address_pool_evidence evidence ON evidence.address_id=scoped.id
+            SELECT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-            WHERE scoped.country_code=? AND evidence.is_current=1
-              AND dataset.status IN ('pending','active')
-          )`).bind(observedAt, shard.countryCode, shard.countryCode),
-        this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
-          WHERE country_code=? AND id IN (
-            SELECT evidence.address_id FROM address_pool scoped
-            JOIN address_pool_evidence evidence ON evidence.address_id=scoped.id
-            JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-            WHERE scoped.country_code=? AND evidence.is_current=1
-              AND dataset.status IN ('pending','active')
-          )`).bind(shard.countryCode, shard.countryCode),
+            WHERE evidence.is_current=1 AND dataset.status IN ('pending','active')
+          )`).bind(observedAt, shard.countryCode),
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0
           WHERE evidence_type='address_existence' AND address_id IN (
             SELECT id FROM address_pool WHERE country_code=?
           )`).bind(shard.countryCode),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
           WHERE country_code=? AND id IN (
-            SELECT evidence.address_id FROM address_pool scoped
-            JOIN address_pool_evidence evidence ON evidence.address_id=scoped.id
+            SELECT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
-            WHERE scoped.country_code=? AND evidence.is_current=1
-              AND dataset.status='active'
-          )`).bind(observedAt, shard.countryCode, shard.countryCode)
+            WHERE evidence.is_current=1 AND dataset.status='active'
+          )`).bind(observedAt, shard.countryCode)
       ]);
       const primaryEvidenceRows = (await this.database.prepare(`SELECT candidate.id,candidate.address_id
         FROM address_pool_evidence candidate
@@ -611,8 +599,8 @@ export class PostgresAddressImporter {
           WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
       }
       const countryCandidates = (await this.database.prepare(`SELECT id,country_code,admin1,locality,postal_locality,district,
-          quality_score,random_key FROM address_pool address
-        WHERE country_code=? AND address.id IN (
+          quality_score,random_key FROM address_pool
+        WHERE country_code=? AND id IN (
           SELECT evidence.address_id FROM address_pool_evidence evidence
           JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
           WHERE evidence.is_current=1 AND dataset.status='active'

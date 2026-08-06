@@ -19,6 +19,7 @@ const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
 const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED']);
 const nonRetryableFailureCodes = new Set([
   ...deterministicFailureCodes,
+  '57014', 'QUERY_CANCELED',
   'SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED',
   'ADDRESS_SYNC_MEMORY_LOW', 'ADDRESS_SYNC_ALREADY_RUNNING'
 ]);
@@ -95,13 +96,14 @@ export const runAddressSync = async ({
   runEtl = runAddressEtl,
   catalog: providedCatalog,
   signal,
+  onProgress,
   wait = delay,
   availableMemory = freemem
 } = {}) => {
   const id = validReleaseId(releaseId);
   const syncMode = environment.ADDRESS_SYNC_MODE
     || (environment.ADDRESS_SYNC_TRIGGER === 'initial' ? 'initial'
-      : ['manual', 'force'].includes(environment.ADDRESS_SYNC_TRIGGER) ? 'manual' : 'daily');
+      : ['manual', 'force', 'queue'].includes(environment.ADDRESS_SYNC_TRIGGER) ? 'manual' : 'daily');
   const usesBuiltInEtl = runEtl === runAddressEtl;
   if (usesBuiltInEtl && !enabled(environment.ADDRESS_SYNC_DRY_RUN) && !enabled(environment.ADDRESS_SYNC_ESTIMATE)) {
     assertSyncMemory(availableMemory(), integer(
@@ -141,10 +143,11 @@ export const runAddressSync = async ({
       force: enabled(environment.ADDRESS_SYNC_FORCE) || ['manual', 'force'].includes(environment.ADDRESS_SYNC_TRIGGER),
       syncMode,
       signal,
+      onProgress,
       requireResidential: enabled(environment.ADDRESS_SYNC_REQUIRE_RESIDENTIAL),
       maxShardsPerRun: syncMode === 'manual' || syncMode === 'initial' ? Number.MAX_SAFE_INTEGER : 1
     };
-    const defaultAttempts = syncMode === 'daily' ? 1 : 3;
+    const defaultAttempts = ['daily', 'queue'].includes(environment.ADDRESS_SYNC_TRIGGER) ? 1 : 3;
     const attempts = integer(environment.ADDRESS_SYNC_RETRY_ATTEMPTS, defaultAttempts, 1, 10);
     const baseDelayMs = integer(environment.ADDRESS_SYNC_RETRY_BASE_MS, 1_000, 1, 60_000);
     let etl;

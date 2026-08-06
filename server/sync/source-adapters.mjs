@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { createGeoapifyCredentialBridge } from './geoapify-credential-bridge.mjs';
 import { runProcess } from './process.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -28,7 +29,7 @@ const overtureResidentialRevision = 'residential-buildings-v4';
 const geofabrikExportRevision = 'g69';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v10';
 const singaporeHdbExportRevision = 'hdb-property-building-onemap-v2';
-const koreaKaptExportRevision = 'kapt-official-apartments-v2';
+const koreaKaptExportRevision = 'kapt-official-apartments-v3';
 const openAddressesExportRevision = 'archive-residential-v2';
 const inegiResidentialExportRevision = 'official-dwelling-v1';
 const ethekwiniResidentialExportRevision = 'official-address-zoning-postcode-v1';
@@ -434,6 +435,7 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         extractId: source.extractId || 'korea',
         maxRecords: source.maxRecords,
         qualityGate: source.qualityGate,
+        quotaProvider: source.quotaProvider,
         intervalDays,
         source
       });
@@ -579,6 +581,37 @@ export const createSourceAdapters = ({
         ? Date.parse(observation.retryAt) : Date.now() + (outcome === 'quota' ? 60_000 : 5_000);
     }
   };
+
+  const geoapifyEnvironmentCredentials = environmentKeys('GEOAPIFY_API_KEY')
+    .map((credential) => ({ ...credential, used: 0, usageDate: '', lastUsedAt: 0 }));
+  const geoapifyEnvironmentPool = {
+    acquire: async (_provider, { excludeIds = [] } = {}) => {
+      const excluded = new Set(excludeIds);
+      const now = Date.now();
+      const usageDate = new Date(now).toISOString().slice(0, 10);
+      for (const credential of geoapifyEnvironmentCredentials) {
+        if (credential.usageDate !== usageDate) {
+          credential.usageDate = usageDate;
+          credential.used = 0;
+        }
+        if (!excluded.has(credential.id) && !credential.disabled && credential.cooldownUntil <= now
+            && credential.used < 3000 && credential.lastUsedAt + 200 <= now) {
+          credential.lastUsedAt = now;
+          return credential;
+        }
+      }
+      return null;
+    },
+    report: async (id, outcome, observation = {}) => {
+      const credential = geoapifyEnvironmentCredentials.find((entry) => entry.id === id);
+      if (!credential) return;
+      credential.used += 1;
+      if (outcome === 'auth' || outcome === 'invalid') credential.disabled = true;
+      else if (outcome !== 'success') credential.cooldownUntil = Number.isFinite(Date.parse(observation.retryAt))
+        ? Date.parse(observation.retryAt) : Date.now() + (outcome === 'quota' ? 24 * 60 * 60_000 : 5_000);
+    }
+  };
+  const geoapifyCredentialPool = credentialPool || geoapifyEnvironmentPool;
 
   const retryAtFrom = (response) => {
     const value = response.headers.get('retry-after');
@@ -1640,22 +1673,38 @@ export const createSourceAdapters = ({
     const temporary = `${output}.${process.pid}.tmp`;
     await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
     await mkdir(resolve(options.cacheDir, 'raw'), { recursive: true });
+    const bridge = createGeoapifyCredentialBridge({
+      credentialPool: geoapifyCredentialPool,
+      fetchImpl: apiFetchImpl,
+      signal
+    });
+    const bridgeUrl = await bridge.start();
+    const childEnvironment = Object.fromEntries(Object.entries(environment).filter(([name]) =>
+      name !== 'GEOAPIFY_API_KEY' && !/^GEOAPIFY_API_KEY_\d+$/u.test(name)));
     let completed = false;
     try {
-      await runExecute({
-        file: pythonBin,
-        args: [koreaKaptExporter,
-          '--output', temporary,
-          '--max-records', String(sourceMaximum),
-          '--per-locality', String(options.perLocality),
-          '--postcode-cache', cacheFile,
-          '--daily-geocode-limit', String(shard.source.dailyGeocodeLimit || 2800),
-          '--geocode-concurrency', String(shard.source.geocodeConcurrency || 3)],
-        phase: `materialize:${shard.id}`
-      });
+      try {
+        await runExecute({
+          file: pythonBin,
+          args: [koreaKaptExporter,
+            '--output', temporary,
+            '--max-records', String(sourceMaximum),
+            '--per-locality', String(options.perLocality),
+            '--postcode-cache', cacheFile,
+            '--geocode-concurrency', String(shard.source.geocodeConcurrency || 3)],
+          env: { ...childEnvironment, ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL: bridgeUrl },
+          phase: `materialize:${shard.id}`
+        });
+      } catch (error) {
+        if (bridge.unavailable()) throw Object.assign(new Error('No Geoapify credential is currently available', { cause: error }), {
+          code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
+        });
+        throw error;
+      }
       await rename(temporary, output);
       completed = true;
     } finally {
+      await bridge.close();
       await rm(temporary, { force: true });
     }
     const size = (await stat(output)).size;

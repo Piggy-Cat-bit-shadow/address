@@ -18,7 +18,6 @@ from pyproj import Transformer
 
 BASE_URL = "https://www.k-apt.go.kr"
 POSTCODE_PATTERN = re.compile(r"\d{5}")
-MAX_DAILY_GEOCODE_REQUESTS = 2800
 COMPOUND_CITY_PREFIXES = (
     "수원", "성남", "안양", "안산", "고양", "용인", "부천", "화성",
     "청주", "천안", "전주", "포항", "창원",
@@ -30,7 +29,7 @@ CSRF_PATTERNS = (
 )
 
 
-class GeocodeQuotaExhausted(RuntimeError):
+class GeocodeUnavailable(RuntimeError):
     pass
 
 
@@ -216,25 +215,21 @@ def balanced(values):
 
 def load_postcode_cache(path):
     cached = {}
-    daily_requests = defaultdict(int)
     if not path or not os.path.exists(path):
-        return cached, daily_requests
+        return cached
     with open(path, encoding="utf-8") as source:
         for line in source:
             try:
                 value = json.loads(line)
                 record_id = value["id"]
                 requested_on = value.get("requested_on")
-                event = value.get("event")
-                if event != "result" and requested_on:
-                    daily_requests[requested_on] += 1
                 cached[record_id] = {
                     "postcode": value.get("postcode"),
                     "requested_on": requested_on,
                 }
             except (KeyError, TypeError, ValueError):
                 continue
-    return cached, daily_requests
+    return cached
 
 
 def place_key(value):
@@ -250,17 +245,16 @@ def geoapify_matches_hierarchy(result, hierarchy):
     return bool(expected) and any(expected == value for value in top_levels if value)
 
 
-def reverse_postcode(value, api_key):
-    query = urllib.parse.urlencode({
-        "lat": value["latitude"],
-        "lon": value["longitude"],
-        "format": "json",
-        "lang": "ko",
-        "apiKey": api_key,
-    })
+def reverse_postcode(value, bridge_url):
+    body = json.dumps({
+        "latitude": value["latitude"],
+        "longitude": value["longitude"],
+    }, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
-        f"https://api.geoapify.com/v1/geocode/reverse?{query}",
-        headers={"Accept": "application/json", "User-Agent": "address-sync/1.0"},
+        bridge_url,
+        data=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -270,61 +264,52 @@ def reverse_postcode(value, api_key):
         hierarchy = value["address_levels"]
         return postcode if POSTCODE_PATTERN.fullmatch(postcode) and geoapify_matches_hierarchy(result, hierarchy) else None
     except urllib.error.HTTPError as error:
-        if error.code == 429:
-            raise GeocodeQuotaExhausted("Geoapify daily quota is exhausted") from None
-        if error.code in {401, 403}:
-            raise RuntimeError(f"Geoapify request stopped with HTTP {error.code}") from None
-        return None
+        try:
+            payload = json.load(error)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {}
+        if payload.get("code") == "SOURCE_CREDENTIAL_UNAVAILABLE":
+            raise GeocodeUnavailable("No Geoapify credential is currently available") from None
+        raise RuntimeError(f"Geoapify bridge stopped with HTTP {error.code}") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
+        raise GeocodeUnavailable("Geoapify bridge is temporarily unavailable") from None
 
 
-def add_postcodes(values, cache_path, daily_limit, minimum_interval, concurrency=3):
-    api_key = clean(os.environ.get("GEOAPIFY_API_KEY"))
-    if not api_key:
-        raise RuntimeError("GEOAPIFY_API_KEY is required for the Korea K-apt export; without it no record can pass postcode verification")
+def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
+    bridge_url = clean(os.environ.get("ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL"))
+    if not bridge_url:
+        raise RuntimeError("ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL is required for the Korea K-apt export")
     today = datetime.now(timezone.utc).date().isoformat()
     values = list(values)
     os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
     with exclusive_cache_lock(f"{cache_path}.lock"):
-        cached, daily_requests = load_postcode_cache(cache_path)
+        cached = load_postcode_cache(cache_path)
         with open(cache_path, "a", encoding="utf-8", newline="\n") as cache_output:
             pending = []
             scheduled = set()
-            remaining = max(0, daily_limit - daily_requests[today])
             for value in values:
                 record_id = value["source_record_id"]
                 cached_entry = cached.get(record_id) or {}
                 should_request = (record_id not in scheduled
                                   and not POSTCODE_PATTERN.fullmatch(clean(cached_entry.get("postcode")))
                                   and cached_entry.get("requested_on") != today)
-                if should_request and api_key and len(pending) < remaining:
+                if should_request:
                     pending.append(value)
                     scheduled.add(record_id)
-            quota_exhausted = False
+            unavailable = False
             fatal_error = None
             last_started = 0.0
             cursor = 0
             active = {}
             with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 4))) as executor:
-                while active or (cursor < len(pending) and not quota_exhausted):
-                    while cursor < len(pending) and len(active) < concurrency and not quota_exhausted:
+                while active or (cursor < len(pending) and not unavailable):
+                    while cursor < len(pending) and len(active) < concurrency and not unavailable:
                         elapsed = time.monotonic() - last_started
                         if elapsed < minimum_interval:
                             time.sleep(minimum_interval - elapsed)
                         value = pending[cursor]
                         cursor += 1
-                        record_id = value["source_record_id"]
-                        cache_output.write(json.dumps({
-                            "id": record_id,
-                            "requested_on": today,
-                            "event": "reserved",
-                        }, ensure_ascii=False, separators=(",", ":")) + "\n")
-                        cache_output.flush()
-                        os.fsync(cache_output.fileno())
-                        cached[record_id] = {"postcode": None, "requested_on": today}
-                        daily_requests[today] += 1
-                        active[executor.submit(reverse_postcode, value, api_key)] = value
+                        active[executor.submit(reverse_postcode, value, bridge_url)] = value
                         last_started = time.monotonic()
                     completed, _ = wait(active, return_when=FIRST_COMPLETED)
                     for future in completed:
@@ -332,12 +317,15 @@ def add_postcodes(values, cache_path, daily_limit, minimum_interval, concurrency
                         postcode = None
                         try:
                             postcode = future.result()
-                        except GeocodeQuotaExhausted:
-                            quota_exhausted = True
+                        except GeocodeUnavailable as error:
+                            unavailable = True
+                            fatal_error = fatal_error or error
                         except RuntimeError as error:
-                            quota_exhausted = True
+                            unavailable = True
                             fatal_error = fatal_error or error
                         record_id = value["source_record_id"]
+                        if future.exception() is not None:
+                            continue
                         cached[record_id] = {"postcode": postcode, "requested_on": today}
                         cache_output.write(json.dumps({
                             "id": record_id,
@@ -375,12 +363,10 @@ def main():
     parser.add_argument("--postcode-cache", required=True)
     parser.add_argument("--max-records", type=int, required=True)
     parser.add_argument("--per-locality", type=int, required=True)
-    parser.add_argument("--daily-geocode-limit", type=int, default=2800)
     parser.add_argument("--minimum-interval", type=float, default=0.25)
     parser.add_argument("--geocode-concurrency", type=int, default=3)
     args = parser.parse_args()
     if (args.max_records < 1 or args.per_locality < 1 or args.minimum_interval < 0
-            or not 0 <= args.daily_geocode_limit <= MAX_DAILY_GEOCODE_REQUESTS
             or not 1 <= args.geocode_concurrency <= 4):
         raise ValueError("Invalid export limits")
     transformer = Transformer.from_crs("EPSG:5174", "EPSG:4326", always_xy=True)
@@ -394,8 +380,7 @@ def main():
         candidates.append(value)
     ordered = balanced(candidates)
     selected = select(
-        add_postcodes(ordered, args.postcode_cache, args.daily_geocode_limit,
-                      args.minimum_interval, args.geocode_concurrency),
+        add_postcodes(ordered, args.postcode_cache, args.minimum_interval, args.geocode_concurrency),
         args.max_records,
         args.per_locality,
     )

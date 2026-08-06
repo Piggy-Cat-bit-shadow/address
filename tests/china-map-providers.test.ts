@@ -70,13 +70,16 @@ describe('China map community providers', () => {
     await fetchTencentCommunities('北京市', 1, 'secret', async () => new Response(JSON.stringify({ status: 0, data: [] }), {
       headers: { 'content-type': 'application/json', 'X-Limit': 'current_qps=1; limit_qps=5; current_pv=17; limit_pv=200' }
     }), (value) => { quota = value; });
-    expect(quota).toEqual({ used: 17, limit: 200 });
+    expect(quota).toMatchObject({ used: 17, limit: 200, period: 'day' });
+    expect(Date.parse(quota!.resetAt!)).toBeGreaterThan(Date.now());
   });
 
   it('classifies provider quota errors for key rotation', async () => {
     const amap = fetchAmapCommunities('北京市', 1, 'secret', response({ status: '0', infocode: '10003', info: 'quota' }));
     await expect(amap).rejects.toMatchObject({ outcome: 'quota', providerCode: '10003' });
     await expect(amap).rejects.toHaveProperty('retryAt');
+    await expect(fetchAmapCommunities('北京市', 1, 'secret', response({ status: '0', infocode: '40000', info: 'plan quota' })))
+      .rejects.toMatchObject({ outcome: 'quota', providerCode: '40000', quotaPeriod: 'month' });
     await expect(fetchBaiduCommunities('北京市', 1, 'secret', response({ status: 4, message: 'quota' })))
       .rejects.toMatchObject({ outcome: 'quota' });
     await expect(fetchTencentCommunities('北京市', 1, 'secret', response({ status: 121, message: 'quota' })))

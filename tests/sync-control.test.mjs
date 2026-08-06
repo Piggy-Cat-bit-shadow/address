@@ -4,11 +4,14 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSyncApi } from '../server/sync/api.mjs';
 import { SyncCoordinator } from '../server/sync/coordinator.mjs';
+import { SyncHistoryStore } from '../server/sync/history-store.mjs';
 import { createSyncRuntime } from '../server/sync/index.mjs';
 import {
   acquireSyncLease, assertSyncMemory, runAddressSync, syncPostgresStatementTimeout
 } from '../server/sync/run-address-sync.mjs';
-import { nextRunAt, triggerDailySync, triggerInitialSync, triggerStartupSync } from '../server/sync/scheduler.mjs';
+import {
+  nextRunAt, startDailyScheduler, triggerDailySync, triggerInitialSync, triggerStartupSync
+} from '../server/sync/scheduler.mjs';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 
 const testDirectories = [];
@@ -34,6 +37,97 @@ const deferred = () => {
 };
 
 describe('address sync coordinator', () => {
+  it('persists country timing, growth and scheduler heartbeat history', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    await database.prepare(`INSERT INTO sync_country_policies(
+      country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,
+      min_per_node,coverage_ratio,level1_min,level2_min,updated_at
+    ) VALUES ('US',1,10,0,0,0,0,1,1,0,0,'2026-08-01T00:00:00Z')`).run();
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [{ id: 'oa-us', countryCode: 'US' }],
+      now: () => new Date('2026-08-05T06:00:00Z')
+    });
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(), history,
+      now: () => new Date('2026-08-05T06:00:00Z'),
+      idFactory: () => 'history-job',
+      runSync: async () => ({ releaseId: 'history-release' })
+    });
+    const result = await coordinator.trigger('manual', { shards: ['oa-us'] });
+    await coordinator.waitForIdle();
+    expect(await database.prepare(`SELECT status,completed_at FROM sync_runs WHERE id=?`).bind(result.job.id).first())
+      .toMatchObject({ status: 'succeeded', completed_at: '2026-08-05T06:00:00.000Z' });
+    expect(await database.prepare(`SELECT country_code,source_id,status,before_count,after_count,net_growth
+      FROM sync_run_countries WHERE run_id=?`).bind(result.job.id).first()).toEqual({
+      country_code: 'US', source_id: 'oa-us', status: 'succeeded', before_count: 0, after_count: 0, net_growth: 0
+    });
+    await history.schedulerHeartbeat();
+    expect(await database.prepare(`SELECT heartbeat_at,active_run_id FROM sync_scheduler_state
+      WHERE scheduler_id='address-sync'`).first()).toEqual({ heartbeat_at: '2026-08-05T06:00:00.000Z', active_run_id: null });
+    database.close();
+  });
+
+  it('marks the exact source history row as paused for quota after queue evaluation', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [{ id: 'korea-kapt-residential', countryCode: 'KR' }],
+      now: () => new Date('2026-08-06T00:10:00Z')
+    });
+    const job = {
+      id: 'sync-history-quota', trigger: 'queue', shards: ['korea-kapt-residential'], status: 'queued', phase: 'queued'
+    };
+    await history.queued(job);
+    Object.assign(job, {
+      status: 'failed', phase: 'failed', startedAt: '2026-08-06T00:00:00Z',
+      heartbeatAt: '2026-08-06T00:09:00Z', deadlineAt: '2026-08-06T01:00:00Z',
+      completedAt: '2026-08-06T00:09:00Z', errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE',
+      error: 'All Geoapify credentials are unavailable', actualShards: ['korea-kapt-residential'],
+      sourceOutcomes: [{ shardId: 'korea-kapt-residential', status: 'failed', errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE' }]
+    });
+    await history.started(job);
+    await history.completed(job);
+    await history.pauseForQuota({
+      runId: job.id, countryCode: 'KR', sourceId: 'korea-kapt-residential'
+    });
+    expect(await database.prepare(`SELECT status,error_code,error_message,started_at,completed_at,net_growth
+      FROM sync_run_countries WHERE run_id=? AND country_code=? AND source_id=?`)
+      .bind(job.id, 'KR', 'korea-kapt-residential').first()).toEqual({
+      status: 'paused_quota', error_code: 'SOURCE_CREDENTIAL_UNAVAILABLE',
+      error_message: 'All Geoapify credentials are unavailable',
+      started_at: '2026-08-06T00:00:00Z', completed_at: '2026-08-06T00:09:00Z', net_growth: 0
+    });
+    database.close();
+  });
+
+  it('repairs only the latest matching pre-deployment quota history row', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    for (const [id, errorCode, createdAt] of [
+      ['quota-old', 'SOURCE_CREDENTIAL_UNAVAILABLE', '2026-08-05T10:00:00Z'],
+      ['quota-latest', 'SOURCE_CREDENTIAL_UNAVAILABLE', '2026-08-05T11:00:00Z'],
+      ['other-failure', 'SYNC_PROCESS_FAILED', '2026-08-05T12:00:00Z']
+    ]) {
+      await database.prepare(`INSERT INTO sync_runs(
+        id,kind,target_json,status,progress_json,created_at,updated_at
+      ) VALUES (?,'address-pool','{}','failed','{}',?,?)`).bind(id, createdAt, createdAt).run();
+      await database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,error_code,created_at,updated_at
+      ) VALUES (?,'KR','korea-kapt-residential','queue','failed',?,?,?)`)
+        .bind(id, errorCode, createdAt, createdAt).run();
+    }
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-06T00:10:00Z') });
+    await history.repairQuotaWait({ countryCode: 'KR', sourceId: 'korea-kapt-residential' });
+    const rows = (await database.prepare(`SELECT run_id,status FROM sync_run_countries ORDER BY created_at`).all()).results;
+    expect(rows).toEqual([
+      { run_id: 'quota-old', status: 'failed' },
+      { run_id: 'quota-latest', status: 'paused_quota' },
+      { run_id: 'other-failure', status: 'failed' }
+    ]);
+    database.close();
+  });
+
   it('persists task status and rejects concurrent manual runs', async () => {
     const execution = deferred();
     const coordinator = new SyncCoordinator({
@@ -88,6 +182,174 @@ describe('address sync coordinator', () => {
     await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
       status: 'failed', phase: 'failed', error: 'Synchronization exceeded 20ms', errorCode: 'SYNC_JOB_TIMEOUT'
     });
+  });
+
+  it('keeps the execution lock until an aborted worker has actually stopped', async () => {
+    const worker = deferred();
+    const aborted = deferred();
+    let sequence = 0;
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(),
+      idFactory: () => `job-timeout-lock-${++sequence}`,
+      jobTimeoutMs: 20,
+      runSync: ({ signal }) => new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          aborted.resolve();
+          worker.promise.then(resolve);
+        }, { once: true });
+      })
+    });
+    const first = await coordinator.trigger('manual');
+    await aborted.promise;
+    const overlapping = await coordinator.trigger('manual');
+    expect(overlapping).toMatchObject({ accepted: false, job: { id: first.job.id, phase: 'cancelling' } });
+    worker.resolve({});
+    await coordinator.waitForIdle();
+    await expect(coordinator.getJob(first.job.id)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'SYNC_JOB_TIMEOUT'
+    });
+    const next = await coordinator.trigger('manual');
+    expect(next.accepted).toBe(true);
+    worker.resolve({});
+    await coordinator.waitForIdle();
+  });
+
+  it('attributes an all-mode history run only to sources that actually executed', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [
+        { id: 'oa-us', countryCode: 'US' },
+        { id: 'oa-ca', countryCode: 'CA' }
+      ],
+      now: () => new Date('2026-08-05T06:00:00Z')
+    });
+    const job = {
+      id: 'sync-history-all', trigger: 'startup', shards: ['all'], status: 'queued', phase: 'queued'
+    };
+    await history.queued(job);
+    Object.assign(job, {
+      status: 'running', phase: 'build-and-publish', startedAt: '2026-08-05T06:00:00Z',
+      heartbeatAt: '2026-08-05T06:00:00Z', deadlineAt: '2026-08-05T07:00:00Z'
+    });
+    await history.started(job);
+    Object.assign(job, {
+      status: 'succeeded', phase: 'published', completedAt: '2026-08-05T06:10:00Z',
+      actualShards: ['oa-us'], sourceOutcomes: [{ shardId: 'oa-us', status: 'succeeded', acceptedCount: 0 }]
+    });
+    await history.completed(job);
+    const rows = (await database.prepare(`SELECT source_id,status,net_growth,error_code,error_message
+      FROM sync_run_countries WHERE run_id=? ORDER BY source_id`).bind(job.id).all()).results;
+    expect(rows).toEqual([
+      { source_id: 'oa-ca', status: 'cancelled', net_growth: null,
+        error_code: 'SYNC_SOURCE_NOT_EXECUTED', error_message: null },
+      { source_id: 'oa-us', status: 'succeeded', net_growth: 0, error_code: null, error_message: null }
+    ]);
+    database.close();
+  });
+
+  it('does not duplicate country growth across multiple executed sources', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [
+        { id: 'oa-us-a', countryCode: 'US' },
+        { id: 'oa-us-b', countryCode: 'US' }
+      ],
+      now: () => new Date('2026-08-05T06:00:00Z')
+    });
+    const job = { id: 'sync-history-multi', trigger: 'manual', shards: ['US'], status: 'queued', phase: 'queued' };
+    await history.queued(job);
+    Object.assign(job, { status: 'running', phase: 'build-and-publish', startedAt: '2026-08-05T06:00:00Z',
+      heartbeatAt: '2026-08-05T06:00:00Z', deadlineAt: '2026-08-05T07:00:00Z' });
+    await history.started(job);
+    Object.assign(job, { status: 'succeeded', phase: 'published', completedAt: '2026-08-05T06:10:00Z',
+      actualShards: ['oa-us-a', 'oa-us-b'] });
+    await history.completed(job);
+    const growth = (await database.prepare(`SELECT net_growth FROM sync_run_countries
+      WHERE run_id=? ORDER BY source_id`).bind(job.id).all()).results;
+    expect(growth).toEqual([{ net_growth: null }, { net_growth: null }]);
+    database.close();
+  });
+
+  it('repairs legacy all-source projections using the one source updated in the run window', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,created_at,started_at,completed_at,updated_at
+    ) VALUES ('legacy-run','address-pool','{"shards":["all"]}','failed','{}','2026-08-05T05:00:00Z',
+      '2026-08-05T05:00:00Z','2026-08-05T06:00:00Z','2026-08-05T06:00:00Z')`).run();
+    for (const sourceId of ['oa-us', 'oa-ca']) {
+      await database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,before_count,after_count,net_growth,
+        before_goals_json,after_goals_json,created_at,updated_at
+      ) VALUES ('legacy-run',?,?,'startup','failed',10,10,0,'{}','{}','2026-08-05T05:00:00Z','2026-08-05T06:00:00Z')`)
+        .bind(sourceId === 'oa-us' ? 'US' : 'CA', sourceId).run();
+    }
+    await database.prepare(`INSERT INTO sync_shard_state(shard_id,country_code,status,updated_at)
+      VALUES ('oa-us','US','failed','2026-08-05T05:30:00Z')`).run();
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairLegacyProjections()).resolves.toBe(1);
+    expect(await database.prepare(`SELECT status,net_growth,error_code FROM sync_run_countries
+      WHERE run_id='legacy-run' AND source_id='oa-ca'`).first()).toEqual({
+      status: 'cancelled', net_growth: null, error_code: 'SYNC_SOURCE_NOT_EXECUTED'
+    });
+    expect(await database.prepare(`SELECT status,error_code FROM sync_run_countries
+      WHERE run_id='legacy-run' AND source_id='oa-us'`).first()).toEqual({ status: 'failed', error_code: null });
+    database.close();
+  });
+
+  it('repairs legacy all-source projections from one source ID in the shared error', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const message = 'hard geofabrik-osm-fr-martinique failed snapshot quality';
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,error_message,created_at,started_at,completed_at,updated_at
+    ) VALUES ('legacy-error','address-pool','{"shards":["all"]}','failed','{}',?,
+      '2026-08-05T05:00:00Z','2026-08-05T05:00:00Z','2026-08-05T06:00:00Z','2026-08-05T06:00:00Z')`)
+      .bind(message).run();
+    for (const [countryCode, sourceId] of [['FR', 'geofabrik-osm-fr-martinique'], ['US', 'oa-us']]) {
+      await database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,before_count,after_count,net_growth,
+        before_goals_json,after_goals_json,error_message,created_at,updated_at
+      ) VALUES ('legacy-error',?,?,'startup','failed',10,10,0,'{}','{}',?,'2026-08-05T05:00:00Z','2026-08-05T06:00:00Z')`)
+        .bind(countryCode, sourceId, message).run();
+    }
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairLegacyProjections()).resolves.toBe(1);
+    expect(await database.prepare(`SELECT status,error_code,error_message FROM sync_run_countries
+      WHERE run_id='legacy-error' AND source_id='oa-us'`).first()).toEqual({
+      status: 'cancelled', error_code: 'SYNC_SOURCE_NOT_EXECUTED', error_message: null
+    });
+    expect(await database.prepare(`SELECT status,error_message FROM sync_run_countries
+      WHERE run_id='legacy-error' AND source_id='geofabrik-osm-fr-martinique'`).first()).toEqual({
+      status: 'failed', error_message: message
+    });
+    database.close();
+  });
+
+  it('closes database history left running by a terminated sync container', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,created_at,started_at,updated_at
+    ) VALUES ('orphan-history','address-pool','{"shards":["oa-us"]}','running','{}',
+      '2026-08-05T05:00:00Z','2026-08-05T05:00:00Z','2026-08-05T05:00:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,started_at,created_at,updated_at
+    ) VALUES ('orphan-history','US','oa-us','queue','running','2026-08-05T05:00:00Z',
+      '2026-08-05T05:00:00Z','2026-08-05T05:00:00Z')`).run();
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairInterruptedRuns()).resolves.toBe(1);
+    expect(await database.prepare(`SELECT status,error_code,completed_at FROM sync_runs
+      WHERE id='orphan-history'`).first()).toEqual({
+      status: 'failed', error_code: 'SYNC_JOB_INTERRUPTED', completed_at: '2026-08-05T07:00:00.000Z'
+    });
+    expect(await database.prepare(`SELECT status,net_growth,error_code FROM sync_run_countries
+      WHERE run_id='orphan-history'`).first()).toEqual({
+      status: 'failed', net_growth: null, error_code: 'SYNC_JOB_INTERRUPTED'
+    });
+    database.close();
   });
 
   it('recovers an orphaned job and removes its dead process lock on startup', async () => {
@@ -339,6 +601,25 @@ describe('atomic address release command', () => {
 });
 
 describe('daily due-shard synchronization schedule', () => {
+  it('wakes the unified queue planner instead of creating an all-source job', async () => {
+    const callbacks = [];
+    const coordinator = { trigger: vi.fn() };
+    const wakePlanner = vi.fn(async () => undefined);
+    const stop = startDailyScheduler({
+      coordinator, stateFile: resolve(testStateDir(), 'daily.json'), wakePlanner,
+      now: () => new Date('2026-08-05T02:00:00Z'),
+      setTimer: (callback) => {
+        const timer = { callback, unref: () => {} };
+        callbacks.push(timer);
+        return timer;
+      }
+    });
+    await callbacks[0].callback();
+    stop();
+    expect(wakePlanner).toHaveBeenCalledOnce();
+    expect(coordinator.trigger).not.toHaveBeenCalled();
+  });
+
   it('checks for due 30-day shards at the next 03:00 UTC boundary', () => {
     expect(nextRunAt(new Date('2026-07-16T10:30:00.000Z'), 3).toISOString())
       .toBe('2026-07-17T03:00:00.000Z');

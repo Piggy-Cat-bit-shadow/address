@@ -64,8 +64,8 @@ describe('address source shard catalog', () => {
       }
     });
     expect(catalog.shards.find((shard) => shard.id === 'korea-kapt-residential')).toMatchObject({
-      countryCode: 'KR', maxRecords: 20000, intervalDays: 1,
-      source: { adapter: 'korea-kapt', dailyGeocodeLimit: 2800 }
+      countryCode: 'KR', maxRecords: 20000, intervalDays: 1, quotaProvider: 'geoapify',
+      source: { adapter: 'korea-kapt', quotaProvider: 'geoapify' }
     });
     expect(catalog.shards.find((shard) => shard.id === 'ethekwini-za-residential')).toMatchObject({
       countryCode: 'ZA', maxRecords: 4500,
@@ -716,20 +716,46 @@ describe('address source shard catalog', () => {
     const catalog = await loadSourceCatalog();
     const shard = catalog.shards.find((entry) => entry.id === 'korea-kapt-residential');
     const calls = [];
-    const fetchImpl = async () => new Response('<title>K-apt</title>', { status: 200,
-      headers: { 'last-modified': 'Thu, 30 Jul 2026 00:00:00 GMT' } });
-    const execute = async ({ file, args, phase }) => {
-      calls.push({ file, args, phase });
+    const reports = [];
+    const requestedKeys = [];
+    const credentials = [{ id: 'geoapify-a', secret: 'secret-a' }, { id: 'geoapify-b', secret: 'secret-b' }];
+    const credentialPool = {
+      acquire: async (provider, { excludeIds = [] } = {}) => {
+        expect(provider).toBe('geoapify');
+        return credentials.find(({ id }) => !new Set(excludeIds).has(id)) || null;
+      },
+      report: async (id, outcome) => reports.push([id, outcome])
+    };
+    const fetchImpl = async (input) => {
+      const url = new URL(String(input));
+      if (url.href === shard.source.dataUrl) return new Response('<title>K-apt</title>', { status: 200,
+        headers: { 'last-modified': 'Thu, 30 Jul 2026 00:00:00 GMT' } });
+      requestedKeys.push(url.searchParams.get('apiKey'));
+      if (url.searchParams.get('apiKey') === 'secret-a') return new Response(null, { status: 401 });
+      return Response.json({ results: [{ country_code: 'kr', state: '서울특별시', postcode: '03000' }] });
+    };
+    const execute = async ({ file, args, env, phase }) => {
+      calls.push({ file, args, env, phase });
+      expect(env.GEOAPIFY_API_KEY).toBeUndefined();
+      expect(env.ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//u);
+      const response = await fetch(env.ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: 37.574, longitude: 126.977 })
+      });
+      expect(await response.json()).toMatchObject({ results: [{ postcode: '03000' }] });
       await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({
         id: 'kapt-fixture', country: 'KR', postcode: '03000', street: '종로', number: '1',
         property_type: 'apartment', residential_building_id: 'A1'
       })}\n`, 'utf8');
     };
-    const adapters = createSourceAdapters({ fetchImpl, execute, pythonBin: 'python-fixture' });
+    const adapters = createSourceAdapters({
+      fetchImpl, execute, pythonBin: 'python-fixture', credentialPool,
+      environment: { GEOAPIFY_API_KEY: 'must-not-reach-python' }
+    });
     const discovery = await adapters.discover(shard);
     const today = new Date().toISOString().slice(0, 10);
     expect(discovery).toMatchObject({
-      adapter: 'korea-kapt', version: `2026-07-30-${today}-kapt-official-apartments-v2`
+      adapter: 'korea-kapt', version: `2026-07-30-${today}-kapt-official-apartments-v3`
     });
     const materialized = await adapters.materialize(shard, discovery, {
       cacheDir, maxRecords: 60000, perLocality: 500, maxBytes: 1024, retainRaw: false
@@ -740,8 +766,11 @@ describe('address source shard catalog', () => {
     expect(calls[0].args).toEqual(expect.arrayContaining([
       expect.stringContaining('korea-kapt-export.py'), '--postcode-cache',
       expect.stringContaining('korea-kapt-residential-postcode-cache.jsonl'),
-      '--daily-geocode-limit', '2800', '--max-records', '20000', '--per-locality', '500'
+      '--max-records', '20000', '--per-locality', '500'
     ]));
+    expect(calls[0].args).not.toContain('--daily-geocode-limit');
+    expect(requestedKeys).toEqual(['secret-a', 'secret-b']);
+    expect(reports).toEqual([['geoapify-a', 'auth'], ['geoapify-b', 'success']]);
   });
 
   it('discovers and materializes the official eThekwini residential source', async () => {

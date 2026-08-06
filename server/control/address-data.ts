@@ -186,9 +186,11 @@ const countryState = (
   if (!Boolean(row.enabled)) return 'disabled';
   if (row.country_code === 'CN') return chinaState(china?.syncState, complete);
   if (complete) return 'ready';
-  if (queueState === 'source_limited') return 'source_limited';
+  if (['source_limited', 'no_source', 'suspended'].includes(queueState || '')) return 'source_limited';
   if (queueState === 'running') return 'running';
-  if (queueState === 'waiting_quota') return 'quota_wait';
+  if (queueState === 'quota_wait') return 'quota_wait';
+  if (queueState === 'cooldown_wait') return 'cooldown_wait';
+  if (queueState === 'blocked') return 'blocked';
   if (row.country_status === 'failed' || shards.some((shard) => shard.status === 'failed')) return 'failed';
   if (row.country_status === 'running' || shards.some((shard) => shard.status === 'running')) return 'running';
   return 'below_target';

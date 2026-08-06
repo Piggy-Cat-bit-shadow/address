@@ -23,6 +23,7 @@ export class SyncCoordinator {
     idFactory = randomUUID,
     lockStaleMs = 5 * 60 * 1000,
     jobTimeoutMs = 90 * 60_000,
+    history = null,
     processIsAlive = (pid) => {
       try {
         process.kill(pid, 0);
@@ -40,6 +41,7 @@ export class SyncCoordinator {
     this.idFactory = idFactory;
     this.lockStaleMs = lockStaleMs;
     this.jobTimeoutMs = jobTimeoutMs;
+    this.history = history;
     this.processIsAlive = processIsAlive;
     this.currentJob = null;
     this.currentTask = null;
@@ -89,6 +91,7 @@ export class SyncCoordinator {
 
     try {
       await this.writeJob(job);
+      await this.history?.queued(job);
     } catch (error) {
       await this.releaseLock(lock);
       throw error;
@@ -101,9 +104,11 @@ export class SyncCoordinator {
   async execute(job, lock) {
     const abort = new AbortController();
     let timeout;
+    let runTask;
     const heartbeat = setInterval(() => {
       job.heartbeatAt = this.now().toISOString();
-      void Promise.all([this.writeLock(lock, job.id), this.writeJob(job)]).catch(() => {});
+      void Promise.all([this.writeLock(lock, job.id), this.writeJob(job), this.history?.heartbeat(job)])
+        .catch((error) => console.error('[address-sync] heartbeat persistence failed', error));
     }, 15_000);
     heartbeat.unref?.();
     try {
@@ -116,6 +121,7 @@ export class SyncCoordinator {
         deadlineAt: new Date(startedAt.getTime() + this.jobTimeoutMs).toISOString()
       });
       await this.writeJob(job);
+      await this.history?.started(job);
       const timeoutTask = new Promise((_, reject) => {
         timeout = setTimeout(() => {
           reject(Object.assign(new Error(`Synchronization exceeded ${this.jobTimeoutMs}ms`), { code: 'SYNC_JOB_TIMEOUT' }));
@@ -123,23 +129,44 @@ export class SyncCoordinator {
         }, this.jobTimeoutMs);
         timeout.unref?.();
       });
-      const result = await Promise.race([
-        this.runSync({ id: job.id, trigger: job.trigger, shards: job.shards, signal: abort.signal }),
-        timeoutTask
-      ]);
+      runTask = Promise.resolve().then(() => this.runSync({
+        id: job.id,
+        trigger: job.trigger,
+        shards: job.shards,
+        signal: abort.signal,
+        onProgress: async (progress) => {
+          job.phase = progress?.phase || job.phase;
+          job.progress = progress || {};
+          job.heartbeatAt = this.now().toISOString();
+          await Promise.all([this.writeJob(job), this.history?.heartbeat(job)]);
+        }
+      }));
+      const result = await Promise.race([runTask, timeoutTask]);
       Object.assign(job, {
         status: 'succeeded',
         phase: 'published',
         completedAt: this.now().toISOString(),
-        releaseId: result?.releaseId || job.id
+        releaseId: result?.releaseId || job.id,
+        actualShards: result?.etl?.selectedShards || job.shards,
+        sourceOutcomes: result?.etl?.reports || []
       });
     } catch (error) {
+      if (errorCode(error) === 'SYNC_JOB_TIMEOUT' && runTask) {
+        job.phase = 'cancelling';
+        job.heartbeatAt = this.now().toISOString();
+        abort.abort();
+        await Promise.all([this.writeJob(job), this.history?.heartbeat(job)])
+          .catch((historyError) => console.error('[address-sync] timeout state persistence failed', historyError));
+        await runTask.catch(() => {});
+      }
       Object.assign(job, {
         status: 'failed',
         phase: 'failed',
         completedAt: this.now().toISOString(),
         error: errorText(error).slice(0, 1000),
-        errorCode: errorCode(error)
+        errorCode: errorCode(error),
+        actualShards: error?.selectedShards || job.actualShards || job.shards,
+        sourceOutcomes: error?.reports || job.sourceOutcomes || []
       });
     } finally {
       clearInterval(heartbeat);
@@ -147,6 +174,9 @@ export class SyncCoordinator {
       abort.abort();
       try {
         await this.writeJob(job);
+        await this.history?.completed(job).catch((error) => {
+          console.error('[address-sync] history completion persistence failed', error);
+        });
       } finally {
         try {
           await this.releaseLock(lock);
@@ -264,6 +294,9 @@ export class SyncCoordinator {
         errorCode: 'SYNC_JOB_INTERRUPTED'
       });
       await this.writeJob(job);
+      await this.history?.completed(job).catch((error) => {
+        console.error('[address-sync] recovered history persistence failed', error);
+      });
       this.recoveredJobs.push(job);
     }
   }

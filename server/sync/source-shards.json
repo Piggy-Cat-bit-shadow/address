@@ -423,9 +423,9 @@
       "redistributionAllowed": true,
       "updateCadence": "daily",
       "intervalDays": 1,
+      "quotaProvider": "geoapify",
       "extractId": "korea",
       "maxRecords": 20000,
-      "dailyGeocodeLimit": 2800,
       "geocodeConcurrency": 3,
       "qualityGate": {
         "minimumRecords": 1000,

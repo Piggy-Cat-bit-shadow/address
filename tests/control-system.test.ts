@@ -65,6 +65,21 @@ describe('control database security', () => {
     expect(await store.listApiTokens()).toEqual([]);
   });
 
+  it('does not project a parent run error onto a child that has no source error', async () => {
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,error_code,error_message,created_at,completed_at,updated_at
+    ) VALUES ('history-parent-error','address-pool','{}','failed','{}','PARENT_FAILED','parent failed',
+      '2026-08-05T00:00:00Z','2026-08-05T01:00:00Z','2026-08-05T01:00:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,error_code,error_message,created_at,completed_at,updated_at
+    ) VALUES ('history-parent-error','US','oa-us','queue','cancelled',NULL,NULL,
+      '2026-08-05T00:00:00Z','2026-08-05T01:00:00Z','2026-08-05T01:00:00Z')`).run();
+    const history = await store.syncHistory();
+    expect(history.items).toContainEqual(expect.objectContaining({
+      id: 'history-parent-error', countryCode: 'US', sourceId: 'oa-us', errorCode: null, errorMessage: null
+    }));
+  });
+
   it('supports custom token values and editable scope, rate and expiry settings', async () => {
     const customToken = 'addr_custom_fixture_token_1234567890';
     const expiresAt = new Date(Date.now() + 86400000).toISOString();
@@ -543,6 +558,52 @@ describe('control database security', () => {
     await store.reportCredential(id, 'success', { used: 200, limit: 200 });
     expect(await store.listCredentials()).toMatchObject([{ id, status: 'quota_exhausted', quotaRemaining: 0 }]);
     expect(await store.acquireCredentialById(id)).toBeNull();
+  });
+
+  it('blocks a key when any independent quota window is exhausted', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Multi-window', secret: 'multi-window-key', quotaLimit: 10 });
+    const row = await database.prepare('SELECT quota_scope_id,quota_service FROM provider_credentials WHERE id=?')
+      .bind(id).first<{ quota_scope_id: string; quota_service: string }>();
+    const now = new Date().toISOString();
+    await database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) VALUES (?,?,?,?,?,480,'provider',1,?,?)`).bind(
+      id, row!.quota_service, row!.quota_scope_id, 'day', 1, now, now
+    ).run();
+    await store.reportCredential(id, 'success');
+    expect(await store.acquireCredentialById(id)).toBeNull();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted',
+      quotaWindows: expect.arrayContaining([
+        expect.objectContaining({ period: 'day', used: 1, limit: 1, exhausted: true }),
+        expect.objectContaining({ period: 'month', used: 1, limit: 10, exhausted: false })
+      ])
+    })]);
+  });
+
+  it('creates and enforces a provider-reported daily window for a monthly AMap key', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'AMap daily error', secret: 'amap-daily-key' });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await store.reportCredential(id, 'quota', { period: 'day', service: 'place-search-v5', retryAt: resetAt });
+    expect(await store.acquireCredentialById(id)).toBeNull();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted',
+      quotaWindows: expect.arrayContaining([
+        expect.objectContaining({ period: 'day', exhausted: true, resetAt }),
+        expect.objectContaining({ period: 'month', exhausted: false })
+      ])
+    })]);
+  });
+
+  it('projects legacy quota blocks into the primary quota window', async () => {
+    const id = await store.addCredential({ provider: 'tencent', label: 'Legacy quota', secret: 'legacy-quota-key', quotaLimit: 10_000 });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await database.prepare(`UPDATE provider_credentials SET status='quota_exhausted',cooldown_until=? WHERE id=?`)
+      .bind(resetAt, id).run();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted', quotaUsed: 10_000, quotaRemaining: 0,
+      quotaWindows: [expect.objectContaining({ used: 10_000, remaining: 0, exhausted: true })]
+    })]);
   });
 
   it('prefers a provider-reported quota reset over the shorter QPS pacing interval', async () => {

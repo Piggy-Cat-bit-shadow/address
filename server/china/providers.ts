@@ -32,7 +32,8 @@ export class ProviderRequestError extends Error {
     public readonly outcome: 'qps' | 'quota' | 'auth' | 'network' | 'invalid',
     message: string,
     public readonly providerCode = '',
-    public readonly retryAt: string | null = null
+    public readonly retryAt: string | null = null,
+    public readonly quotaPeriod?: 'day' | 'month'
   ) { super(message); }
 }
 
@@ -78,6 +79,12 @@ const nextChinaDay = (): string => {
   shifted.setUTCHours(0, 0, 0, 0);
   return new Date(shifted.getTime() - 8 * 60 * 60 * 1000).toISOString();
 };
+const nextChinaMonth = (): string => {
+  const shifted = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  shifted.setUTCMonth(shifted.getUTCMonth() + 1, 1);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - 8 * 60 * 60 * 1000).toISOString();
+};
 const requestJson = async (url: URL, fetcher: typeof fetch): Promise<{ body: unknown; headers: Headers }> => {
   let response: Response;
   try { response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) }); }
@@ -96,15 +103,18 @@ const requestJson = async (url: URL, fetcher: typeof fetch): Promise<{ body: unk
 const parseAmapPage = (body: AmapResponse, region: string, key: string): ProviderPage => {
   if (body.status !== '1') {
     const code = body.infocode || '';
-    const outcome = ['10003', '10044', '10045'].includes(code) ? 'quota'
+    const outcome = ['10003', '10044', '10045', '40000'].includes(code) ? 'quota'
       : ['10004', '10014', '10015', '10019', '10020', '10021', '10029'].includes(code) ? 'qps'
         : ['10001', '10002', '10005', '10006', '10007', '10008', '10009', '10010', '10011', '10012', '10013', '10026', '10041'].includes(code) ? 'auth'
           : 'invalid';
+    const quotaPeriod = code === '40000' ? 'month' : 'day';
     const retryAt = ['10003', '10044', '10045'].includes(code) ? nextChinaDay()
+      : code === '40000' ? nextChinaMonth()
       : code === '10004'
       ? new Date(Math.ceil((Date.now() + 1) / 60_000) * 60_000).toISOString()
       : outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : null;
-    throw new ProviderRequestError(outcome, redactSecrets(body.info || body.infocode, [key]), code, retryAt);
+    throw new ProviderRequestError(outcome, redactSecrets(body.info || body.infocode, [key]), code, retryAt,
+      outcome === 'quota' ? quotaPeriod : undefined);
   }
   const pois = body.pois || [];
   const candidates = pois.map((item) => {
@@ -156,12 +166,13 @@ export const fetchTencentCommunities = async (city: string, page: number, key: s
   const limits = Object.fromEntries([...String(response.headers.get('x-limit') || '').matchAll(/([a-z_]+)=(\d+)/giu)]
     .map((match) => [match[1].toLowerCase(), Number(match[2])]));
   if (Number.isSafeInteger(limits.current_pv) && Number.isSafeInteger(limits.limit_pv) && limits.limit_pv > 0) {
-    observeQuota?.({ used: limits.current_pv, limit: limits.limit_pv });
+    observeQuota?.({ used: limits.current_pv, limit: limits.limit_pv, period: 'day', resetAt: nextChinaDay() });
   }
   if (body.status !== 0) {
     const outcome = body.status === 120 ? 'qps' : body.status === 121 ? 'quota' : [110, 111, 112].includes(Number(body.status)) ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]), String(body.status || ''),
-      outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : null);
+      outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : outcome === 'quota' ? nextChinaDay() : null,
+      outcome === 'quota' ? 'day' : undefined);
   }
   const data = body.data || [];
   const candidates = data.map((item) => {
@@ -191,7 +202,8 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
   if (body.status !== 0) {
     const outcome = [4, 302].includes(Number(body.status)) ? 'quota' : body.status === 301 ? 'qps' : [101, 102, 200, 201].includes(Number(body.status)) ? 'auth' : 'invalid';
     throw new ProviderRequestError(outcome, redactSecrets(body.message || body.status, [key]), String(body.status || ''),
-      outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : null);
+      outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : outcome === 'quota' ? nextChinaDay() : null,
+      outcome === 'quota' ? 'day' : undefined);
   }
   const results = body.results || [];
   const candidates = results.map((item) => {

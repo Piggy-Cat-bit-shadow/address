@@ -228,6 +228,22 @@ CREATE TABLE IF NOT EXISTS sync_shard_state (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_source_execution_state (
+  country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  source_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('checked','exhausted','backoff','suspended')),
+  reason TEXT,
+  source_fingerprint TEXT,
+  failure_fingerprint TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+  failure_code TEXT,
+  next_attempt_at TEXT,
+  exhausted_at TEXT,
+  last_attempt_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (country_code, source_id)
+);
+
 CREATE TABLE IF NOT EXISTS cn_admin_areas (
   adcode TEXT PRIMARY KEY,
   parent_adcode TEXT REFERENCES cn_admin_areas(adcode),
@@ -406,6 +422,8 @@ CREATE INDEX IF NOT EXISTS idx_address_pool_postcode_random ON address_pool(coun
 CREATE INDEX IF NOT EXISTS idx_address_pool_generation ON address_pool(generation, active, expires_at);
 CREATE INDEX IF NOT EXISTS idx_address_pool_coverage ON address_pool(coverage, active, property_type);
 CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_address ON address_pool_evidence(address_id, is_current, is_primary);
+CREATE INDEX IF NOT EXISTS idx_address_pool_evidence_current_dataset
+  ON address_pool_evidence(address_id, dataset_id) WHERE is_current = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_address_pool_evidence_source_record
   ON address_pool_evidence(dataset_id, address_id, source_record_id, evidence_type) WHERE source_record_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_address_pool_primary_current
@@ -428,6 +446,7 @@ CREATE INDEX IF NOT EXISTS idx_residential_region_id ON residential_coverage(cou
 CREATE INDEX IF NOT EXISTS idx_residential_city_id ON residential_coverage(country_code, city_id);
 CREATE INDEX IF NOT EXISTS idx_sync_country_due ON sync_country_state(status, next_sync_at, country_code);
 CREATE INDEX IF NOT EXISTS idx_sync_shard_due ON sync_shard_state(status, next_sync_at, country_code, shard_id);
+CREATE INDEX IF NOT EXISTS idx_sync_source_execution_due ON sync_source_execution_state(state,next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_country_created ON sync_jobs(country_code, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,level,name);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
@@ -506,5 +525,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 7) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 9) AS version
 ON CONFLICT (version) DO NOTHING;

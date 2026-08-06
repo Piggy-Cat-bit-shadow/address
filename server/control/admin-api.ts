@@ -326,17 +326,26 @@ export const createAdminApi = ({
     const promise = (async () => {
       const [upstream, chinaStatus, goals] = await Promise.all([
         loadSyncQueueUpstream(),
-        china.status().catch((): Record<string, unknown> => ({})),
-        evaluateCountryGoals(addressDb).catch(() => new Map())
+        china.status().catch(async (): Promise<Record<string, unknown>> => {
+          const runtime = await addressDb.prepare(`SELECT execution_state,next_attempt_at,reason
+            FROM sync_country_runtime WHERE country_code='CN'`).first<Record<string, unknown>>();
+          return runtime ? {
+            syncState: runtime.execution_state,
+            nextAttemptAt: runtime.next_attempt_at,
+            waitReason: runtime.reason
+          } : {};
+        }),
+        evaluateCountryGoals(addressDb)
       ]);
       let chinaEntry: Record<string, unknown> | null = null;
       const goal = goals.get('CN');
       if (goal?.enabled) {
         const syncState = String(chinaStatus.syncState || '');
         const state = syncState === 'running' ? 'running'
-          : syncState === 'quota_wait' || syncState === 'cooldown_wait' ? 'waiting_quota'
-            : syncState === 'source_limited' ? 'source_limited'
-              : goal.complete ? 'done' : 'queued';
+          : syncState === 'quota_wait' ? 'quota_wait'
+            : syncState === 'cooldown_wait' ? 'cooldown_wait'
+              : ['source_limited', 'blocked', 'failed'].includes(syncState) ? syncState
+                : goal.complete ? 'done' : 'queued';
         chinaEntry = {
           countryCode: 'CN', state, deficit: goal.deficit, target: goal.target, current: goal.current,
           unmetRules: goal.unmetRules, rules: goal.rules,
@@ -346,7 +355,10 @@ export const createAdminApi = ({
           engine: 'china-worker'
         };
       }
-      const genericEntries: Array<Record<string, unknown>> = (upstream?.entries || []).map((entry): Record<string, unknown> => {
+      const staleEntries = Array.isArray(syncQueueValue?.entries)
+        ? syncQueueValue.entries as Array<Record<string, unknown>> : [];
+      const upstreamEntries = upstream?.entries || staleEntries.filter((entry) => entry.countryCode !== 'CN');
+      const genericEntries: Array<Record<string, unknown>> = upstreamEntries.map((entry): Record<string, unknown> => {
         const countryGoal = goals.get(String(entry.countryCode));
         return countryGoal ? {
           ...entry,
@@ -358,11 +370,13 @@ export const createAdminApi = ({
         } : entry;
       });
       const entries: Array<Record<string, unknown>> = [...(chinaEntry ? [chinaEntry] : []), ...genericEntries]
-        .filter((entry) => !['done', 'source_limited'].includes(String(entry.state)))
         .sort((left, right) => {
           const countryPriority = Number(String(left.countryCode) !== 'CN') - Number(String(right.countryCode) !== 'CN');
           if (countryPriority) return countryPriority;
-          const ranks: Record<string, number> = { running: 0, queued: 1, waiting_quota: 2 };
+          const ranks: Record<string, number> = {
+            running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, scheduled_wait: 5,
+            source_limited: 6, suspended: 7, no_source: 8, blocked: 9, failed: 10, done: 11
+          };
           return (ranks[String(left.state)] ?? 9) - (ranks[String(right.state)] ?? 9)
             || Number(left.position ?? Number.MAX_SAFE_INTEGER) - Number(right.position ?? Number.MAX_SAFE_INTEGER)
             || String(left.countryCode).localeCompare(String(right.countryCode));
@@ -578,6 +592,11 @@ export const createAdminApi = ({
   });
 
   app.get('/admin/api/sync/queue', async (context) => context.json({ data: await loadSyncQueueSnapshot() }));
+  app.get('/admin/api/sync/history', async (context) => {
+    const limit = Number.parseInt(context.req.query('limit') || '100', 10);
+    const offset = Number.parseInt(context.req.query('offset') || '0', 10);
+    return context.json({ data: await control.syncHistory(limit, context.req.query('country') || '', offset) });
+  });
 
   app.get('/admin/api/settings/access', async (context) => context.json({ data: await control.status() }));
   app.get('/admin/api/settings/blacklist', (context) => context.json({ data: {
@@ -775,7 +794,7 @@ export const createAdminApi = ({
     } catch (error) {
       const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
       await control.reportCredential(credential.id, outcome, error instanceof ProviderRequestError
-        ? { retryAt: error.retryAt } : undefined);
+        ? { retryAt: error.retryAt, period: error.quotaPeriod } : undefined);
       if (isMapProvider(credential.provider)) await wakeChina();
       return context.json({ error: 'PROVIDER_TEST_FAILED', outcome }, 502);
     }

@@ -21,6 +21,8 @@
 
 伺服器同步 Key 不得與瀏覽器地圖 Key 共用。
 
+高德[基礎服務價格與配額頁](https://lbs.amap.com/pages/base_service_price)列出的個人認證基礎搜尋預設值為每月 `5,000` 次、`3 QPS`。官方[錯誤碼表](https://lbs.amap.com/api/webservice/guide/tools/info/)中，`10003` 為每日存取量超限並於次日 `00:00` 解封，`10004` 為單位時間存取超限並於下一分鐘解封；`40000` 屬於餘額或方案額度耗盡。系統分別記錄分鐘冷卻、每日視窗和每月視窗。
+
 ### 高德 JavaScript 地圖
 
 1. 另外建立 **JavaScript API** Key 與安全金鑰。
@@ -38,6 +40,8 @@
 
 請參考[百度 Web API 官方文件](https://lbsyun.baidu.com/faq/api?title=webapi%2Fguide%2Fwebservice-placeapi)。額度、無效 AK、服務未開啟及 IP/簽名錯誤只影響對應憑據。
 
+百度[開發者權益說明](https://lbsyun.baidu.com/solutions/privilege)列出的個人地點搜尋預設值為每日 `100` 次、`3 QPS`。方案或控制台顯示不同值時，以目前帳戶控制台為準。
+
 ### 騰訊位置服務
 
 1. 進入[騰訊位置服務控制台](https://lbs.qq.com/dev/console/application/mine)建立應用與 Key。
@@ -46,6 +50,8 @@
 4. 設定 `TENCENT_API_KEY`、編號變數，或在後台逐一新增。
 
 騰訊[官方狀態碼表](https://lbs.qq.com/service/webService/webServiceGuide/status)說明：`120` 為每秒請求量上限，`121` 為每日呼叫量上限。回應標頭 `X-LIMIT` 可提供即時用量，最終以控制台為準。
+
+騰訊[WebService 配額說明](https://lbs.qq.com/webservice_v1/guide-quota.html)列出的初始預設值為每日 `10,000` 次、`5 QPS`。若 `X-LIMIT` 或控制台回傳不同實際值，系統儲存並優先採用該每日視窗值。
 
 ### Mappls Search API
 
@@ -77,10 +83,10 @@
 ### Geoapify
 
 1. 在 [Geoapify MyProjects](https://myprojects.geoapify.com/) 建立帳號與專案。
-2. 複製專案 Key，並查看[官方價格與額度](https://www.geoapify.com/pricing/)。
-3. 設定 `GEOAPIFY_API_KEY`；API 端需要輪換時也可在後台新增。
+2. 複製專案 Key，並查看[反向地理編碼文件](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/)與[官方價格及額度](https://www.geoapify.com/pricing/)。
+3. 在「後台 → 服務憑據 → Geoapify」逐一新增 Key。`GEOAPIFY_API_KEY`、`GEOAPIFY_API_KEY_2` 等環境變數只用於首次部署匯入。
 
-韓國 K-apt 首次匯入需要此環境變數核驗郵遞區號。不要寫死額度，方案與接口 credits 可能變更。
+韓國 K-apt 每次核驗郵遞區號前都從加密憑據池取得 Key，並分別回寫認證失敗、限速、額度等待及暫時失敗。全部 Key 不可用時，同步等待資料庫記錄的最早恢復時間。同一專案或帳戶共享額度的 Key 必須設定相同的額度作用域。Geoapify 目前每次 Reverse Geocoding 消耗一個 credit；方案可能變更，因此後台額度仍可編輯。`429` 回應優先遵循 `Retry-After`；平台未提供重置時間時，依該憑據設定的時區計算本機日額度視窗。
 
 ### 新加坡 OneMap
 
@@ -134,7 +140,7 @@ openssl rand -base64 36   # 管理員與 PostgreSQL 密碼
 
 ## 輪換與冷卻
 
-系統依啟用狀態、QPS、額度、有效期、冷卻時間與最近使用時間選擇憑據。單一 Key 失敗後，本輪只排除該 Key，並繼續使用其他可用 Key。額度耗盡時等待平台回傳的恢復時間或設定週期邊界；短暫錯誤使用有上限的指數冷卻。所有 Key 暫不可用時，任務等待最早恢復的 Key，而不會永久停用整個平台。
+系統依啟用狀態、QPS、額度、有效期、冷卻時間與最近使用時間選擇憑據。一個 Key 可同時具有每日與每月多個額度視窗，任一視窗耗盡都會輪換到其他 Key。單一 Key 失敗後，本輪只排除該 Key，並繼續使用其他可用 Key。額度耗盡時等待平台回傳的恢復時間或對應週期邊界；QPS 與分鐘限制只進入短冷卻。所有 Key 暫不可用時，任務等待最早恢復的 Key。
 
 官方控制台與回應標頭優先於文件範例。建立憑據時應在後台正確設定服務名稱、週期、上限、時區邊界與選用的共用額度群組。
 
@@ -145,4 +151,4 @@ openssl rand -base64 36   # 管理員與 PostgreSQL 密碼
 3. 只在管理後台測試憑據，不把完整值複製到日誌或截圖。
 4. 若憑據曾被顯示，立即輪換。
 
-官方頁面核對日期：2026-08-04。平台條款、方案、額度與控制台流程可能變更。
+官方頁面核對日期：2026-08-05。平台條款、方案、額度與控制台流程可能變更。

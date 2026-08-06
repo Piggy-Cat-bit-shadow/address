@@ -1101,7 +1101,7 @@ export class ChinaDataService {
         const outcome = error instanceof ProviderRequestError ? error.outcome : 'network';
         lastError = error instanceof Error ? error.message : String(error);
         await this.control.reportCredential(credential.id, outcome, error instanceof ProviderRequestError
-          ? { retryAt: error.retryAt } : undefined);
+          ? { retryAt: error.retryAt, period: error.quotaPeriod } : undefined);
         await this.writeCheckpoint(provider, key, page, 'failed', accepted, lastError);
       }
     }
