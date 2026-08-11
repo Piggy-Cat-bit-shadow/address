@@ -13,8 +13,6 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live-address.333186.xyz-1769e0" alt="Live demo" /></a>
 </p>
 
-**A typical completed deployment uses approximately 5 GB of disk space for the application and PostgreSQL address database. Active synchronization requires additional temporary space.**
-
 **Address is a real residential address generator.** Its published residential base addresses come from official open data, national or regional address registers, map-registered buildings, and open-map records with explicit residential evidence. It does not pass randomly assembled streets, house numbers, or postcodes off as real addresses. Every record retains source coordinates for positioning in services such as Google Maps or AMap where they cover the relevant region; text-search results depend on each platform's coverage, indexed names, and update cycle.
 
 ## Highlights
