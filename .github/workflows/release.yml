@@ -112,35 +112,24 @@ jobs:
         run: |
           version='${{ steps.version.outputs.value }}'
           cat > release/RELEASE_NOTES.md <<NOTES
-          ## Address $version
+          This release strengthens automated synchronization, credential quota coordination, recoverable imports, and deployment reliability.
 
-          > 自托管真实住宅地址生成器，支持 27 个国家和地区。
+          ### Features
+          - Added synchronization history with country, source, execution window, duration, result, and address growth.
+          - Added an independent credential broker for shared quota, cooldown, and key rotation management across production and isolated test environments.
+          - Added persistent checkpoints for long-running Japan, South Korea, and Singapore imports, with automatic continuation after quota recovery.
 
-          本版本集中完善全自动同步、凭据额度协调、可恢复导入和生产部署可靠性。
+          ### Improvements
+          - Persisted source version, exhaustion, failure, and next-check state independently so unchanged sources stop repeating full synchronization after producing no growth.
+          - Separated daily and monthly quotas, short-term rate limits, and cooldowns; keys rotate in order and resume at the earliest available recovery time.
+          - Separated queue priority, three-rule completion, and source execution eligibility to prevent exhausted countries from consuming workers.
+          - Consolidated PostgreSQL initialization, migration, and isolated Docker Compose deployment behavior.
 
-          ### 新增功能
-          - 新增同步历史视图，记录国家、来源、执行时段、耗时、结果与地址增量。
-          - 新增独立凭据代理，为生产和隔离测试环境统一管理平台额度、冷却与 Key 轮换。
-          - 日本、韩国和新加坡长任务支持持久化 checkpoint，额度恢复后自动续跑。
-
-          ### 优化改进
-          - 按来源分别保存版本、耗尽、失败与下次检查状态；相同输入无增长后不再重复完整同步。
-          - API 日/月额度、短时限流和冷却分别处理，多 Key 依次切换，全部不可用时等待最早恢复时间。
-          - 同步队列优先级、三重完成规则和来源执行资格完全分离，避免已耗尽国家空转。
-          - PostgreSQL 初始化、迁移和 Docker Compose 隔离部署流程进一步收敛。
-
-          ### Bug 修复
-          - 修复韩国 K-apt 在 Geoapify 短时限流或日额度耗尽后无法正确续跑的问题。
-          - 修复异常终止、过期租约和残留 checkpoint 可能导致任务卡住的问题。
-          - 修复无增长来源、失败分片和旧版本来源可能被重复下载的问题。
-          - 自动清理同步暂存文件、失败产物和超时残留，避免长期占用磁盘。
-
-          ### 升级方式
-
-              docker compose pull
-              docker compose up -d
-
-          完整安装、升级和备份说明见 [部署文档](https://github.com/daimon3332/address/blob/main/docs/DEPLOYMENT.zh-CN.md)。
+          ### Fixes
+          - Fixed South Korea K-apt continuation after Geoapify rate limits or daily quota exhaustion.
+          - Fixed jobs becoming stuck after abnormal termination, expired leases, or stale checkpoints.
+          - Fixed repeated downloads of no-growth sources, failed shards, and unchanged source versions.
+          - Added automatic cleanup for synchronization staging files, failed artifacts, and timeout residue.
           NOTES
       - name: Publish stable GitHub release
         shell: bash
