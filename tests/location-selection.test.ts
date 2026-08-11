@@ -105,6 +105,41 @@ const targetDb = (): TargetDb => ({
 } as unknown as TargetDb);
 
 describe('stable location selection', () => {
+  it('uses the indexed persisted key for postcode availability', async () => {
+    const statements: string[] = [];
+    const postcode = {
+      id: 1, city_id: 2, code: '1234 AB', locality_name: 'Example', city_name: 'Example',
+      city_native_name: 'Example', city_zh_name: 'Example', region_id: 3, region_name: 'North',
+      region_native_name: 'North', region_zh_name: 'North', region_code: 'NO'
+    };
+    const db = {
+      prepare(sql: string) {
+        statements.push(sql);
+        const statement = {
+          bind() { return statement; },
+          async first<T>() { return { total: 1 } as T; },
+          async all<T>() {
+            if (sql.includes('SELECT MIN(p.id)')) return { results: [postcode] } as T;
+            if (sql.includes('COUNT(address.id) AS address_count')) return { results: [{ id: 1, address_count: 4 }] } as T;
+            return { results: [] } as T;
+          }
+        };
+        return statement;
+      }
+    } as unknown as CatalogDb;
+
+    const result = await queryLocationCatalog(db, { country: 'NL', field: 'postcode', limit: 200 });
+
+    expect(result.options[0]).toMatchObject({ value: '1234 AB', availableCount: 4 });
+    const poolQueries = statements.filter((sql) => sql.includes('address_pool address'));
+    expect(poolQueries).toHaveLength(2);
+    expect(poolQueries).toEqual(expect.arrayContaining([
+      expect.stringContaining('SELECT address.postcode_key FROM address_pool address'),
+      expect.stringContaining('LEFT JOIN address_pool address')
+    ]));
+    expect(poolQueries.join('\n')).not.toContain("LOWER(REPLACE(address.postcode,' ',''))");
+  });
+
   it('aggregates city availability by indexed IDs and isolates legacy name fallback', async () => {
     const statements: string[] = [];
     const row = {

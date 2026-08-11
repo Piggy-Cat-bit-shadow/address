@@ -77,6 +77,29 @@ describe('address data aggregation', () => {
     });
   });
 
+  it('surfaces the queue credential blocker ahead of stale shard failures', async () => {
+    const countries = await listAddressData(database, undefined, new Map([['JP', {
+      state: 'blocked',
+      reason: 'missing_api_key:geoapify',
+      nextAttemptAt: null
+    }]]));
+    expect(countries.find((country) => country.countryCode === 'JP')).toMatchObject({
+      status: 'blocked',
+      lastError: 'missing_api_key:geoapify'
+    });
+  });
+
+  it('names the required China map keys when no provider is configured', async () => {
+    const countries = await listAddressData(database, {
+      syncState: 'blocked',
+      waitReason: 'unconfigured'
+    });
+    expect(countries.find((country) => country.countryCode === 'CN')).toMatchObject({
+      status: 'blocked',
+      lastError: 'missing_api_key:china_maps'
+    });
+  });
+
   it('reports dual completion criteria for count and lowest-node coverage', async () => {
     const countries = await listAddressData(database);
     expect(countries.find((country) => country.countryCode === 'US')).toMatchObject({

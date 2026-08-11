@@ -4,11 +4,15 @@ import { dirname, resolve } from 'node:path';
 import { loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
 import { evaluateCountryGoals } from './country-goals.mjs';
 import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
+import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 
 export const LATCH_REASON = 'source_limited_cache';
 export const CHECKED_REASON = 'source_version_checked';
 export const SUSPENDED_REASON = 'retry_suspended';
 export const BACKOFF_REASON = 'retry_backoff';
+export const SHARED_FAILURE_REASON = 'shared_failure_circuit';
+export const PARTIAL_REASON = 'source_partial_checkpoint';
+export const PARTIAL_STALLED_REASON = 'source_partial_stalled';
 const DEFAULT_SOURCE_PROBE_MS = 24 * 60 * 60_000;
 // Failure codes that deterministically repeat for identical inputs; the ETL
 // skips same-signature retries itself, so a fruitless pass latches immediately.
@@ -16,10 +20,30 @@ const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QU
 const timeoutFailureCodes = new Set([
   '57014', 'QUERY_CANCELED', 'SYNC_JOB_TIMEOUT', 'SYNC_PROCESS_TIMEOUT', 'SYNC_PROCESS_ABORTED'
 ]);
+const circuitBreakerFailureCodes = new Set([...timeoutFailureCodes, 'SYNC_PROCESS_FAILED']);
+const executionCapabilityRevisions = Object.freeze({
+  import: 'postgres-publish-v2',
+  materialize: 'child-process-diagnostics-v2',
+  discover: 'source-discovery-v1',
+  interrupted: 'restart-recovery-v3',
+  runtime: 'sync-runtime-v2'
+});
+// Adapter-specific execution fixes release only matching suspended failures.
+// They are intentionally excluded from source fingerprints, so exhausted and
+// successfully checked sources remain terminal.
+const adapterExecutionCapabilityRevisions = Object.freeze({
+  'japan-abr': { materialize: 'japan-abr-materialize-v4' },
+  'korea-kapt': { materialize: 'korea-kapt-bridge-v3' }
+});
 // Countries whose synchronization consumes a metered provider quota. A shard
 // may declare `quotaProvider` in source-shards.json to extend this; the
 // korea-kapt shard does not yet, so KR -> geoapify is kept here on purpose.
 const builtinQuotaProviders = { 'korea-kapt-residential': 'geoapify' };
+const providerEnvironmentVariables = Object.freeze({
+  geoapify: 'GEOAPIFY_API_KEY',
+  mappls: 'MAPPLS_API_KEY',
+  onemap: 'ONEMAP_ACCESS_TOKEN'
+});
 const revisionEmbeddedAdapters = new Set([
   'japan-abr', 'singapore-hdb', 'korea-kapt', 'inegi-residential', 'ethekwini-residential',
   'cape-town-residential', 'taiwan-residential', 'hong-kong-residential', 'mappls-residential',
@@ -31,6 +55,11 @@ const timestamp = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const initialProbeComparableVersion = (value, adapter) => String(value || '')
+  .replace(adapter === 'geofabrik' ? /-p[a-f\d]{16}$/iu : /$^/u, '');
+const parseJson = (value) => {
+  try { return JSON.parse(String(value || '{}')); } catch { return {}; }
+};
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
@@ -78,8 +107,42 @@ const deprecatedCountryFingerprint = ({
   sourceVersions: sortedPairs(sourceVersions)
 }));
 
-const retryFingerprint = (sourceFingerprint, credentialRevision = '') =>
-  sha256(JSON.stringify({ sourceFingerprint, credentialRevision: String(credentialRevision || '') }));
+export const normalizeFailurePhase = (value) => {
+  const phase = String(value || '').trim().toLowerCase().split(':', 1)[0];
+  return Object.hasOwn(executionCapabilityRevisions, phase) ? phase : 'runtime';
+};
+
+const inferredFailurePhase = (failureCode) => {
+  const code = String(failureCode || '').toUpperCase();
+  if (['57014', 'QUERY_CANCELED'].includes(code)) return 'import';
+  if (code.startsWith('SYNC_PROCESS_')) return 'materialize';
+  if (code === 'SYNC_JOB_INTERRUPTED') return 'interrupted';
+  return 'runtime';
+};
+
+export const executionFailureFingerprint = (
+  sourceFingerprint, credentialRevision = '', phase = 'runtime', adapter = ''
+) => {
+  const normalizedPhase = normalizeFailurePhase(phase);
+  return sha256(JSON.stringify({
+    sourceFingerprint,
+    credentialRevision: String(credentialRevision || ''),
+    phase: normalizedPhase,
+    executionRevision: executionCapabilityRevisions[normalizedPhase],
+    ...(adapterExecutionCapabilityRevisions[String(adapter || '').toLowerCase()]?.[normalizedPhase]
+      ? { adapterExecutionRevision: adapterExecutionCapabilityRevisions[String(adapter).toLowerCase()][normalizedPhase] }
+      : {})
+  }));
+};
+
+export const systemicFailureSignature = ({ failureCode, error = '', failurePhase = 'runtime' }) => {
+  const code = String(failureCode || '').toUpperCase();
+  if (!circuitBreakerFailureCodes.has(code)) return null;
+  const detail = timeoutFailureCodes.has(code) ? '' : String(error || '').toLowerCase()
+    .replace(/[a-z]:\\[^\s]+|\/[\w./-]+/giu, '<path>')
+    .replace(/\b\d+\b/gu, '<n>').replace(/\s+/gu, ' ').trim().slice(0, 500);
+  return sha256(JSON.stringify({ code, phase: normalizeFailurePhase(failurePhase), detail }));
+};
 
 export const quotaProviderMap = (shards) => {
   const providers = { ...builtinQuotaProviders };
@@ -170,13 +233,58 @@ export const evaluateAttempt = ({
   backoffCapMs = 6 * 60 * 60_000,
   maxConsecutiveFailures = 8,
   maxTimeoutFailures = 2,
-  probeIntervalMs = DEFAULT_SOURCE_PROBE_MS
+  probeIntervalMs = DEFAULT_SOURCE_PROBE_MS,
+  adapter = null,
+  failurePhase = null,
+  failureSignature = null,
+  sourceComplete = true,
+  checkpointToken = null,
+  previousCheckpointToken = null,
+  checkpointStage = null,
+  partialNextAttemptAt = null,
+  partialStalls = 0,
+  maxPartialStalls = 3
 }) => {
-  if (quotaBound && !quotaAvailable) {
-    return { action: 'waiting_quota', nextAttemptAt: quotaResetAt, consecutiveFailures: 0 };
-  }
   const progressed = netGrowth > 0 || (goalDeficitBefore != null && goalDeficitAfter != null
     && Number(goalDeficitAfter) < Number(goalDeficitBefore));
+  const retainedCheckpointToken = checkpointToken || previousCheckpointToken || null;
+  if (sourceComplete === false && (jobSucceeded || failureCode === 'SOURCE_PARTIAL')) {
+    const checkpointProgressed = checkpointToken
+      ? checkpointToken !== previousCheckpointToken
+      : progressed;
+    const stalls = checkpointProgressed ? 0 : Number(partialStalls || 0) + 1;
+    const partialWaitAt = timestamp(partialNextAttemptAt) > timestamp(completedAt)
+      ? partialNextAttemptAt
+      : !quotaAvailable && timestamp(quotaResetAt) > timestamp(completedAt)
+        ? quotaResetAt
+        : ['quota', 'credential', 'network'].includes(String(checkpointStage || '').toLowerCase())
+          ? new Date(timestamp(completedAt) + backoffBaseMs).toISOString()
+          : null;
+    if (stalls >= Math.max(1, maxPartialStalls)) {
+      return {
+        action: 'suspend',
+        reason: PARTIAL_STALLED_REASON,
+        fingerprint: failureFingerprintAfter,
+        checkpointToken,
+        consecutiveFailures: stalls,
+        failureCode: 'SOURCE_PARTIAL_STALLED',
+        adapter,
+        failurePhase: failurePhase || 'materialize',
+        failureSignature,
+        nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, probeIntervalMs)).toISOString()
+      };
+    }
+    return {
+      action: 'checked',
+      reason: checkpointProgressed ? PARTIAL_REASON : PARTIAL_STALLED_REASON,
+      fingerprint: fingerprintAfter,
+      checkpointToken,
+      consecutiveFailures: stalls,
+      nextAttemptAt: partialWaitAt || (checkpointProgressed
+        ? completedAt
+        : new Date(timestamp(completedAt) + Math.min(backoffCapMs, backoffBaseMs * 2 ** Math.max(0, stalls - 1))).toISOString())
+    };
+  }
   if (jobSucceeded && progressed) {
     return {
       action: 'checked',
@@ -187,7 +295,29 @@ export const evaluateAttempt = ({
     };
   }
   if (jobSucceeded || deterministicFailure) {
-    return { action: 'latch', reason: LATCH_REASON, fingerprint: fingerprintAfter, latchedAt: completedAt };
+    return {
+      action: 'latch',
+      reason: LATCH_REASON,
+      fingerprint: fingerprintAfter,
+      latchedAt: completedAt,
+      nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, probeIntervalMs)).toISOString()
+    };
+  }
+  if (quotaBound && !quotaAvailable) {
+    return { action: 'waiting_quota', nextAttemptAt: quotaResetAt, consecutiveFailures: 0 };
+  }
+  if (String(failureCode || '').toUpperCase() === 'SYNC_JOB_INTERRUPTED') {
+    return {
+      action: 'backoff',
+      fingerprint: failureFingerprintAfter,
+      consecutiveFailures: Number(consecutiveFailures || 0),
+      failureCode,
+      checkpointToken: retainedCheckpointToken,
+      adapter,
+      failurePhase,
+      failureSignature,
+      nextAttemptAt: new Date(timestamp(completedAt) + Math.min(60_000, backoffBaseMs)).toISOString()
+    };
   }
   const failures = consecutiveFailures + 1;
   const timeoutFailure = timeoutFailureCodes.has(String(failureCode || '').toUpperCase());
@@ -198,7 +328,11 @@ export const evaluateAttempt = ({
       fingerprint: failureFingerprintAfter,
       consecutiveFailures: failures,
       failureCode: failureCode || null,
-      nextAttemptAt: null
+      checkpointToken: retainedCheckpointToken,
+      adapter,
+      failurePhase,
+      failureSignature,
+      nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, probeIntervalMs)).toISOString()
     };
   }
   const delay = Math.min(backoffCapMs, backoffBaseMs * 2 ** (failures - 1));
@@ -207,6 +341,10 @@ export const evaluateAttempt = ({
     fingerprint: failureFingerprintAfter,
     consecutiveFailures: failures,
     failureCode: failureCode || null,
+    checkpointToken: retainedCheckpointToken,
+    adapter,
+    failurePhase,
+    failureSignature,
     nextAttemptAt: new Date(timestamp(completedAt) + delay).toISOString()
   };
 };
@@ -250,8 +388,11 @@ export class QueueStateStore {
         reason: evaluation.reason || LATCH_REASON,
         fingerprint: evaluation.fingerprint,
         latchedAt: evaluation.latchedAt || evaluatedAt,
-        consecutiveFailures: 0,
-        nextAttemptAt: null,
+        consecutiveFailures: Number(evaluation.consecutiveFailures || 0),
+        checkpointToken: evaluation.checkpointToken || null,
+        probeFailures: Number(evaluation.probeFailures || 0),
+        probeVersion: evaluation.probeVersion || null,
+        nextAttemptAt: evaluation.nextAttemptAt || null,
         updatedAt: evaluatedAt
       };
     } else if (evaluation.action === 'checked') {
@@ -260,7 +401,10 @@ export class QueueStateStore {
         latched: false,
         reason: evaluation.reason || CHECKED_REASON,
         fingerprint: evaluation.fingerprint,
-        consecutiveFailures: 0,
+        consecutiveFailures: Number(evaluation.consecutiveFailures || 0),
+        checkpointToken: evaluation.checkpointToken || null,
+        probeFailures: Number(evaluation.probeFailures || 0),
+        probeVersion: evaluation.probeVersion || null,
         nextAttemptAt: evaluation.nextAttemptAt || null,
         updatedAt: evaluatedAt
       };
@@ -271,7 +415,13 @@ export class QueueStateStore {
         reason: evaluation.reason || SUSPENDED_REASON,
         fingerprint: evaluation.fingerprint,
         consecutiveFailures: evaluation.consecutiveFailures,
+        checkpointToken: evaluation.checkpointToken || null,
+        probeFailures: Number(evaluation.probeFailures || 0),
+        probeVersion: evaluation.probeVersion || null,
         failureCode: evaluation.failureCode || null,
+        adapter: evaluation.adapter || null,
+        failurePhase: evaluation.failurePhase || null,
+        failureSignature: evaluation.failureSignature || null,
         nextAttemptAt: evaluation.nextAttemptAt || null,
         updatedAt: evaluatedAt
       };
@@ -281,7 +431,13 @@ export class QueueStateStore {
         latched: false,
         fingerprint: evaluation.fingerprint || null,
         consecutiveFailures: evaluation.consecutiveFailures,
+        checkpointToken: evaluation.checkpointToken || null,
+        probeFailures: Number(evaluation.probeFailures || 0),
+        probeVersion: evaluation.probeVersion || null,
         failureCode: evaluation.failureCode || null,
+        adapter: evaluation.adapter || null,
+        failurePhase: evaluation.failurePhase || null,
+        failureSignature: evaluation.failureSignature || null,
         nextAttemptAt: evaluation.nextAttemptAt,
         updatedAt: evaluatedAt
       };
@@ -338,12 +494,6 @@ export class PostgresQueueStateStore {
       this.initialized = true;
       return;
     }
-    const total = Number(await this.database.prepare('SELECT COUNT(*) AS total FROM sync_source_execution_state').first('total') || 0);
-    if (total) {
-      await rm(this.legacyFile, { force: true });
-      this.initialized = true;
-      return;
-    }
     let legacy;
     try {
       legacy = JSON.parse(await readFile(this.legacyFile, 'utf8'));
@@ -355,6 +505,9 @@ export class PostgresQueueStateStore {
       const shards = country?.shards || { [countryCode]: country };
       for (const [sourceId, entry] of Object.entries(shards)) {
         if (!entry || typeof entry !== 'object') continue;
+        const existing = await this.database.prepare(`SELECT 1 AS present FROM sync_source_execution_state
+          WHERE country_code=? AND source_id=?`).bind(countryCode, sourceId).first('present');
+        if (existing) continue;
         await this.writeEntry(countryCode, sourceId, entry, entry.updatedAt || new Date().toISOString());
       }
     }
@@ -364,8 +517,9 @@ export class PostgresQueueStateStore {
 
   async load() {
     await this.initialize();
-    const rows = (await this.database.prepare(`SELECT country_code,source_id,state,reason,source_fingerprint,
-      failure_fingerprint,consecutive_failures,failure_code,next_attempt_at,exhausted_at,updated_at
+      const rows = (await this.database.prepare(`SELECT country_code,source_id,state,reason,source_fingerprint,
+        failure_fingerprint,consecutive_failures,failure_code,adapter,failure_phase,failure_signature,
+        checkpoint_token,probe_failures,probe_version,next_attempt_at,exhausted_at,updated_at
       FROM sync_source_execution_state`).all()).results;
     const state = { schemaVersion: 1, countries: {} };
     for (const row of rows) {
@@ -379,6 +533,12 @@ export class PostgresQueueStateStore {
         latchedAt: row.exhausted_at || null,
         consecutiveFailures: Number(row.consecutive_failures || 0),
         failureCode: row.failure_code || null,
+        adapter: row.adapter || null,
+        failurePhase: row.failure_phase || inferredFailurePhase(row.failure_code),
+        failureSignature: row.failure_signature || null,
+        checkpointToken: row.checkpoint_token || null,
+        probeFailures: Number(row.probe_failures || 0),
+        probeVersion: row.probe_version || null,
         nextAttemptAt: row.next_attempt_at || null,
         updatedAt: row.updated_at
       };
@@ -394,17 +554,22 @@ export class PostgresQueueStateStore {
     const failureState = ['backoff', 'suspended'].includes(savedState);
     await this.database.prepare(`INSERT INTO sync_source_execution_state(
       country_code,source_id,state,reason,source_fingerprint,failure_fingerprint,consecutive_failures,
-      failure_code,next_attempt_at,exhausted_at,last_attempt_at,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(country_code,source_id) DO UPDATE SET
+      failure_code,adapter,failure_phase,failure_signature,checkpoint_token,probe_failures,probe_version,
+      next_attempt_at,exhausted_at,last_attempt_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(country_code,source_id) DO UPDATE SET
       state=excluded.state,reason=excluded.reason,source_fingerprint=excluded.source_fingerprint,
       failure_fingerprint=excluded.failure_fingerprint,consecutive_failures=excluded.consecutive_failures,
-      failure_code=excluded.failure_code,next_attempt_at=excluded.next_attempt_at,
+      failure_code=excluded.failure_code,adapter=excluded.adapter,failure_phase=excluded.failure_phase,
+      failure_signature=excluded.failure_signature,checkpoint_token=excluded.checkpoint_token,
+      probe_failures=excluded.probe_failures,probe_version=excluded.probe_version,next_attempt_at=excluded.next_attempt_at,
       exhausted_at=excluded.exhausted_at,last_attempt_at=excluded.last_attempt_at,updated_at=excluded.updated_at`)
       .bind(
         countryCode, sourceId, databaseState, entry.reason || null,
         failureState ? null : entry.fingerprint || null,
         failureState ? entry.fingerprint || null : null,
-        Number(entry.consecutiveFailures || 0), entry.failureCode || null, entry.nextAttemptAt || null,
+        Number(entry.consecutiveFailures || 0), entry.failureCode || null, entry.adapter || null,
+        entry.failurePhase || null, entry.failureSignature || null, entry.checkpointToken || null,
+        Number(entry.probeFailures || 0), entry.probeVersion || null, entry.nextAttemptAt || null,
         savedState === 'latched' ? entry.latchedAt || evaluatedAt : null, evaluatedAt, evaluatedAt
       ).run();
   }
@@ -427,6 +592,12 @@ export class PostgresQueueStateStore {
       latchedAt: evaluation.latchedAt || null,
       consecutiveFailures: evaluation.consecutiveFailures || 0,
       failureCode: evaluation.failureCode || null,
+      adapter: evaluation.adapter || null,
+      failurePhase: evaluation.failurePhase || null,
+      failureSignature: evaluation.failureSignature || null,
+      checkpointToken: evaluation.checkpointToken || null,
+      probeFailures: Number(evaluation.probeFailures || 0),
+      probeVersion: evaluation.probeVersion || null,
       nextAttemptAt: evaluation.nextAttemptAt || null
     }, evaluatedAt);
     return this.load();
@@ -455,15 +626,12 @@ export class PostgresQueueStateStore {
 
 export const createQueueSources = ({
   addressDatabase,
-  controlDatabase
+  controlDatabase,
+  environment = process.env
 }) => {
   const withDatabase = async (database, fallback, reader) => {
     if (!database) return fallback;
-    try {
-      return await reader(database);
-    } catch {
-      return fallback;
-    }
+    return reader(database);
   };
 
   const addressFacts = () => withDatabase(addressDatabase, {
@@ -521,7 +689,7 @@ export const createQueueSources = ({
       const rows = (await database.prepare(`SELECT history.country_code,history.source_id,history.started_at,
           history.completed_at,run.target_json
         FROM sync_run_countries history JOIN sync_runs run ON run.id=history.run_id
-        WHERE history.status IN ('succeeded','failed','paused_quota') AND history.source_id<>''
+        WHERE history.status='succeeded' AND run.status='succeeded' AND history.source_id<>''
           AND history.started_at IS NOT NULL AND history.completed_at IS NOT NULL
         ORDER BY history.completed_at DESC LIMIT 1000`).all()).results;
       for (const row of rows) {
@@ -544,36 +712,63 @@ export const createQueueSources = ({
     return { policies, counts, rules, shards, nodeTargetsUpdatedAt, catalogVersion, durationSamples, deficits };
   });
 
-  // Availability mirrors ControlStore.acquireCredential filters conservatively:
-  // a credential counts as available when enabled, not disabled/needs_review,
-  // and any cooldown has expired. When no credential row exists (for example a
-  // worker key supplied purely via environment) the quota is treated as
-  // available so the country is never starved by missing bookkeeping.
-  const quotaStatus = (provider, now = new Date()) => withDatabase(controlDatabase, {
-    provider, known: false, available: true, nextResetAt: null, waitState: null, revision: ''
-  }, async (database) => {
-    const rows = (await database.prepare(`SELECT id,status,cooldown_until,quota_period,quota_timezone_offset,
-        provider_reported_reset_at,updated_at
-      FROM provider_credentials WHERE provider=? AND enabled=1 AND status<>'disabled'`).bind(provider).all()).results;
-    if (!rows.length) return {
-      provider,
-      known: false,
-      available: provider !== 'mappls',
-      nextResetAt: null,
-      waitState: provider === 'mappls' ? 'blocked' : null,
-      revision: ''
+  const environmentCredentials = (provider) => {
+    const baseName = providerEnvironmentVariables[provider];
+    if (!baseName) return [];
+    return [baseName, ...Object.keys(environment)
+      .filter((name) => name.startsWith(`${baseName}_`) && /^\d+$/u.test(name.slice(baseName.length + 1)))
+      .sort((left, right) => Number(left.slice(baseName.length + 1)) - Number(right.slice(baseName.length + 1)))]
+      .filter((name) => String(environment[name] || '').trim());
+  };
+  const unconfiguredProvider = (provider) => {
+    const names = environmentCredentials(provider);
+    return names.length ? {
+      provider, known: false, available: false, nextResetAt: null, waitState: 'blocked',
+      reason: `credential_import_pending:${provider}`,
+      revision: sha256(JSON.stringify(names.map((name) => [name, environment[name]])))
+    } : {
+      provider, known: false, available: false, nextResetAt: null, waitState: 'blocked',
+      reason: `missing_api_key:${provider}`, revision: 'unconfigured'
     };
+  };
+
+  // Availability mirrors ControlStore.acquireCredential. Environment keys are
+  // accepted during the short startup window before the API imports them into
+  // the encrypted credential store; an absent or unusable key never starts a
+  // source that can only fail with SOURCE_CREDENTIAL_UNAVAILABLE.
+  const localQuotaStatus = (provider, now = new Date()) => withDatabase(
+    controlDatabase,
+    unconfiguredProvider(provider),
+    async (database) => {
+    const rows = (await database.prepare(`SELECT id,status,cooldown_until,quota_period,quota_timezone_offset,
+        provider_reported_reset_at,enabled,secret_ciphertext,weight,qps_limit,quota_service,quota_limit,quota_scope_id
+      FROM provider_credentials WHERE provider=?`).bind(provider).all()).results;
+    const stableCredentials = rows.map((row) => [
+      row.id, row.enabled, row.secret_ciphertext, row.weight, row.qps_limit, row.quota_service,
+      row.quota_period, row.quota_limit, row.quota_timezone_offset, row.quota_scope_id
+    ]);
+    const candidates = rows.filter((row) => Boolean(row.enabled) && String(row.status || '') !== 'disabled');
+    if (!candidates.length) {
+      const fallback = unconfiguredProvider(provider);
+      if (fallback.available || !rows.length) return fallback;
+      return {
+        ...fallback,
+        known: true,
+        reason: `api_key_disabled:${provider}`,
+        revision: sha256(JSON.stringify(stableCredentials))
+      };
+    }
     let available = false;
     let nextResetAt = 0;
     let waitState = null;
     const revisions = [];
-    for (const row of rows) {
+    for (const row of candidates) {
       if (String(row.status || '') === 'needs_review') continue;
       const cooldownAt = timestamp(row.cooldown_until);
       const cooling = cooldownAt > now.getTime();
       const status = String(row.status || '');
       const windows = (await database.prepare(`SELECT quota_window.service,quota_window.scope_id,quota_window.period,
-        quota_window.limit_count,quota_window.timezone_offset,quota_window.updated_at,
+        quota_window.limit_count,quota_window.timezone_offset,quota_window.enabled,
         observation.used_count,observation.limit_count AS observed_limit,observation.reset_at,observation.observed_at
         FROM provider_quota_windows quota_window LEFT JOIN provider_quota_observations observation
           ON observation.credential_id=quota_window.credential_id AND observation.service=quota_window.service
@@ -595,7 +790,8 @@ export const createQueueSources = ({
             ? timestamp(window.reset_at) : nextQuotaResetTime(period, offset, now).getTime();
           quotaBlockedUntil = Math.max(quotaBlockedUntil, reset);
         }
-        revisions.push([row.id, window.service, period, used, limit, window.updated_at, window.observed_at]);
+        revisions.push([row.id, window.service, window.scope_id, period, window.limit_count,
+          window.timezone_offset, window.enabled]);
       }
       const blockedUntil = Math.max(cooling ? cooldownAt : 0, quotaBlockedUntil);
       if (!blockedUntil && (status === 'healthy' || ['cooldown', 'quota_exhausted'].includes(status))) {
@@ -612,12 +808,32 @@ export const createQueueSources = ({
       known: true,
       available,
       nextResetAt: nextResetAt ? new Date(nextResetAt).toISOString() : null,
-      waitState,
+      waitState: available ? null : waitState || 'blocked',
+      reason: available || waitState ? null : `api_key_needs_review:${provider}`,
       revision: sha256(JSON.stringify([
-        ...rows.map((row) => [row.id, row.status, row.updated_at]), ...revisions
+        ...stableCredentials, ...revisions
       ].sort()))
     };
   });
+
+  const brokerClientPromise = String(environment.CREDENTIAL_BROKER_URL || '').trim()
+    ? createCredentialBrokerClient(environment) : null;
+  const quotaStatus = async (provider, now = new Date()) => {
+    if (brokerClientPromise && ['geoapify', 'mappls', 'onemap'].includes(provider)) {
+      try {
+        const client = await brokerClientPromise;
+        return (await client.availability([provider]))[provider];
+      } catch (error) {
+        return {
+          provider, known: true, available: false, nextResetAt: error?.retryAt || null,
+          waitState: error?.retryAt ? 'cooldown_wait' : 'blocked',
+          reason: `credential_broker_unavailable:${provider}`,
+          revision: createHash('sha256').update(String(error?.code || 'BROKER_UNAVAILABLE')).digest('hex')
+        };
+      }
+    }
+    return localQuotaStatus(provider, now);
+  };
 
   const chinaPriority = (now = new Date()) => withDatabase(addressDatabase, {
     blocksQueue: false, executionState: null, nextAttemptAt: null
@@ -626,7 +842,7 @@ export const createQueueSources = ({
     if (!goal?.enabled || goal.complete) return { blocksQueue: false, executionState: 'ready', nextAttemptAt: null };
     const runtime = await database.prepare(`SELECT execution_state,next_attempt_at
       FROM sync_country_runtime WHERE country_code='CN'`).first();
-    if (!runtime) return { blocksQueue: true, executionState: 'below_target', nextAttemptAt: null };
+    if (!runtime) return { blocksQueue: false, executionState: 'uninitialized', nextAttemptAt: null };
     const executionState = String(runtime.execution_state || '');
     const nextAttemptAt = runtime.next_attempt_at ? String(runtime.next_attempt_at) : null;
     const due = !nextAttemptAt || timestamp(nextAttemptAt) <= now.getTime();
@@ -697,30 +913,41 @@ export const computeQueueSnapshot = async ({
       const adapterRevision = sourceAdapterRevisions[shard.source?.adapter] || '';
       const provider = providers[shard.id] || null;
       const quota = provider ? quotaByProvider[provider] : null;
+      const adapter = String(shard.source?.adapter || '');
+      const configurationError = String(shard.source?.configurationError || '');
       const sourceFingerprint = countryFingerprint({
         adapterRevisions: [[shard.id, adapterRevision]],
         sourceVersions: [[shard.id, sourceVersion]]
       });
-      const failureFingerprint = retryFingerprint(sourceFingerprint, quota?.revision || '');
       const saved = persisted.shards?.[shard.id] || {};
       const savedState = String(saved.state || (saved.latched ? 'latched' : ''));
+      const savedFailurePhase = saved.failurePhase || inferredFailurePhase(saved.failureCode);
+      const failureFingerprint = executionFailureFingerprint(
+        sourceFingerprint, quota?.revision || '', savedFailurePhase, adapter
+      );
       const expectedFingerprint = ['suspended', 'backoff'].includes(savedState)
         ? failureFingerprint
         : sourceFingerprint;
       const matches = saved.fingerprint === expectedFingerprint;
       const nextAttempt = timestamp(saved.nextAttemptAt);
+      const probeDue = !configurationError && matches && ['latched', 'suspended'].includes(savedState)
+        && (!nextAttempt || nextAttempt <= now.getTime());
       const paused = matches && ['latched', 'checked', 'suspended'].includes(savedState)
-        && (!nextAttempt || nextAttempt > now.getTime());
+        && (['latched', 'suspended'].includes(savedState) ? !probeDue : !nextAttempt || nextAttempt > now.getTime());
       return {
         shard,
         stored,
         saved,
         savedState,
         matches,
+        probeDue,
         paused,
         nextAttempt,
         provider,
         quota,
+        adapter,
+        configurationError,
+        credentialRevision: quota?.revision || '',
         sourceFingerprint,
         failureFingerprint
       };
@@ -756,10 +983,12 @@ export const computeQueueSnapshot = async ({
       ? [...migrationCandidates].sort((left, right) => timestamp(right.stored.updatedAt) - timestamp(left.stored.updatedAt))[0]
       : null;
     const legacyPauseActive = Boolean(migrationSource);
-    const runnableSources = sourceEntries.filter((source) => !source.paused)
+    const runnableSources = sourceEntries.filter((source) => !source.paused && !source.probeDue && !source.configurationError)
       .sort((left, right) => {
-        const quotaOrder = Number(Boolean(left.quota && !left.quota.available))
-          - Number(Boolean(right.quota && !right.quota.available));
+        const availabilityRank = (source) => !source.quota || source.quota.available
+          ? source.matches && source.nextAttempt > now.getTime() ? 1 : 0
+          : source.quota.waitState === 'blocked' ? 2 : 1;
+        const quotaOrder = availabilityRank(left) - availabilityRank(right);
         if (quotaOrder) return quotaOrder;
         const meteredOrder = Number(!left.provider) - Number(!right.provider);
         if (meteredOrder) return meteredOrder;
@@ -802,8 +1031,36 @@ export const computeQueueSnapshot = async ({
         }
       } : null,
       runnableShardId: selectedSource?.shard.id || null,
+      probeShardIds: sourceEntries.filter((source) => source.probeDue).map((source) => source.shard.id),
       sourceFingerprints: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, source.sourceFingerprint])),
       failureFingerprints: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, source.failureFingerprint])),
+      failureContexts: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, {
+        adapter: source.adapter,
+        sourceFingerprint: source.sourceFingerprint,
+        credentialRevision: source.credentialRevision
+      }])),
+      sourceExecution: Object.fromEntries(sourceEntries.map((source) => [source.shard.id, {
+        savedState: source.savedState,
+        reason: source.saved.reason || null,
+        fingerprint: source.saved.fingerprint || null,
+        matches: source.matches,
+        sourceVersion: source.stored.sourceVersion || source.shard.source?.sourceVersion || '',
+        sourceFingerprint: source.sourceFingerprint,
+        latchedAt: source.saved.latchedAt || null,
+        consecutiveFailures: source.matches ? Number(source.saved.consecutiveFailures || 0) : 0,
+        failureCode: source.matches ? source.saved.failureCode || null : null,
+        adapter: source.adapter || null,
+        adapterRevision: sourceAdapterRevisions[source.adapter] || '',
+        failurePhase: source.matches ? source.saved.failurePhase || null : null,
+        failureSignature: source.matches ? source.saved.failureSignature || null : null,
+        checkpointToken: source.matches ? source.saved.checkpointToken || null : null,
+        probeFailures: source.matches ? Number(source.saved.probeFailures || 0) : 0,
+        probeVersion: source.matches ? source.saved.probeVersion || null : null,
+        intervalDays: Number(source.shard.intervalDays || 1),
+        quotaBound: Boolean(source.provider),
+        quotaAvailable: source.quota ? source.quota.available : true,
+        quotaResetAt: source.quota?.nextResetAt || null
+      }])),
       quotaBound: Boolean(provider),
       quotaProvider: provider,
       quotaAvailable: quota ? quota.available : true,
@@ -826,11 +1083,12 @@ export const computeQueueSnapshot = async ({
       entry.heartbeatAt = runningJob?.heartbeatAt || null;
       entry.deadlineAt = runningJob?.deadlineAt || null;
       if (entry.eta && runningJob?.startedAt) {
-        entry.eta = {
+        const startedAt = timestamp(runningJob.startedAt);
+        entry.eta = now.getTime() >= startedAt + entry.eta.p80Ms ? null : {
           ...entry.eta,
-          estimatedCompletionAt: new Date(timestamp(runningJob.startedAt) + entry.eta.p80Ms).toISOString(),
-          remainingMedianMs: Math.max(0, timestamp(runningJob.startedAt) + entry.eta.medianMs - now.getTime()),
-          remainingP80Ms: Math.max(0, timestamp(runningJob.startedAt) + entry.eta.p80Ms - now.getTime())
+          estimatedCompletionAt: new Date(startedAt + entry.eta.p80Ms).toISOString(),
+          remainingMedianMs: Math.max(0, startedAt + entry.eta.medianMs - now.getTime()),
+          remainingP80Ms: startedAt + entry.eta.p80Ms - now.getTime()
         };
       }
     } else if (!belowTarget && !belowFloor) {
@@ -845,16 +1103,19 @@ export const computeQueueSnapshot = async ({
       entry.state = 'no_source';
       entry.reason = 'no_source_shard';
     } else if (!selectedSource) {
+      const blocked = sourceEntries.find((source) => source.configurationError);
       const suspended = sourceEntries.find((source) => source.savedState === 'suspended');
       const checked = sourceEntries.find((source) => source.savedState === 'checked');
       const exhausted = sourceEntries.find((source) => source.savedState === 'latched');
-      entry.state = suspended ? 'suspended' : checked ? 'scheduled_wait' : 'source_limited';
-      entry.reason = suspended?.saved.reason || checked?.saved.reason || exhausted?.saved.reason || LATCH_REASON;
+      entry.state = blocked ? 'blocked' : suspended ? 'suspended' : checked ? 'scheduled_wait' : 'source_limited';
+      entry.reason = blocked?.configurationError || suspended?.saved.reason
+        || checked?.saved.reason || exhausted?.saved.reason || LATCH_REASON;
       entry.nextAttemptAt = pausedWakeAt ? new Date(pausedWakeAt).toISOString() : null;
     } else if (provider && quota && !quota.available) {
-      entry.state = quota.waitState === 'cooldown_wait' ? 'cooldown_wait' : 'quota_wait';
+      entry.state = quota.waitState === 'blocked' ? 'blocked'
+        : quota.waitState === 'cooldown_wait' ? 'cooldown_wait' : 'quota_wait';
       entry.nextAttemptAt = quota.nextResetAt;
-      entry.reason = provider;
+      entry.reason = quota.reason || provider;
     } else if (delayedUntil) {
       entry.state = 'retry_wait';
       entry.nextAttemptAt = new Date(delayedUntil).toISOString();
@@ -867,8 +1128,8 @@ export const computeQueueSnapshot = async ({
   const ready = orderRunnable(entries.filter((entry) => entry.state === 'queued'));
   ready.forEach((entry, index) => { entry.position = index + 1; });
   const stateRank = {
-    running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, scheduled_wait: 5,
-    source_limited: 6, suspended: 7, no_source: 8, done: 9
+    running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, blocked: 5, scheduled_wait: 6,
+    source_limited: 7, suspended: 8, no_source: 9, done: 10
   };
   entries.sort((left, right) => (stateRank[left.state] - stateRank[right.state])
     || ((left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER))
@@ -899,6 +1160,8 @@ export const createSyncQueue = ({
   history = null,
   sources: providedSources,
   loadCatalog = loadSourceCatalog,
+  probeSource = null,
+  onIdle = null,
   now = () => new Date(),
   log = console,
   rescanMs = integer(environment.SYNC_QUEUE_RESCAN_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
@@ -911,12 +1174,21 @@ export const createSyncQueue = ({
     ? new PostgresQueueStateStore(addressDatabase, legacyStateFile)
     : new QueueStateStore(legacyStateFile);
   const sources = providedSources || createQueueSources({
-    addressDatabase, controlDatabase
+    addressDatabase, controlDatabase, environment
   });
   let catalogPromise;
-  const catalogShards = () => (catalogPromise ||= Promise.resolve()
-    .then(() => loadCatalog())
-    .then((catalog) => catalog.shards));
+  const catalogShards = () => {
+    if (!catalogPromise) {
+      catalogPromise = Promise.resolve()
+        .then(() => loadCatalog())
+        .then((catalog) => catalog.shards)
+        .catch((error) => {
+          catalogPromise = null;
+          throw error;
+        });
+    }
+    return catalogPromise;
+  };
 
   const queueSnapshot = async () => {
     const configured = await catalogShards();
@@ -944,7 +1216,9 @@ export const createSyncQueue = ({
     const result = await queueSnapshot();
     return {
       ...result,
-      entries: result.entries.map(({ sourceFingerprints, failureFingerprints, legacyMigration, ...entry }) => entry)
+      entries: result.entries.map(({
+        sourceFingerprints, failureFingerprints, failureContexts, sourceExecution, probeShardIds, legacyMigration, ...entry
+      }) => entry)
     };
   };
 
@@ -962,7 +1236,152 @@ export const createSyncQueue = ({
     return snap.entries.find((entry) => entry.countryCode === countryCode) || null;
   };
 
+  const failureDetails = (entry, shardId, job) => {
+    const context = entry?.failureContexts?.[shardId] || {
+      adapter: '', sourceFingerprint: entry?.sourceFingerprints?.[shardId] || '', credentialRevision: ''
+    };
+    const reportedPhase = ['failed', 'cancelling'].includes(String(job?.phase || '').toLowerCase()) ? null : job?.phase;
+    const phase = normalizeFailurePhase(job?.failurePhase || reportedPhase || inferredFailurePhase(job?.errorCode));
+    return {
+      ...context,
+      phase,
+      signature: systemicFailureSignature({
+        failureCode: job?.errorCode,
+        error: job?.error,
+        failurePhase: phase
+      }),
+      fingerprint: executionFailureFingerprint(
+        context.sourceFingerprint, context.credentialRevision, phase, context.adapter
+      )
+    };
+  };
+
+  const applySharedFailureCircuit = async (entry, evaluation, evaluatedAt) => {
+    if (!evaluation.failureSignature || !evaluation.adapter) return false;
+    const state = await store.load();
+    const sourceStates = state.countries?.[entry.countryCode]?.shards || {};
+    const matching = Object.entries(sourceStates).filter(([sourceId, saved]) => {
+      const context = entry.failureContexts?.[sourceId];
+      if (!context) return false;
+      const expectedFingerprint = executionFailureFingerprint(
+        context.sourceFingerprint, context.credentialRevision, saved.failurePhase, context.adapter
+      );
+      return ['backoff', 'suspended'].includes(saved.state)
+        && saved.fingerprint === expectedFingerprint
+        && saved.adapter === evaluation.adapter
+        && normalizeFailurePhase(saved.failurePhase) === normalizeFailurePhase(evaluation.failurePhase)
+        && saved.failureSignature === evaluation.failureSignature;
+    });
+    if (new Set(matching.map(([sourceId]) => sourceId)).size < 2) return false;
+    for (const [sourceId, context] of Object.entries(entry.failureContexts || {})) {
+      if (context.adapter !== evaluation.adapter) continue;
+      const existing = sourceStates[sourceId];
+      if (existing && ['latched', 'checked'].includes(existing.state)) continue;
+      await store.apply(entry.countryCode, {
+        action: 'suspend',
+        reason: SHARED_FAILURE_REASON,
+        fingerprint: executionFailureFingerprint(
+          context.sourceFingerprint, context.credentialRevision, evaluation.failurePhase, context.adapter
+        ),
+        consecutiveFailures: Math.max(2, Number(existing?.consecutiveFailures || 0)),
+        failureCode: evaluation.failureCode,
+        adapter: evaluation.adapter,
+        failurePhase: evaluation.failurePhase,
+        failureSignature: evaluation.failureSignature,
+        nextAttemptAt: null
+      }, evaluatedAt, sourceId);
+    }
+    return true;
+  };
+
+  const applySourceEvaluation = async ({ entry, evaluation, evaluatedAt, sourceId, runId = null }) => {
+    const apply = async () => {
+      await store.apply(entry.countryCode, evaluation, evaluatedAt, sourceId);
+      if (evaluation.action === 'waiting_quota') {
+        await history?.pauseForQuota?.({ runId, countryCode: entry.countryCode, sourceId });
+      }
+      if (runId) {
+        await history?.markSourceStateApplied?.({
+          runId, countryCode: entry.countryCode, sourceId, appliedAt: evaluatedAt
+        });
+      }
+    };
+    if (runId && addressDatabase?.transaction && history?.markSourceStateApplied) {
+      await addressDatabase.transaction(apply);
+    } else await apply();
+  };
+
   const applyRecoveredFailures = async () => {
+    if (history?.pendingSourceStateApplications) {
+      const pending = await history.pendingSourceStateApplications();
+      for (const row of pending) {
+        const countryCode = String(row.country_code || '').toUpperCase();
+        const sourceId = String(row.source_id || '');
+        const entry = await countryEntry(countryCode);
+        if (!entry?.sourceExecution?.[sourceId]) {
+          await history.markSourceStateApplied({
+            runId: row.run_id, countryCode, sourceId, appliedAt: row.completed_at || now().toISOString()
+          });
+          continue;
+        }
+        const completedAt = row.completed_at || now().toISOString();
+        const recoveredFingerprint = row.source_version_after && row.adapter_revision != null
+          ? countryFingerprint({
+              adapterRevisions: [[sourceId, row.adapter_revision]],
+              sourceVersions: [[sourceId, row.source_version_after]]
+            })
+          : row.source_fingerprint;
+        if (recoveredFingerprint && recoveredFingerprint !== entry.sourceFingerprints[sourceId]) {
+          await history.markSourceStateApplied({
+            runId: row.run_id, countryCode, sourceId, appliedAt: completedAt
+          });
+          continue;
+        }
+        const failure = failureDetails(entry, sourceId, {
+          errorCode: row.error_code,
+          error: row.error_message,
+          failurePhase: row.failure_phase
+        });
+        const source = entry.sourceExecution[sourceId];
+        const recoveredMetrics = parseJson(row.metrics_json);
+        const evaluation = evaluateAttempt({
+          jobSucceeded: row.status === 'succeeded',
+          sourceComplete: Number(row.source_complete) !== 0,
+          checkpointToken: row.checkpoint_token || null,
+          previousCheckpointToken: source.checkpointToken || null,
+          checkpointStage: recoveredMetrics.checkpointStage || null,
+          partialNextAttemptAt: recoveredMetrics.nextAttemptAt || null,
+          partialStalls: Number(source.consecutiveFailures || 0),
+          netGrowth: Number(row.net_growth || 0),
+          goalDeficitBefore: goalDeficit(parseJson(row.before_goals_json)),
+          goalDeficitAfter: goalDeficit(parseJson(row.after_goals_json)),
+          fingerprintAfter: entry.sourceFingerprints[sourceId],
+          failureFingerprintAfter: failure.fingerprint,
+          deterministicFailure: deterministicFailureCodes.has(String(row.error_code || '')),
+          quotaBound: Boolean(source.quotaBound),
+          quotaAvailable: source.quotaAvailable ?? true,
+          quotaResetAt: source.quotaResetAt ?? null,
+          consecutiveFailures: Number(source.consecutiveFailures || 0),
+          completedAt,
+          backoffBaseMs,
+          backoffCapMs,
+          maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
+          maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
+          maxPartialStalls: integer(environment.SYNC_QUEUE_MAX_PARTIAL_STALLS, 3, 1, 100),
+          failureCode: row.error_code || null,
+          adapter: failure.adapter,
+          failurePhase: failure.phase,
+          failureSignature: failure.signature,
+          probeIntervalMs: Math.max(60_000, Number(source.intervalDays || 1) * 24 * 60 * 60_000)
+        });
+        await applySourceEvaluation({
+          entry, evaluation, evaluatedAt: completedAt, sourceId, runId: row.run_id
+        });
+        await applySharedFailureCircuit(entry, evaluation, completedAt);
+      }
+      coordinator?.recoveredJobs?.splice(0);
+      return;
+    }
     const recovered = coordinator?.recoveredJobs?.splice(0) || [];
     const configured = await catalogShards();
     const byShard = new Map(configured.map((shard) => [shard.id.toLowerCase(), shard]));
@@ -977,27 +1396,37 @@ export const createSyncQueue = ({
         const shardId = configuredShard?.id || entry.runnableShardId;
         if (!shardId) continue;
         const completedAt = job.completedAt || now().toISOString();
-        await store.apply(countryCode, evaluateAttempt({
+        const failure = failureDetails(entry, shardId, job);
+        const evaluation = evaluateAttempt({
           jobSucceeded: false,
           netGrowth: 0,
           fingerprintAfter: entry.sourceFingerprints[shardId],
-          failureFingerprintAfter: entry.failureFingerprints[shardId],
+          failureFingerprintAfter: failure.fingerprint,
           failureCode: job.errorCode || 'SYNC_JOB_INTERRUPTED',
-          consecutiveFailures: entry.consecutiveFailures,
+          adapter: failure.adapter,
+          failurePhase: failure.phase,
+          failureSignature: failure.signature,
+          consecutiveFailures: Number(entry.sourceExecution?.[shardId]?.consecutiveFailures || 0),
           completedAt,
           backoffBaseMs,
           backoffCapMs,
           maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
           maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10)
-        }), completedAt, shardId);
+        });
+         await applySourceEvaluation({ entry, evaluation, evaluatedAt: completedAt, sourceId: shardId });
+        await applySharedFailureCircuit(entry, evaluation, completedAt);
       }
     }
+  };
+  const ensureRecoveredSourceStates = async () => {
+    await applyRecoveredFailures();
   };
 
   // One pass: pick the next runnable country, run it to completion through the
   // coordinator, evaluate the outcome. Returns milliseconds to sleep before
   // the next pass (0 means continue immediately).
   const tick = async () => {
+    await ensureRecoveredSourceStates();
     await history?.schedulerHeartbeat(coordinator.currentJob?.id || null);
     const snap = await queueSnapshot();
     await Promise.all(snap.entries.filter((entry) => entry.state === 'quota_wait' && entry.runnableShardId)
@@ -1007,6 +1436,7 @@ export const createSyncQueue = ({
       })));
     if (coordinator.currentJob) {
       await coordinator.waitForIdle();
+      await onIdle?.();
       return 0;
     }
     const currentTime = now();
@@ -1017,58 +1447,136 @@ export const createSyncQueue = ({
     }
     const pick = snap.entries.find((entry) => entry.state === 'queued'
       && (!entry.nextAttemptAt || timestamp(entry.nextAttemptAt) <= currentTime.getTime()));
-    if (!pick) {
+    const probePick = !pick && probeSource
+      ? snap.entries.find((entry) => entry.state !== 'done' && entry.probeShardIds?.length)
+      : null;
+    if (!pick && !probePick) {
       const wakeAt = nextWakeAt(snap.entries, currentTime);
       const delay = wakeAt ? Math.max(1_000, wakeAt.getTime() - currentTime.getTime()) : rescanMs;
       return Math.min(rescanMs, delay);
     }
-    log.log?.(`[sync-queue] ${pick.countryCode} start deficit=${pick.deficit} current=${pick.current} target=${pick.target}`);
-    const shardId = pick.runnableShardId;
+    const selected = pick || probePick;
+    log.log?.(`[sync-queue] ${selected.countryCode} start deficit=${selected.deficit} current=${selected.current} target=${selected.target}`);
+    const shardId = pick?.runnableShardId || probePick?.probeShardIds[0];
     if (!shardId) return rescanMs;
-    const result = await coordinator.trigger('queue', { shards: [shardId] });
+    const selectedSource = selected.sourceExecution?.[shardId] || {};
+    if (probePick) {
+      const configured = (await catalogShards()).find((shard) => shard.id === shardId);
+      if (!configured) return rescanMs;
+      const evaluatedAt = currentTime.toISOString();
+      const probeIntervalMs = Math.max(60_000, Number(selectedSource.intervalDays || 1) * 24 * 60 * 60_000);
+      const preserveProbeState = ({
+        nextAttemptAt, probeFailures = 0, probeVersion = selectedSource.probeVersion || null
+      }) => ({
+        action: selectedSource.savedState === 'suspended' ? 'suspend' : 'latch',
+        reason: selectedSource.reason || (selectedSource.savedState === 'suspended' ? SUSPENDED_REASON : LATCH_REASON),
+        fingerprint: selectedSource.fingerprint || selectedSource.sourceFingerprint,
+        latchedAt: selectedSource.latchedAt || evaluatedAt,
+        consecutiveFailures: Number(selectedSource.consecutiveFailures || 0),
+        failureCode: selectedSource.failureCode || null,
+        adapter: selectedSource.adapter || null,
+        failurePhase: selectedSource.failurePhase || null,
+        failureSignature: selectedSource.failureSignature || null,
+        checkpointToken: selectedSource.checkpointToken || null,
+        probeFailures,
+        probeVersion,
+        nextAttemptAt
+      });
+      try {
+        const discovery = await probeSource(configured);
+        const discoveredVersion = String(discovery?.version || '');
+        const baselineVersion = selectedSource.probeVersion || selectedSource.sourceVersion;
+        const versionChanged = selectedSource.probeVersion
+          ? discoveredVersion !== baselineVersion
+          : initialProbeComparableVersion(discoveredVersion, selectedSource.adapter)
+            !== initialProbeComparableVersion(baselineVersion, selectedSource.adapter);
+        if (versionChanged) {
+           await store.clear([shardId]);
+           log.log?.(`[sync-queue] ${selected.countryCode} source update detected source=${shardId}`);
+          return 0;
+        }
+        await store.apply(selected.countryCode, preserveProbeState({
+          probeVersion: discoveredVersion,
+          nextAttemptAt: new Date(currentTime.getTime() + probeIntervalMs).toISOString()
+        }), evaluatedAt, shardId);
+        return cooldownMs;
+      } catch (error) {
+        const probeFailures = Number(selectedSource.probeFailures || 0) + 1;
+        const maxProbeFailures = integer(environment.SYNC_QUEUE_MAX_PROBE_FAILURES, 3, 1, 100);
+        const retryDelay = probeFailures >= maxProbeFailures
+          ? probeIntervalMs
+          : Math.min(backoffCapMs, backoffBaseMs * 2 ** (probeFailures - 1));
+        await store.apply(selected.countryCode, preserveProbeState({
+          probeFailures,
+          nextAttemptAt: new Date(currentTime.getTime() + retryDelay).toISOString()
+        }), evaluatedAt, shardId);
+        log.error?.(`[sync-queue] source metadata probe failed source=${shardId}`, error);
+        return cooldownMs;
+      }
+    }
+    const result = await coordinator.trigger('queue', {
+      shards: [shardId],
+      sourceFingerprints: { [shardId]: pick.sourceFingerprints[shardId] },
+      sourceInputs: { [shardId]: {
+        sourceVersion: selectedSource.sourceVersion || '',
+        adapterRevision: selectedSource.adapterRevision || ''
+      } }
+    });
     if (!result.accepted) {
       await coordinator.waitForIdle();
+      await onIdle?.();
       return 0;
     }
     await coordinator.waitForIdle();
+    await onIdle?.();
     const job = await Promise.resolve(coordinator.getJob?.(result.job.id)).catch(() => null);
     const after = await countryEntry(pick.countryCode);
     const completedAt = now().toISOString();
+    const failure = failureDetails(after || pick, shardId, job);
+    const sourceOutcome = (job?.sourceOutcomes || []).find((outcome) =>
+      String(outcome?.shardId || outcome?.shardKey || '') === shardId);
+    const beforeSource = pick.sourceExecution?.[shardId] || {};
+    const afterSource = after?.sourceExecution?.[shardId] || beforeSource;
     const evaluation = evaluateAttempt({
       jobSucceeded: job?.status === 'succeeded',
+      sourceComplete: sourceOutcome?.sourceComplete !== false,
+      checkpointToken: sourceOutcome?.checkpointToken || null,
+      previousCheckpointToken: beforeSource.checkpointToken || null,
+      checkpointStage: sourceOutcome?.checkpointStage || null,
+      partialNextAttemptAt: sourceOutcome?.nextAttemptAt || sourceOutcome?.metrics?.nextAttemptAt || null,
+      partialStalls: Number(beforeSource.consecutiveFailures || 0),
       netGrowth: (after?.current ?? pick.current) - pick.current,
       goalDeficitBefore: goalDeficit(pick.rules),
       goalDeficitAfter: goalDeficit(after?.rules),
       fingerprintBefore: pick.sourceFingerprints[shardId],
       fingerprintAfter: after?.sourceFingerprints?.[shardId] ?? pick.sourceFingerprints[shardId],
-      failureFingerprintAfter: after?.failureFingerprints?.[shardId] ?? pick.failureFingerprints[shardId],
+      failureFingerprintAfter: failure.fingerprint,
       deterministicFailure: deterministicFailureCodes.has(String(job?.errorCode || '')),
-      quotaBound: pick.quotaBound,
-      quotaAvailable: after?.quotaAvailable ?? true,
-      quotaResetAt: after?.quotaResetAt ?? null,
-      consecutiveFailures: pick.consecutiveFailures,
+      quotaBound: Boolean(beforeSource.quotaBound),
+      quotaAvailable: afterSource.quotaAvailable ?? true,
+      quotaResetAt: afterSource.quotaResetAt ?? null,
+      consecutiveFailures: Number(beforeSource.consecutiveFailures || 0),
       completedAt,
       backoffBaseMs,
       backoffCapMs,
       maxConsecutiveFailures: integer(environment.SYNC_QUEUE_MAX_FAILURES, 3, 1, 100),
       maxTimeoutFailures: integer(environment.SYNC_QUEUE_MAX_TIMEOUT_FAILURES, 2, 1, 10),
+      maxPartialStalls: integer(environment.SYNC_QUEUE_MAX_PARTIAL_STALLS, 3, 1, 100),
       failureCode: job?.errorCode || null,
-      probeIntervalMs: Math.max(60_000, Number(pick.intervalDays || 1) * 24 * 60 * 60_000)
+      adapter: failure.adapter,
+      failurePhase: failure.phase,
+      failureSignature: failure.signature,
+      probeIntervalMs: Math.max(60_000, Number(beforeSource.intervalDays || 1) * 24 * 60 * 60_000)
     });
-    await store.apply(pick.countryCode, evaluation, completedAt, shardId);
-    if (evaluation.action === 'waiting_quota') {
-      await history?.pauseForQuota({
-        runId: result.job.id,
-        countryCode: pick.countryCode,
-        sourceId: shardId
-      });
-    }
+    await applySourceEvaluation({
+      entry: pick, evaluation, evaluatedAt: completedAt, sourceId: shardId, runId: result.job.id
+    });
+    await applySharedFailureCircuit(after || pick, evaluation, completedAt);
     log.log?.(`[sync-queue] ${pick.countryCode} ${evaluation.action} growth=${(after?.current ?? pick.current) - pick.current}`);
     return cooldownMs;
   };
 
   const run = async () => {
-    await applyRecoveredFailures();
     while (!stopped) {
       let delay = rescanMs;
       try {

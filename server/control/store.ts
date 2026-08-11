@@ -160,6 +160,11 @@ const nextQuotaReset = (period: QuotaPeriod, offsetMinutes: number, date = new D
 const json = <T>(value: string | null | undefined, fallback: T): T => {
   try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; }
 };
+const syncGoalSnapshot = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const snapshot = value as Record<string, unknown>;
+  return snapshot.total && snapshot.administrativeCoverage && snapshot.regionalMinimums ? snapshot : null;
+};
 const normalizeTokenScopes = (value: unknown, fallbackAll = true): string[] => {
   if (value === undefined || value === null) return fallbackAll ? ['*'] : [];
   if (!Array.isArray(value)) throw new Error('INVALID_TOKEN_SCOPES');
@@ -1133,11 +1138,12 @@ export class ControlStore {
     const country = countryCode.trim().toUpperCase();
     const rows = (await this.database.prepare(`SELECT run.id,run.kind,run.status AS run_status,run.target_json,
       run.progress_json,run.error_code AS run_error_code,run.error_message AS run_error_message,
+      run.failure_phase AS run_failure_phase,
       run.created_at AS run_created_at,run.started_at AS run_started_at,run.completed_at AS run_completed_at,
       country.country_code,country.source_id,country.trigger_name,country.status,country.started_at,country.completed_at,
       country.heartbeat_at,country.deadline_at,country.before_count,country.after_count,country.net_growth,
       country.candidate_count,country.accepted_count,country.rejected_count,country.rejection_reasons_json,country.metrics_json,
-      country.before_goals_json,country.after_goals_json,country.error_code,country.error_message
+      country.before_goals_json,country.after_goals_json,country.error_code,country.error_message,country.failure_phase
       FROM sync_runs run LEFT JOIN sync_run_countries country ON country.run_id=run.id
       WHERE (?='' OR country.country_code=?) ORDER BY run.created_at DESC,country.country_code,country.source_id LIMIT ? OFFSET ?`)
       .bind(country, country, boundedLimit + 1, boundedOffset).all<Record<string, unknown>>()).results;
@@ -1174,10 +1180,11 @@ export class ControlStore {
         rejectedCount: row.rejected_count === null || row.rejected_count === undefined ? null : Number(row.rejected_count),
         rejectionReasons: json(String(row.rejection_reasons_json || ''), {}),
         metrics: json(String(row.metrics_json || ''), {}),
-        beforeGoals: json(String(row.before_goals_json || ''), {}),
-        afterGoals: json(String(row.after_goals_json || ''), {}),
+        beforeGoals: syncGoalSnapshot(json(String(row.before_goals_json || ''), null)),
+        afterGoals: syncGoalSnapshot(json(String(row.after_goals_json || ''), null)),
         errorCode: row.country_code ? row.error_code || null : row.run_error_code || null,
-        errorMessage: row.country_code ? row.error_message || null : row.run_error_message || null
+        errorMessage: row.country_code ? row.error_message || null : row.run_error_message || null,
+        failurePhase: row.country_code ? row.failure_phase || null : row.run_failure_phase || null
       }))
     };
   }

@@ -9,7 +9,7 @@ export const getStaticPaths = localeStaticPaths;
 const locale = Astro.params.locale as Locale;
 interface Copy {
   title: string; intro: string; back: string; overview: string; authentication: string; authBody: string;
-  endpoints: string; parameters: string; request: string; response: string; errors: string; copy: string; copied: string;
+  endpoints: string; parameters: string; request: string; response: string; errors: string; copy: string; copied: string; copyFailed: string;
   scope: string; required: string; optional: string; defaultValue: string; type: string; noParameters: string; openApi: string;
 }
 const copies: Record<Locale, Copy> = {
@@ -17,55 +17,55 @@ const copies: Record<Locale, Copy> = {
     title: 'Real Residential Address Generator API', intro: 'Generate and search published residential addresses through a stable JSON API.',
     back: 'Back to generator', overview: 'Overview', authentication: 'Authentication',
     authBody: 'All endpoints except health, readiness, and OpenAPI require a Bearer token created in the administrator console. Tokens support read or generate scopes, per-minute limits, and expiry.',
-    endpoints: 'Endpoints', parameters: 'Parameters', request: 'Request examples', response: 'Successful response', errors: 'Errors', copy: 'Copy', copied: 'Copied',
+    endpoints: 'Endpoints', parameters: 'Parameters', request: 'Request examples', response: 'Successful response', errors: 'Errors', copy: 'Copy', copied: 'Copied', copyFailed: 'Copy failed',
     scope: 'Scope', required: 'Required', optional: 'Optional', defaultValue: 'Default', type: 'Type', noParameters: 'No request parameters.', openApi: 'OpenAPI 3.1 JSON'
   },
   'zh-CN': {
     title: '真实住宅地址生成器 API', intro: '通过稳定的 JSON API 搜索并生成已发布的真实住宅地址。', back: '返回生成器', overview: '概览',
     authentication: '鉴权', authBody: '除健康检查、就绪检查和 OpenAPI 外，所有接口都需要管理员控制台创建的 Bearer Token。令牌支持读取或生成权限、每分钟限速和到期时间。',
-    endpoints: '接口', parameters: '参数', request: '调用示例', response: '成功响应', errors: '错误处理', copy: '复制', copied: '已复制',
+    endpoints: '接口', parameters: '参数', request: '调用示例', response: '成功响应', errors: '错误处理', copy: '复制', copied: '已复制', copyFailed: '复制失败',
     scope: '权限', required: '必填', optional: '可选', defaultValue: '默认值', type: '类型', noParameters: '此接口没有请求参数。', openApi: 'OpenAPI 3.1 JSON'
   },
   'zh-TW': {
     title: '真實住宅地址產生器 API', intro: '透過穩定的 JSON API 搜尋並產生已發布的真實住宅地址。', back: '返回產生器', overview: '概覽',
     authentication: '驗證', authBody: '除健康檢查、就緒檢查和 OpenAPI 外，所有端點都需要管理員控制台建立的 Bearer Token。權杖支援讀取或產生權限、每分鐘限制和到期時間。',
-    endpoints: '端點', parameters: '參數', request: '呼叫範例', response: '成功回應', errors: '錯誤處理', copy: '複製', copied: '已複製',
+    endpoints: '端點', parameters: '參數', request: '呼叫範例', response: '成功回應', errors: '錯誤處理', copy: '複製', copied: '已複製', copyFailed: '複製失敗',
     scope: '權限', required: '必填', optional: '選填', defaultValue: '預設值', type: '類型', noParameters: '此端點沒有請求參數。', openApi: 'OpenAPI 3.1 JSON'
   },
   ja: {
     title: '実在住宅住所ジェネレーター API', intro: '安定した JSON API で公開済み住宅住所を検索・生成します。', back: 'ジェネレーターに戻る', overview: '概要',
     authentication: '認証', authBody: 'ヘルスチェック、準備状態チェック、OpenAPI を除き、管理画面で作成した Bearer Token が必要です。読み取り・生成スコープ、毎分制限、有効期限を設定できます。',
-    endpoints: 'エンドポイント', parameters: 'パラメーター', request: 'リクエスト例', response: '成功レスポンス', errors: 'エラー', copy: 'コピー', copied: 'コピー済み',
+    endpoints: 'エンドポイント', parameters: 'パラメーター', request: 'リクエスト例', response: '成功レスポンス', errors: 'エラー', copy: 'コピー', copied: 'コピー済み', copyFailed: 'コピー失敗',
     scope: 'スコープ', required: '必須', optional: '任意', defaultValue: '既定値', type: '型', noParameters: 'リクエストパラメーターはありません。', openApi: 'OpenAPI 3.1 JSON'
   },
   ko: {
     title: '실제 주거 주소 생성기 API', intro: '안정적인 JSON API로 게시된 주거 주소를 검색하고 생성합니다.', back: '생성기로 돌아가기', overview: '개요',
     authentication: '인증', authBody: '상태 확인, 준비 상태 확인 및 OpenAPI를 제외한 모든 엔드포인트에는 관리자 콘솔에서 만든 Bearer Token이 필요합니다. 읽기 또는 생성 범위, 분당 제한 및 만료를 설정할 수 있습니다.',
-    endpoints: '엔드포인트', parameters: '매개변수', request: '요청 예시', response: '성공 응답', errors: '오류', copy: '복사', copied: '복사됨',
+    endpoints: '엔드포인트', parameters: '매개변수', request: '요청 예시', response: '성공 응답', errors: '오류', copy: '복사', copied: '복사됨', copyFailed: '복사 실패',
     scope: '범위', required: '필수', optional: '선택', defaultValue: '기본값', type: '유형', noParameters: '요청 매개변수가 없습니다.', openApi: 'OpenAPI 3.1 JSON'
   },
   de: {
     title: 'API fuer reale Wohnadressen', intro: 'Veroeffentlichte Wohnadressen ueber eine stabile JSON-API suchen und erzeugen.', back: 'Zurueck zum Generator', overview: 'Uebersicht',
     authentication: 'Authentifizierung', authBody: 'Ausser Health, Readiness und OpenAPI benoetigen alle Endpunkte ein Bearer-Token aus der Verwaltung. Tokens besitzen Lese- oder Erzeugungsrechte, Minutenlimits und Ablaufzeiten.',
-    endpoints: 'Endpunkte', parameters: 'Parameter', request: 'Aufrufbeispiele', response: 'Erfolgreiche Antwort', errors: 'Fehler', copy: 'Kopieren', copied: 'Kopiert',
+    endpoints: 'Endpunkte', parameters: 'Parameter', request: 'Aufrufbeispiele', response: 'Erfolgreiche Antwort', errors: 'Fehler', copy: 'Kopieren', copied: 'Kopiert', copyFailed: 'Kopieren fehlgeschlagen',
     scope: 'Berechtigung', required: 'Erforderlich', optional: 'Optional', defaultValue: 'Standard', type: 'Typ', noParameters: 'Keine Anfrageparameter.', openApi: 'OpenAPI 3.1 JSON'
   },
   fr: {
     title: "API du generateur d'adresses residentielles reelles", intro: 'Rechercher et generer des adresses publiees via une API JSON stable.', back: 'Retour au generateur', overview: 'Vue ensemble',
     authentication: 'Authentification', authBody: "Sauf pour l'etat, la disponibilite et OpenAPI, chaque endpoint exige un Bearer Token cree dans la console. Les jetons gerent les droits de lecture ou generation, la limite par minute et expiration.",
-    endpoints: 'Endpoints', parameters: 'Parametres', request: "Exemples d'appel", response: 'Reponse reussie', errors: 'Erreurs', copy: 'Copier', copied: 'Copie',
+    endpoints: 'Endpoints', parameters: 'Parametres', request: "Exemples d'appel", response: 'Reponse reussie', errors: 'Erreurs', copy: 'Copier', copied: 'Copie', copyFailed: 'Echec de la copie',
     scope: 'Droit', required: 'Requis', optional: 'Facultatif', defaultValue: 'Par defaut', type: 'Type', noParameters: 'Aucun parametre de requete.', openApi: 'OpenAPI 3.1 JSON'
   },
   es: {
     title: 'API del generador de direcciones residenciales reales', intro: 'Busca y genera direcciones publicadas mediante una API JSON estable.', back: 'Volver al generador', overview: 'Resumen',
     authentication: 'Autenticacion', authBody: 'Salvo salud, disponibilidad y OpenAPI, todos los endpoints requieren un Bearer Token creado en la consola. Los tokens admiten permisos de lectura o generacion, limite por minuto y caducidad.',
-    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Ejemplos de llamada', response: 'Respuesta correcta', errors: 'Errores', copy: 'Copiar', copied: 'Copiado',
+    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Ejemplos de llamada', response: 'Respuesta correcta', errors: 'Errores', copy: 'Copiar', copied: 'Copiado', copyFailed: 'Error al copiar',
     scope: 'Permiso', required: 'Obligatorio', optional: 'Opcional', defaultValue: 'Predeterminado', type: 'Tipo', noParameters: 'No hay parametros de solicitud.', openApi: 'OpenAPI 3.1 JSON'
   },
   pt: {
     title: 'API do gerador de enderecos residenciais reais', intro: 'Pesquise e gere enderecos publicados por uma API JSON estavel.', back: 'Voltar ao gerador', overview: 'Visao geral',
     authentication: 'Autenticacao', authBody: 'Exceto saude, prontidao e OpenAPI, todos os endpoints exigem um Bearer Token criado no painel. Os tokens aceitam permissoes de leitura ou geracao, limite por minuto e expiracao.',
-    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Exemplos de chamada', response: 'Resposta bem-sucedida', errors: 'Erros', copy: 'Copiar', copied: 'Copiado',
+    endpoints: 'Endpoints', parameters: 'Parametros', request: 'Exemplos de chamada', response: 'Resposta bem-sucedida', errors: 'Erros', copy: 'Copiar', copied: 'Copiado', copyFailed: 'Falha ao copiar',
     scope: 'Permissao', required: 'Obrigatorio', optional: 'Opcional', defaultValue: 'Padrao', type: 'Tipo', noParameters: 'Sem parametros de solicitacao.', openApi: 'OpenAPI 3.1 JSON'
   }
 };
@@ -91,7 +91,7 @@ const scopeLabel = (scope: string) => scope === 'public' ? 'public' : scope;
       <section class="api-overview-section" aria-labelledby="api-auth-title">
         <h2 id="api-auth-title">{copy.authentication}</h2>
         <p>{copy.authBody}</p>
-        <div class="api-inline-code"><code>Authorization: Bearer YOUR_API_TOKEN</code><button type="button" class="api-copy" data-copy-code>{copy.copy}</button></div>
+        <div class="api-inline-code"><code>Authorization: Bearer YOUR_API_TOKEN</code><button type="button" class="api-copy" aria-live="polite" data-copy-code>{copy.copy}</button></div>
       </section>
 
       {publicApiEndpoints.map((endpoint) => {
@@ -117,11 +117,11 @@ const scopeLabel = (scope: string) => scope === 'public' ? 'public' : scope;
           <section class="api-example" data-code-example>
             <h3>{copy.request}</h3>
             <div class="api-code-tabs" role="tablist" aria-label={copy.request}>
-              {(['curl', 'python', 'javascript'] as const).map((language, index) => <button type="button" role="tab" aria-selected={index === 0 ? 'true' : 'false'} data-language={language}>{language === 'javascript' ? 'JavaScript' : language}</button>)}
+              {(['curl', 'python', 'javascript'] as const).map((language, index) => <button id={`${endpoint.id}-${language}-tab`} type="button" role="tab" aria-selected={index === 0 ? 'true' : 'false'} aria-controls={`${endpoint.id}-${language}-panel`} tabindex={index === 0 ? 0 : -1} data-language={language}>{language === 'javascript' ? 'JavaScript' : language}</button>)}
             </div>
             <div class="api-code-panel">
-              {(['curl', 'python', 'javascript'] as const).map((language, index) => <pre role="tabpanel" hidden={index !== 0} data-language={language}><code data-api-example>{apiExample(endpoint, language)}</code></pre>)}
-              <button type="button" class="api-copy" data-copy-code>{copy.copy}</button>
+              {(['curl', 'python', 'javascript'] as const).map((language, index) => <pre id={`${endpoint.id}-${language}-panel`} role="tabpanel" aria-labelledby={`${endpoint.id}-${language}-tab`} tabindex="0" hidden={index !== 0} data-language={language}><code data-api-example>{apiExample(endpoint, language)}</code></pre>)}
+              <button type="button" class="api-copy" aria-live="polite" data-copy-code>{copy.copy}</button>
             </div>
           </section>
 
@@ -142,7 +142,7 @@ const scopeLabel = (scope: string) => scope === 'public' ? 'public' : scope;
       </section>
     </div>
   </main>
-  <script is:inline define:vars={{ copiedLabel: copy.copied, copyLabel: copy.copy }}>
+  <script is:inline define:vars={{ copiedLabel: copy.copied, copyLabel: copy.copy, copyFailedLabel: copy.copyFailed }}>
     document.querySelector('#api-locale')?.addEventListener('change', (event) => {
       location.assign(`/${event.target.value}/api/${location.search}${location.hash}`);
     });
@@ -152,17 +152,48 @@ const scopeLabel = (scope: string) => scope === 'public' ? 'public' : scope;
     document.querySelectorAll('[data-code-example]').forEach((example) => {
       const tabs = [...example.querySelectorAll('[role="tab"]')];
       const panels = [...example.querySelectorAll('[role="tabpanel"]')];
-      tabs.forEach((tab) => tab.addEventListener('click', () => {
-        tabs.forEach((candidate) => candidate.setAttribute('aria-selected', String(candidate === tab)));
+      const activate = (tab, focus = false) => {
+        tabs.forEach((candidate) => {
+          const active = candidate === tab;
+          candidate.setAttribute('aria-selected', String(active));
+          candidate.tabIndex = active ? 0 : -1;
+        });
         panels.forEach((panel) => { panel.hidden = panel.dataset.language !== tab.dataset.language; });
-      }));
+        if (focus) tab.focus();
+      };
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => activate(tab));
+        tab.addEventListener('keydown', (event) => {
+          let next = index;
+          if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+          else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+          else if (event.key === 'Home') next = 0;
+          else if (event.key === 'End') next = tabs.length - 1;
+          else return;
+          event.preventDefault();
+          activate(tabs[next], true);
+        });
+      });
     });
+    const copyText = async (value) => {
+      if (navigator.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(value); return true; } catch {}
+      }
+      const input = document.createElement('textarea');
+      input.value = value;
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      try { return document.execCommand('copy'); }
+      catch { return false; }
+      finally { input.remove(); }
+    };
     document.querySelectorAll('[data-copy-code]').forEach((button) => button.addEventListener('click', async () => {
       const root = button.closest('.api-code-panel, .api-inline-code');
       const code = root?.querySelector('pre:not([hidden]) code, code');
       if (!code?.textContent) return;
-      await navigator.clipboard.writeText(code.textContent);
-      button.textContent = copiedLabel;
+      button.textContent = await copyText(code.textContent) ? copiedLabel : copyFailedLabel;
       setTimeout(() => { button.textContent = copyLabel; }, 1400);
     }));
   </script>

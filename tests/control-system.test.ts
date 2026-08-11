@@ -80,6 +80,33 @@ describe('control database security', () => {
     }));
   });
 
+  it('does not expose an unfinished goal snapshot as an empty completed snapshot', async () => {
+    const beforeGoals = {
+      total: { current: 19_533, target: 20_000, met: false },
+      administrativeCoverage: { actual: 72, target: 90, met: false, covered: 146, total: 203 },
+      regionalMinimums: {
+        actual: 64, target: 100, met: false,
+        lowest: { qualified: 64, total: 203, minimum: 5, met: false },
+        level1: null, level2: null, overrides: { satisfied: 0, total: 0, met: true }
+      }
+    };
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,created_at,started_at,updated_at
+    ) VALUES ('history-running-goals','address-pool','{}','running','{}',
+      '2026-08-07T00:00:00Z','2026-08-07T00:00:00Z','2026-08-07T00:01:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,before_goals_json,after_goals_json,
+      created_at,started_at,updated_at
+    ) VALUES ('history-running-goals','JP','japan-abr-residential','queue','running',?,'{}',
+      '2026-08-07T00:00:00Z','2026-08-07T00:00:00Z','2026-08-07T00:01:00Z')`)
+      .bind(JSON.stringify(beforeGoals)).run();
+
+    const history = await store.syncHistory();
+    expect(history.items).toContainEqual(expect.objectContaining({
+      id: 'history-running-goals', countryCode: 'JP', beforeGoals, afterGoals: null
+    }));
+  });
+
   it('supports custom token values and editable scope, rate and expiry settings', async () => {
     const customToken = 'addr_custom_fixture_token_1234567890';
     const expiresAt = new Date(Date.now() + 86400000).toISOString();

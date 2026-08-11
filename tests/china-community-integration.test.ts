@@ -138,6 +138,41 @@ describe('China community storage integration', () => {
     ]);
   });
 
+  it('routes worker page requests through the credential broker without a local provider key', async () => {
+    const token = 'china-broker-client-token-fixture-0001';
+    const calls: Array<{ url: string; authorization: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      calls.push({
+        url: request.url,
+        authorization: request.headers.get('authorization') || '',
+        body: await request.json() as Record<string, unknown>
+      });
+      return Response.json({ data: { status: '1', pois: [] } });
+    });
+    const service = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://fixture', masterKey: Buffer.alloc(32, 8),
+      credentialBroker: { url: 'http://credential-broker.internal', token }
+    });
+    const fetchPage = (service as unknown as {
+      fetchPage(provider: 'amap', target: Record<string, unknown>, page: number, accepted: number, requested: () => Promise<void>): Promise<unknown>;
+    }).fetchPage.bind(service);
+    let requests = 0;
+    expect(await fetchPage('amap', {
+      id: '110105', province: '北京市', city: '北京市', district: '朝阳区', query: '北京市朝阳区', targetCount: 5
+    }, 1, 0, async () => { requests += 1; })).toMatchObject({ rawCount: 0 });
+    expect(requests).toBe(1);
+    expect(calls).toEqual([expect.objectContaining({
+      url: 'http://credential-broker.internal/v1/requests',
+      authorization: `Bearer ${token}`,
+      body: expect.objectContaining({
+        operation: 'amap.place-search', parameters: { region: '110105', page: 1, subdivision: '' }
+      })
+    })]);
+    expect(await control.listCredentials()).toEqual([]);
+    service.close();
+  });
+
   it('keeps an Amap key healthy when its v3 compatibility fallback succeeds', async () => {
     const id = await control.addCredential({ provider: 'amap', label: 'fallback', secret: 'fallback-key', qpsLimit: 100 });
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {

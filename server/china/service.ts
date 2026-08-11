@@ -12,7 +12,11 @@ import {
   chinaFreshTimestampClause
 } from '../api/repositories/china-community';
 import { distanceMeters } from './coordinates';
-import { providerFetcher, ProviderRequestError, type CommunityCandidate, type ProviderPage } from './providers';
+import { CredentialBrokerClient } from '../credential-broker/client.mjs';
+import {
+  fetchBrokerCommunities, providerFetcher, ProviderRequestError,
+  type ChinaCredentialBroker, type CommunityCandidate, type ProviderPage
+} from './providers';
 import { isChinaDeliveryAddress, normalizeChinaProviderAddress } from './quality';
 import { getCountryPolicy, type CountryPolicy } from '../sync/address-policy.mjs';
 
@@ -71,6 +75,10 @@ const targetYieldInterval = 50;
 const maxAreaCityBytes = 128 * 1024 * 1024;
 const checkpointStrategyVersion = 'community-poi-v7';
 const credentialPacingMaxWaitMs = 1_100;
+const chinaWorkerLeaseId = 'china-sync';
+const chinaWorkerLeaseDurationMs = 60_000;
+const chinaWorkerLeaseHeartbeatMs = 20_000;
+const chinaWorkerShutdownGraceMs = 95 * 60_000;
 const mainlandProvincePrefixes = [
   '11', '12', '13', '14', '15', '21', '22', '23', '31', '32', '33', '34', '35', '36', '37',
   '41', '42', '43', '44', '45', '46', '50', '51', '52', '53', '54', '61', '62', '63', '64', '65'
@@ -136,11 +144,13 @@ export interface SyncTarget {
 export interface ChinaWorkerConfig {
   postgresUrl: string;
   masterKey: Buffer;
+  credentialBroker?: { url: string; token: string };
 }
 
 export interface ChinaWorkerData {
   postgresUrl: string;
   masterKey: Uint8Array;
+  credentialBroker?: { url: string; token: string };
   dataRoot: string;
   runId: string;
   targets: SyncTarget[];
@@ -317,21 +327,60 @@ const csvRecords = (text: string): string[][] => {
 
 export class ChinaDataService {
   private running = false;
+  private starting = false;
   private continuationTimer: NodeJS.Timeout | undefined;
+  private leaseHeartbeatTimer: NodeJS.Timeout | undefined;
   private activeWorker: Worker | undefined;
+  private workerCompletion: Promise<void> | undefined;
+  private resolveWorkerCompletion: (() => void) | undefined;
   private lastProgress: Record<string, unknown> | null = null;
   private closed = false;
   private syncState: 'ready' | 'below_target' | 'cooldown_wait' | 'quota_wait' | 'source_limited' | 'blocked' = 'below_target';
   private nextAttemptAt: string | null = null;
   private waitReason = '';
   private statusSnapshot: { expiresAt: number; promise: Promise<Record<string, unknown>> } | undefined;
+  private readonly credentialBroker: ChinaCredentialBroker | null;
+  private readonly leaseOwnerToken = randomUUID();
+  private leaseHeld = false;
 
   constructor(
     private readonly addressDb: Database,
     private readonly control: ControlStore,
     private readonly dataRoot = resolve('data'),
     private readonly workerConfig?: ChinaWorkerConfig
-  ) {}
+  ) {
+    this.credentialBroker = workerConfig?.credentialBroker
+      ? new CredentialBrokerClient(workerConfig.credentialBroker) as ChinaCredentialBroker
+      : null;
+  }
+
+  private async credentialState(): Promise<{
+    configured: boolean; eligible: boolean; reason: string; nextAvailableAt: string | null; providers: ProviderName[];
+  }> {
+    if (!this.credentialBroker) {
+      const providers = await this.control.availableProviders();
+      const availability = await this.control.credentialAvailability(['amap', 'baidu', 'tencent']);
+      return { ...availability, providers };
+    }
+    try {
+      const names: ProviderName[] = ['amap', 'baidu', 'tencent'];
+      const statuses = await this.credentialBroker.availability(names);
+      const providers = names.filter((provider) => statuses[provider]?.available);
+      const nextAvailableAt = names.map((provider) => statuses[provider]?.nextResetAt)
+        .filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value!)))
+        .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null;
+      const waits = names.map((provider) => statuses[provider]?.waitState).filter(Boolean);
+      const configured = names.some((provider) => statuses[provider]?.known);
+      const reason = providers.length ? 'ready' : waits.includes('quota_wait') ? 'quota'
+        : waits.includes('cooldown_wait') ? 'cooldown'
+          : names.map((provider) => statuses[provider]?.reason).find(Boolean) || 'blocked';
+      return { configured, eligible: providers.length > 0, reason, nextAvailableAt, providers };
+    } catch {
+      return {
+        configured: true, eligible: false, reason: 'credential_broker_unavailable', nextAvailableAt: null, providers: []
+      };
+    }
+  }
 
   private async persistRuntimeState(goalState: 'complete' | 'incomplete' | 'disabled'): Promise<void> {
     await this.addressDb.prepare(`INSERT INTO sync_country_runtime(
@@ -348,6 +397,81 @@ export class ChinaDataService {
     this.nextAttemptAt = null;
     this.waitReason = reason;
     void this.persistRuntimeState('incomplete').catch(() => undefined);
+  }
+
+  private async acquireWorkerLease(): Promise<boolean> {
+    const heartbeatAt = nowIso();
+    const expiresAt = new Date(Date.parse(heartbeatAt) + chinaWorkerLeaseDurationMs).toISOString();
+    const lease = await this.addressDb.prepare(`INSERT INTO sync_worker_leases(
+        worker_id,owner_token,heartbeat_at,expires_at,updated_at
+      ) VALUES (?,?,?,?,?)
+      ON CONFLICT(worker_id) DO UPDATE SET owner_token=excluded.owner_token,
+        heartbeat_at=excluded.heartbeat_at,expires_at=excluded.expires_at,updated_at=excluded.updated_at
+      WHERE sync_worker_leases.expires_at<=excluded.heartbeat_at
+        OR sync_worker_leases.owner_token=excluded.owner_token
+      RETURNING owner_token,expires_at`)
+      .bind(chinaWorkerLeaseId, this.leaseOwnerToken, heartbeatAt, expiresAt, heartbeatAt)
+      .first<{ owner_token: string; expires_at: string }>();
+    this.leaseHeld = lease?.owner_token === this.leaseOwnerToken;
+    if (this.leaseHeld) return true;
+    const current = await this.addressDb.prepare('SELECT expires_at FROM sync_worker_leases WHERE worker_id=?')
+      .bind(chinaWorkerLeaseId).first<{ expires_at: string }>();
+    this.armLeaseRetry(current?.expires_at || new Date(Date.now() + chinaWorkerLeaseHeartbeatMs).toISOString());
+    return false;
+  }
+
+  private armLeaseRetry(expiresAt: string): void {
+    const dueAt = Math.max(Date.now() + 1_000, Date.parse(expiresAt) || 0);
+    this.nextAttemptAt = new Date(dueAt).toISOString();
+    if (this.continuationTimer) clearTimeout(this.continuationTimer);
+    this.continuationTimer = setTimeout(() => {
+      this.continuationTimer = undefined;
+      void this.start().catch((error) => {
+        if (error instanceof Error && error.message === 'CHINA_SYNC_STANDBY') return;
+        if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY'].includes(error.message)) {
+          this.markSchedulingFailure(error instanceof Error ? error.message : 'SYNC_START_FAILED');
+        }
+        void this.scheduleContinuation().catch(() => this.markSchedulingFailure());
+      });
+    }, Math.max(250, dueAt - Date.now()));
+    this.continuationTimer.unref?.();
+  }
+
+  private startLeaseHeartbeat(): void {
+    if (!this.leaseHeld || this.leaseHeartbeatTimer) return;
+    this.leaseHeartbeatTimer = setInterval(() => {
+      void this.renewWorkerLease().catch(() => this.stopAfterLeaseLoss());
+    }, chinaWorkerLeaseHeartbeatMs);
+    this.leaseHeartbeatTimer.unref?.();
+  }
+
+  private async renewWorkerLease(): Promise<void> {
+    if (!this.leaseHeld) return;
+    const heartbeatAt = nowIso();
+    const expiresAt = new Date(Date.parse(heartbeatAt) + chinaWorkerLeaseDurationMs).toISOString();
+    const renewed = await this.addressDb.prepare(`UPDATE sync_worker_leases SET heartbeat_at=?,expires_at=?,updated_at=?
+      WHERE worker_id=? AND owner_token=? RETURNING owner_token`)
+      .bind(heartbeatAt, expiresAt, heartbeatAt, chinaWorkerLeaseId, this.leaseOwnerToken)
+      .first<{ owner_token: string }>();
+    if (renewed?.owner_token !== this.leaseOwnerToken) {
+      this.leaseHeld = false;
+      this.stopAfterLeaseLoss();
+    }
+  }
+
+  private stopAfterLeaseLoss(): void {
+    if (this.leaseHeartbeatTimer) clearInterval(this.leaseHeartbeatTimer);
+    this.leaseHeartbeatTimer = undefined;
+    this.activeWorker?.postMessage({ type: 'stop' });
+  }
+
+  private async releaseWorkerLease(): Promise<void> {
+    if (this.leaseHeartbeatTimer) clearInterval(this.leaseHeartbeatTimer);
+    this.leaseHeartbeatTimer = undefined;
+    if (!this.leaseHeld) return;
+    this.leaseHeld = false;
+    await this.addressDb.prepare('DELETE FROM sync_worker_leases WHERE worker_id=? AND owner_token=?')
+      .bind(chinaWorkerLeaseId, this.leaseOwnerToken).run();
   }
 
   async initializeTargets(options: { scheduleContinuation?: boolean } = {}): Promise<void> {
@@ -555,7 +679,9 @@ export class ChinaDataService {
   }
 
   async start(_input: { cities?: string[]; providers?: ProviderName[]; maxPages?: number } = {}): Promise<string> {
-    if (this.running) throw new Error('CHINA_SYNC_BUSY');
+    if (this.running || this.starting) throw new Error('CHINA_SYNC_BUSY');
+    this.starting = true;
+    try {
     if (this.continuationTimer) clearTimeout(this.continuationTimer);
     this.continuationTimer = undefined;
     await this.refreshAreaTargets();
@@ -575,13 +701,15 @@ export class ChinaDataService {
         id: city, province: '', city, district: '', query: city, targetCount: baselineTarget
       })));
     }
-    const providers = await this.control.availableProviders();
+    const providers = (await this.credentialState()).providers;
     if (!providers.length) {
       await this.scheduleContinuation();
       throw new Error('NO_AVAILABLE_KEY');
     }
+    if (!await this.acquireWorkerLease()) throw new Error('CHINA_SYNC_STANDBY');
     const runId = await this.control.createRun('china-communities', { mode: 'automatic', targets: targets.length, providers });
     this.running = true;
+    this.startLeaseHeartbeat();
     this.syncState = 'below_target';
     this.nextAttemptAt = null;
     this.waitReason = '';
@@ -591,6 +719,7 @@ export class ChinaDataService {
         this.launchWorker(runId, targets, providers);
       } catch (error) {
         this.running = false;
+        await this.releaseWorkerLease().catch(() => undefined);
         this.markSchedulingFailure('CHINA_SYNC_WORKER');
         await this.control.updateRun(runId, 'failed', {}, {
           code: 'CHINA_SYNC_WORKER', message: error instanceof Error ? error.message : String(error)
@@ -598,12 +727,16 @@ export class ChinaDataService {
         throw error;
       }
     } else {
-      void this.execute(runId, targets, providers).finally(() => {
+      void this.execute(runId, targets, providers).finally(async () => {
         this.running = false;
+        await this.releaseWorkerLease().catch(() => undefined);
         void this.scheduleContinuation().catch(() => this.markSchedulingFailure());
       });
     }
     return runId;
+    } finally {
+      this.starting = false;
+    }
   }
 
   async runSync(runId: string, targets: SyncTarget[], providers: ProviderName[]): Promise<{ syncState: string; waitReason: string }> {
@@ -619,11 +752,13 @@ export class ChinaDataService {
       workerData: {
         postgresUrl: config.postgresUrl,
         masterKey: config.masterKey,
+        credentialBroker: config.credentialBroker,
         dataRoot: this.dataRoot,
         runId, targets, providers
       } satisfies ChinaWorkerData
     });
     this.activeWorker = worker;
+    this.workerCompletion = new Promise((resolve) => { this.resolveWorkerCompletion = resolve; });
     let completed = false;
     let settled = false;
     worker.on('message', (message: ChinaWorkerMessage) => {
@@ -641,11 +776,15 @@ export class ChinaDataService {
       settled = true;
       if (this.activeWorker === worker) this.activeWorker = undefined;
       this.running = false;
-      if (this.closed) return;
-      const markFailed = failure
-        ? this.control.updateRun(runId, 'failed', {}, { code: 'CHINA_SYNC_WORKER', message: failure }).catch(() => undefined)
-        : Promise.resolve();
-      void markFailed.then(() => this.scheduleContinuation()).catch(() => this.markSchedulingFailure());
+      void this.releaseWorkerLease().catch(() => undefined).then(() => {
+        this.resolveWorkerCompletion?.();
+        this.resolveWorkerCompletion = undefined;
+        if (this.closed) return;
+        const markFailed = failure
+          ? this.control.updateRun(runId, 'failed', {}, { code: 'CHINA_SYNC_WORKER', message: failure }).catch(() => undefined)
+          : Promise.resolve();
+        void markFailed.then(() => this.scheduleContinuation()).catch(() => this.markSchedulingFailure());
+      });
     };
     worker.once('error', (error) => {
       void worker.terminate().catch(() => undefined);
@@ -661,16 +800,20 @@ export class ChinaDataService {
     await this.scheduleContinuation(delayMs);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.closed = true;
     if (this.continuationTimer) clearTimeout(this.continuationTimer);
     this.continuationTimer = undefined;
     const worker = this.activeWorker;
-    if (!worker) return;
+    if (!worker) {
+      await this.releaseWorkerLease().catch(() => undefined);
+      return;
+    }
     worker.postMessage({ type: 'stop' });
-    const grace = setTimeout(() => { void worker.terminate().catch(() => undefined); }, 5_000);
+    const grace = setTimeout(() => { void worker.terminate().catch(() => undefined); }, chinaWorkerShutdownGraceMs);
     grace.unref?.();
     worker.once('exit', () => clearTimeout(grace));
+    await this.workerCompletion;
   }
 
   private async scheduleContinuation(minimumDelayMs = 1_000): Promise<void> {
@@ -693,7 +836,7 @@ export class ChinaDataService {
       await this.persistRuntimeState('incomplete');
       return;
     }
-    const availability = await this.control.credentialAvailability(['amap', 'baidu', 'tencent']);
+    const availability = await this.credentialState();
     if (!availability.configured || availability.reason === 'blocked') {
       this.syncState = 'blocked';
       this.waitReason = availability.reason;
@@ -724,6 +867,7 @@ export class ChinaDataService {
     this.continuationTimer = setTimeout(() => {
       this.continuationTimer = undefined;
       void this.start().catch((error) => {
+        if (error instanceof Error && error.message === 'CHINA_SYNC_STANDBY') return;
         if (!(error instanceof Error) || !['CHINA_SYNC_BUSY', 'NO_AVAILABLE_KEY'].includes(error.message)) {
           this.markSchedulingFailure(error instanceof Error ? error.message : 'SYNC_START_FAILED');
         }
@@ -1072,6 +1216,21 @@ export class ChinaDataService {
   ): Promise<ProviderPage | null> {
     const key = checkpointKey || target.id;
     let lastError = '';
+    const region = provider === 'amap' && /^\d{6}$/u.test(target.id) ? target.id : target.query;
+    if (this.credentialBroker) {
+      try {
+        const result = await fetchBrokerCommunities(provider, region, page, this.credentialBroker, subdivision);
+        await requested();
+        return result;
+      } catch (error) {
+        await requested();
+        lastError = error instanceof Error ? error.message : String(error);
+        await this.writeCheckpoint(provider, key, page,
+          /^SOURCE_(?:CREDENTIAL|QUOTA)|^BROKER_/u.test(String((error as { code?: string })?.code || '')) ? 'paused' : 'failed',
+          accepted, lastError);
+        return null;
+      }
+    }
     const attemptedCredentialIds = new Set<string>();
     while (true) {
       const credential = await this.control.acquireCredential(provider, { excludeIds: attemptedCredentialIds });
@@ -1091,7 +1250,6 @@ export class ChinaDataService {
       attemptedCredentialIds.add(credential.id);
       try {
         let quotaObservation: ProviderQuotaObservation | undefined;
-        const region = provider === 'amap' && /^\d{6}$/u.test(target.id) ? target.id : target.query;
         const result = await providerFetcher[provider](region, page, credential.secret, fetch, (value) => { quotaObservation = value; }, subdivision);
         await requested();
         await this.control.reportCredential(credential.id, 'success', quotaObservation);

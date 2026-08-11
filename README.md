@@ -26,7 +26,7 @@
 - Address and profile language choices persist independently in the browser; first use defaults to English.
 - Browser-persistent address favorites with continent/country grouping, filters, drag-and-drop or numeric ordering, copy, delete, and Google Maps/AMap links.
 - Popular administrative areas, popular cities, and special areas are configurable per country. The United States includes states without statewide sales tax.
-- Public coverage monitor plus administrator dashboard, address-data rules, synchronization queue, quick-location editor, provider credentials, access control, blacklist, and API tokens.
+- Public coverage monitor plus administrator dashboard, address-data rules, synchronization queue and history, quick-location editor, provider credentials, access control, blacklist, and API tokens.
 - JSON API for health, readiness, countries, availability, location options, search, address/profile generation, batch generation, and monitoring, with Python, cURL, and JavaScript examples.
 - PostgreSQL-only runtime with pooled connections, transactional publication, indexed location search, and prebuilt random-address indexes.
 
@@ -140,7 +140,7 @@ A country is complete only when every enabled rule passes:
 
 Reaching only the total target does not mark a country complete. Conversely, a source proven to be exhausted is kept visible as incomplete but removed from active work until its source/version fingerprint changes.
 
-The queue applies bounded retries, exponential backoff, cooldown/quota reset times, no-progress latching, and suspension after repeated failures. It cannot run the same unchanged no-progress source indefinitely. China receives the highest automatic priority while it remains eligible.
+The queue applies bounded retries, exponential backoff, cooldown/quota reset times, resumable checkpoints, no-progress latching, and suspension after repeated failures. It cannot run the same unchanged no-progress source indefinitely. Run history records each source, duration, result, and address growth, while stale synchronization artifacts are cleaned automatically. China receives the highest automatic priority while it remains eligible.
 
 ## Deployment
 

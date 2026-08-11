@@ -308,7 +308,11 @@ export const createAdminApi = ({
     const promise = (async () => {
       await ensureCoverage();
       const [queue, chinaStatus] = await Promise.all([loadSyncQueueUpstream(), china.status()]);
-      const queueStates = new Map((queue?.entries || []).map((entry) => [String(entry.countryCode), String(entry.state)]));
+      const queueStates = new Map((queue?.entries || []).map((entry) => [String(entry.countryCode), {
+        state: String(entry.state),
+        reason: entry.reason == null ? null : String(entry.reason),
+        nextAttemptAt: entry.nextAttemptAt == null ? null : String(entry.nextAttemptAt)
+      }]));
       return listAddressData(addressDb, chinaStatus, queueStates);
     })();
     addressDataSnapshot = { expiresAt: Number.POSITIVE_INFINITY, promise };
@@ -346,12 +350,14 @@ export const createAdminApi = ({
             : syncState === 'cooldown_wait' ? 'cooldown_wait'
               : ['source_limited', 'blocked', 'failed'].includes(syncState) ? syncState
                 : goal.complete ? 'done' : 'queued';
+        const waitReason = (chinaStatus.waitReason as string | null) || null;
         chinaEntry = {
           countryCode: 'CN', state, deficit: goal.deficit, target: goal.target, current: goal.current,
           unmetRules: goal.unmetRules, rules: goal.rules,
           position: null,
           nextAttemptAt: (chinaStatus.nextAttemptAt as string | null) ?? null,
-          reason: (chinaStatus.waitReason as string | null) || (state === 'queued' ? 'china_worker' : null),
+          reason: state === 'blocked' && ['unconfigured', 'missing_credentials'].includes(String(waitReason || ''))
+            ? 'missing_api_key:china_maps' : waitReason || (state === 'queued' ? 'china_worker' : null),
           engine: 'china-worker'
         };
       }

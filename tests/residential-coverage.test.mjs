@@ -26,7 +26,10 @@ describe('published residential coverage', () => {
         format,license_code,license_name,license_url,attribution_text,attribution_url,terms_url,share_alike,notice_required,
         redistribution_allowed,status) VALUES ('dataset','source','US','fixture',?,?,?,'jsonl','CC0','CC0',
         'https://example.test/license','Fixture','https://example.test','https://example.test/terms',0,0,1,'active')`)
-        .bind(now, now, 'a'.repeat(64))
+        .bind(now, now, 'a'.repeat(64)),
+      database.prepare(`INSERT INTO admin_coverage_stats(
+        node_key,parent_key,country_code,level,region_name,residential_count,total_count,updated_at
+      ) VALUES ('US','','US',0,'United States',0,0,?)`).bind(now)
     ]);
     for (const [id, admin1, city, postcode, longitude] of [
       ['ny', 'NY', 'New York City', '10001', -73.99],
@@ -68,6 +71,8 @@ describe('published residential coverage', () => {
     ]);
     const result = await refreshResidentialCoverage(database, 'US', now);
     expect(result).toMatchObject({ matchedAddresses: 3, unmatchedAddresses: 0, mappedGroups: 2 });
+    expect(await database.prepare(`SELECT residential_count,total_count FROM admin_coverage_stats
+      WHERE node_key='US'`).first()).toEqual({ residential_count: 3, total_count: 3 });
     const regions = await queryLocationCatalog(database, { country: 'US', field: 'region', residential: true, limit: 100 });
     const cities = await queryLocationCatalog(database, { country: 'US', field: 'city', residential: true, limit: 100 });
     expect(regions.options.map((item) => item.value)).toEqual(['California', 'New York']);

@@ -8,6 +8,7 @@ import { runAddressEtl } from './address-etl.mjs';
 import { PostgresCountryStateStore } from './postgres-country-state.mjs';
 import { createProviderCredentialPool } from './provider-credential-pool.mjs';
 import { loadSourceCatalog } from './source-adapters.mjs';
+import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 
 const validReleaseId = (value) => {
   const id = String(value || `sync-${Date.now()}`).trim();
@@ -129,12 +130,14 @@ export const runAddressSync = async ({
     const catalog = providedCatalog || (usesBuiltInEtl ? await loadSourceCatalog(undefined, environment) : undefined);
     const stateStore = database && catalog ? new PostgresCountryStateStore({ database, shards: catalog.shards }) : undefined;
     const credentialPool = usesBuiltInEtl ? createProviderCredentialPool(database, environment) : null;
+    const credentialBrokerClient = usesBuiltInEtl ? await createCredentialBrokerClient(environment) : null;
     const options = {
       database,
       environment,
       catalog,
       stateStore,
       credentialPool,
+      credentialBrokerClient,
       requestedShards: environment.ADDRESS_SYNC_SHARDS
         ? environment.ADDRESS_SYNC_SHARDS.split(',').map((value) => value.trim()).filter(Boolean)
         : ['all'],

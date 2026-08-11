@@ -27,6 +27,13 @@ export interface ProviderPage {
   rawCount: number;
 }
 
+export interface ChinaCredentialBroker {
+  request(operation: string, parameters: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
+  availability(providers: string[], options?: { signal?: AbortSignal }): Promise<Record<string, {
+    known: boolean; available: boolean; nextResetAt: string | null; waitState: string | null; reason: string | null;
+  }>>;
+}
+
 export class ProviderRequestError extends Error {
   constructor(
     public readonly outcome: 'qps' | 'quota' | 'auth' | 'network' | 'invalid',
@@ -100,7 +107,7 @@ const requestJson = async (url: URL, fetcher: typeof fetch): Promise<{ body: unk
   try { return { body: await response.json(), headers: response.headers }; } catch { throw new ProviderRequestError('network', 'INVALID_JSON'); }
 };
 
-const parseAmapPage = (body: AmapResponse, region: string, key: string): ProviderPage => {
+const parseAmapPage = (body: AmapResponse, region: string, key = ''): ProviderPage => {
   if (body.status !== '1') {
     const code = body.infocode || '';
     const outcome = ['10003', '10044', '10045', '40000'].includes(code) ? 'quota'
@@ -206,6 +213,55 @@ export const fetchBaiduCommunities = async (city: string, page: number, key: str
       outcome === 'quota' ? 'day' : undefined);
   }
   const results = body.results || [];
+  const candidates = results.map((item) => {
+    const location = item.location as Record<string, unknown> | undefined;
+    const detail = item.detail_info as Record<string, unknown> | undefined;
+    const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
+    if (rawLatitude === null || rawLongitude === null) return null;
+    const [latitude, longitude] = bd09ToWgs84(rawLatitude, rawLongitude);
+    const address = normalizeChinaDeliveryAddress(clean(item.address));
+    const typecode = clean(detail?.tag);
+    if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+    return {
+      provider: 'baidu' as const, providerPoiId: clean(item.uid), name: clean(item.name),
+      province: clean(item.province), city: clean(item.city), district: clean(item.area), township: '',
+      latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'BD-09' as const, responseHash: hash(item),
+      address, typecode, adcode: clean(item.adcode)
+    };
+  }).filter(presentCandidate);
+  return { candidates, rawCount: results.length };
+};
+
+export const fetchBrokerCommunities = async (
+  provider: ProviderName,
+  region: string,
+  page: number,
+  broker: ChinaCredentialBroker,
+  subdivision = ''
+): Promise<ProviderPage> => {
+  const body = await broker.request(`${provider}.place-search`, { region, page, subdivision });
+  if (provider === 'amap') return parseAmapPage(body as AmapResponse, region);
+  if (provider === 'tencent') {
+    const data = (body as { data?: Array<Record<string, unknown>> })?.data || [];
+    const candidates = data.map((item) => {
+      const location = item.location as Record<string, unknown> | undefined;
+      const admin = item.ad_info as Record<string, unknown> | undefined;
+      const rawLatitude = finite(location?.lat); const rawLongitude = finite(location?.lng);
+      if (rawLatitude === null || rawLongitude === null) return null;
+      const [latitude, longitude] = gcj02ToWgs84(rawLatitude, rawLongitude);
+      const address = normalizeChinaDeliveryAddress(clean(item.address));
+      const typecode = clean(item.category);
+      if (!residentialCategory(typecode) || !isChinaDeliveryAddress(address)) return null;
+      return {
+        provider: 'tencent' as const, providerPoiId: clean(item.id), name: clean(item.title),
+        province: clean(admin?.province), city: clean(admin?.city), district: clean(admin?.district), township: '',
+        latitude, longitude, rawLatitude, rawLongitude, rawCrs: 'GCJ-02' as const, responseHash: hash(item),
+        address, typecode, adcode: clean(admin?.adcode)
+      };
+    }).filter(presentCandidate);
+    return { candidates, rawCount: data.length };
+  }
+  const results = (body as { results?: Array<Record<string, unknown>> })?.results || [];
   const candidates = results.map((item) => {
     const location = item.location as Record<string, unknown> | undefined;
     const detail = item.detail_info as Record<string, unknown> | undefined;

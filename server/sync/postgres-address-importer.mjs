@@ -375,7 +375,9 @@ export class PostgresAddressImporter {
     this.rebuildFormattedAddress = rebuildFormattedAddress;
   }
 
-  async importShard({ shard, discovery, materialized, maxRecords, sourceMaxRecords = maxRecords, perLocality, policy, batchSize = 800 }) {
+  async importShard({ shard, discovery, materialized, maxRecords, sourceMaxRecords = maxRecords, perLocality, policy, batchSize = 800, signal }) {
+    const checkpoint = () => signal?.throwIfAborted();
+    checkpoint();
     const activePolicy = policy || {
       targetCount: maxRecords,
       levelLimits: [maxRecords, perLocality, perLocality, perLocality],
@@ -400,6 +402,7 @@ export class PostgresAddressImporter {
       ORDER BY imported_at DESC LIMIT 1`).bind(
       shard.source.id, shard.countryCode, `${String(discovery.version)}-%`, materialized.checksum
     ).first();
+    checkpoint();
     const datasetId = existingIdentity?.id ? String(existingIdentity.id) : generatedDatasetId;
     const existing = await this.database.prepare("SELECT status,active_count,rejected_count FROM address_datasets WHERE id=?").bind(datasetId).first();
     if (existing?.status === 'active' && datasetId === generatedDatasetId) {
@@ -422,7 +425,9 @@ export class PostgresAddressImporter {
       for (const reason of reasons) rejectionReasons.set(reason, (rejectionReasons.get(reason) || 0) + 1);
     };
     const geocoder = this.reverseGeocoder ? await this.reverseGeocoder(shard.countryCode) : null;
-    for await (const value of readJsonLines(materialized.file)) {
+    checkpoint();
+    for await (const value of readJsonLines(materialized.file, signal)) {
+      checkpoint();
       const record = this.normalizeRecord(value, shard, materialized.format);
       if (!record || seen.has(record.canonicalHash)) {
         reject([record ? 'duplicate' : 'invalid_source_record']);
@@ -471,7 +476,9 @@ export class PostgresAddressImporter {
 
     const localized = [];
     for (let offset = 0; offset < records.length; offset += batchSize) {
-      localized.push(...await this.localizeRecords(records.slice(offset, offset + batchSize)));
+      checkpoint();
+      localized.push(...await this.localizeRecords(records.slice(offset, offset + batchSize), { signal }));
+      checkpoint();
     }
     const candidateAdmin1Count = new Set(localized
       .map((record) => cleanKey(record.admin1Code || record.admin1 || record.district))
@@ -536,18 +543,24 @@ export class PostgresAddressImporter {
       }
     }
     if (failures.length) throw new SnapshotQualityError(shard.id, failures, metrics, discovery.failureSignature || '');
+    checkpoint();
     const observedAt = new Date().toISOString();
     const context = { datasetId, discovery, observedAt, expiresAt: expiry(new Date(observedAt)), hash: this.hash };
     await this.database.exec('BEGIN');
     try {
+      checkpoint();
       await this.database.batch([
         sourceStatement(this.database, shard, observedAt),
         datasetStatement(this.database, { datasetId, datasetVersion, shard, discovery, materialized, observedAt })
       ]);
+      checkpoint();
       for (let offset = 0; offset < localized.length; offset += batchSize) {
+        checkpoint();
         await this.database.batch(addressStatements(this.database, localized.slice(offset, offset + batchSize), context));
+        checkpoint();
         await new Promise((resolve) => setImmediate(resolve));
       }
+      checkpoint();
       await this.database.batch([
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0
           WHERE is_primary=1 AND address_id IN (
@@ -562,12 +575,15 @@ export class PostgresAddressImporter {
           .bind(shard.source.id, shard.countryCode, datasetId),
         this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=? WHERE id=?")
           .bind(localized.length, rejectedCount, datasetId),
-        this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
-          WHERE country_code=? AND active=1 AND id NOT IN (
-            SELECT evidence.address_id FROM address_pool_evidence evidence
+        this.database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id IN (
+          SELECT target.id FROM address_pool target
+          LEFT JOIN (
+            SELECT DISTINCT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
             WHERE evidence.is_current=1 AND dataset.status IN ('pending','active')
-          )`).bind(observedAt, shard.countryCode),
+          ) retained ON retained.address_id=target.id
+          WHERE target.country_code=? AND target.active=1 AND retained.address_id IS NULL
+        )`).bind(observedAt, shard.countryCode),
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0
           WHERE evidence_type='address_existence' AND address_id IN (
             SELECT id FROM address_pool WHERE country_code=?
@@ -579,6 +595,7 @@ export class PostgresAddressImporter {
             WHERE evidence.is_current=1 AND dataset.status='active'
           )`).bind(observedAt, shard.countryCode)
       ]);
+      checkpoint();
       const primaryEvidenceRows = (await this.database.prepare(`SELECT candidate.id,candidate.address_id
         FROM address_pool_evidence candidate
         JOIN address_datasets dataset ON dataset.id=candidate.dataset_id
@@ -586,6 +603,7 @@ export class PostgresAddressImporter {
         WHERE address.country_code=? AND candidate.is_current=1
           AND candidate.evidence_type='address_existence' AND dataset.status='active'
         ORDER BY candidate.address_id,dataset.imported_at DESC,candidate.id`).bind(shard.countryCode).all()).results;
+      checkpoint();
       const primaryEvidenceIds = [];
       const primaryAddresses = new Set();
       for (const row of primaryEvidenceRows) {
@@ -594,10 +612,12 @@ export class PostgresAddressImporter {
         primaryEvidenceIds.push(row.id);
       }
       for (let offset = 0; offset < primaryEvidenceIds.length; offset += batchSize) {
+        checkpoint();
         const ids = primaryEvidenceIds.slice(offset, offset + batchSize);
         await this.database.prepare(`UPDATE address_pool_evidence SET is_primary=1
           WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
       }
+      checkpoint();
       const countryCandidates = (await this.database.prepare(`SELECT id,country_code,admin1,locality,postal_locality,district,
           quality_score,random_key FROM address_pool
         WHERE country_code=? AND id IN (
@@ -605,6 +625,7 @@ export class PostgresAddressImporter {
           JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
           WHERE evidence.is_current=1 AND dataset.status='active'
         ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode).all()).results;
+      checkpoint();
       const published = applyHierarchicalQuota(countryCandidates.map((row) => ({
         id: String(row.id),
         countryCode: String(row.country_code),
@@ -616,6 +637,7 @@ export class PostgresAddressImporter {
         }
       })), activePolicy);
       for (let offset = 0; offset < published.length; offset += batchSize) {
+        checkpoint();
         const ids = published.slice(offset, offset + batchSize).map(({ id }) => id);
         await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
           WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
@@ -623,6 +645,7 @@ export class PostgresAddressImporter {
       const activeDatasets = (await this.database.prepare(`SELECT id FROM address_datasets
         WHERE country_code=? AND status='active'`).bind(shard.countryCode).all()).results;
       for (const dataset of activeDatasets) {
+        checkpoint();
         const activeCount = await this.database.prepare(`SELECT COUNT(DISTINCT evidence.address_id) AS total
           FROM address_pool_evidence evidence JOIN address_pool address ON address.id=evidence.address_id
           WHERE evidence.dataset_id=? AND evidence.is_current=1 AND address.active=1`).bind(dataset.id).first('total');
@@ -630,7 +653,9 @@ export class PostgresAddressImporter {
           .bind(Number(activeCount || 0), dataset.id).run();
       }
       const coverageTarget = activePolicy.levelLimits[1] || perLocality;
+      checkpoint();
       await this.database.prepare('DELETE FROM pool_coverage WHERE country_code=?').bind(shard.countryCode).run();
+      checkpoint();
       await this.database.prepare(`INSERT INTO pool_coverage(
           coverage_key,country_code,admin1_key,locality_key,postcode_key,property_type,target_count,
           active_count,shadow_count,residential_count,refresh_status,generation,last_refreshed_at,expires_at
@@ -643,19 +668,20 @@ export class PostgresAddressImporter {
         GROUP BY coverage,country_code,coalesce(nullif(admin1_code_key,''),admin1_key),
           coalesce(nullif(postal_locality_key,''),locality_key),property_type`
       ).bind(coverageTarget, coverageTarget, datasetId, observedAt, context.expiresAt, shard.countryCode).run();
+      checkpoint();
       await this.database.batch([
         this.database.prepare(`DELETE FROM address_pool_evidence WHERE dataset_id IN (
           SELECT id FROM address_datasets WHERE source_id=? AND country_code=? AND status='retired'
         )`).bind(shard.source.id, shard.countryCode),
         this.database.prepare("DELETE FROM address_datasets WHERE source_id=? AND country_code=? AND status='retired'")
           .bind(shard.source.id, shard.countryCode),
-        this.database.prepare(`DELETE FROM address_pool WHERE country_code=? AND active=0
-          AND id NOT IN (
-            SELECT evidence.address_id FROM address_pool scoped
-            JOIN address_pool_evidence evidence ON evidence.address_id=scoped.id
-            WHERE scoped.country_code=?
-          )`).bind(shard.countryCode, shard.countryCode)
+        this.database.prepare(`DELETE FROM address_pool WHERE id IN (
+          SELECT target.id FROM address_pool target
+          LEFT JOIN address_pool_evidence evidence ON evidence.address_id=target.id
+          WHERE target.country_code=? AND target.active=0 AND evidence.address_id IS NULL
+        )`).bind(shard.countryCode)
       ]);
+      checkpoint();
       await this.database.exec('COMMIT');
     } catch (error) {
       await this.database.exec('ROLLBACK').catch(() => {});
@@ -674,10 +700,11 @@ export class PostgresAddressImporter {
   async close() {}
 }
 
-async function* readJsonLines(file) {
+async function* readJsonLines(file, signal) {
   const { createReadStream } = await import('node:fs');
   let pending = '';
-  for await (const chunk of createReadStream(file, { encoding: 'utf8' })) {
+  for await (const chunk of createReadStream(file, { encoding: 'utf8', signal })) {
+    signal?.throwIfAborted();
     pending += chunk;
     let newline;
     while ((newline = pending.indexOf('\n')) >= 0) {

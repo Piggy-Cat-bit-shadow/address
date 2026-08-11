@@ -1,11 +1,11 @@
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections import defaultdict
 
@@ -29,6 +29,25 @@ ROAD_WORDS = {
     "PL": "PLACE", "RD": "ROAD", "ST": "STREET", "STH": "SOUTH",
     "TER": "TERRACE", "TG": "TANJONG", "UPP": "UPPER"
 }
+
+
+class TemporaryOnemapFailure(RuntimeError):
+    def __init__(self, kind, next_available_at=None):
+        super().__init__(f"OneMap is temporarily unavailable ({kind})")
+        self.kind = kind
+        self.next_available_at = next_available_at
+
+
+class RecordBatch(list):
+    def __init__(self, values, source_complete, checkpoint_token, candidate_count, resolved_count,
+                 temporary_failure=None, next_available_at=None):
+        super().__init__(values)
+        self.source_complete = source_complete
+        self.checkpoint_token = checkpoint_token
+        self.candidate_count = candidate_count
+        self.resolved_count = resolved_count
+        self.temporary_failure = temporary_failure
+        self.next_available_at = next_available_at
 
 
 def clean(value):
@@ -113,42 +132,55 @@ def load_onemap_cache(path):
         for line in source:
             try:
                 value = json.loads(line)
-                cached[value["query"]] = value.get("result")
+                result = value.get("result")
+                status = value.get("status") or ("found" if isinstance(result, dict) else None)
+                if status in {"found", "not_found"}:
+                    cached[value["query"]] = {"status": status, "result": result}
             except (KeyError, TypeError, ValueError):
                 continue
     return cached
 
 
-def onemap_result(row, token, cache, cache_file, minimum_interval=0.2):
+def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=0.2):
     query = f"{clean(row.get('blk_no'))} {clean(row.get('street'))}"
     if query in cache:
-        return cache[query]
-    parameters = urllib.parse.urlencode({
-        "searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": "1"
-    })
+        return cache[query]["result"]
     request = urllib.request.Request(
-        f"https://www.onemap.gov.sg/api/common/elastic/search?{parameters}",
-        headers={"Authorization": f"Bearer {token}", "User-Agent": "address-sync/1.0"}
+        bridge_url,
+        data=json.dumps({"query": query}, separators=(",", ":")).encode("utf-8"),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
     )
     payload = None
-    for attempt in range(5):
+    for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.load(response)
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise ValueError("OneMap bridge response has no results")
             break
         except urllib.error.HTTPError as error:
-            if error.code in {401, 403}:
-                raise
-            if error.code == 429 or error.code == 408 or error.code >= 500:
-                if attempt < 4:
-                    time.sleep(min(60, 2 ** attempt))
+            try:
+                details = json.load(error)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                details = {}
+            code = clean(details.get("code")).upper()
+            next_available_at = details.get("nextAvailableAt") or details.get("next_available_at")
+            if error.code == 429 or "QUOTA" in code:
+                raise TemporaryOnemapFailure("quota", next_available_at) from None
+            if error.code in {401, 403} or "CREDENTIAL" in code:
+                raise TemporaryOnemapFailure("credential", next_available_at) from None
+            if error.code == 408 or error.code >= 500 or "NETWORK" in code:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
                     continue
-            break
-        except urllib.error.URLError:
-            if attempt < 4:
-                time.sleep(min(30, 2 ** attempt))
+                raise TemporaryOnemapFailure("network", next_available_at) from None
+            raise RuntimeError(f"OneMap bridge stopped with HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+            if attempt < 2:
+                time.sleep(2 ** attempt)
                 continue
-            break
+            raise TemporaryOnemapFailure("network") from None
     postcodes = defaultdict(list)
     for value in (payload or {}).get("results", []):
         postcode = clean(value.get("POSTAL"))
@@ -171,28 +203,47 @@ def onemap_result(row, token, cache, cache_file, minimum_interval=0.2):
             "longitude": sum(point[0] for point in points) / len(points),
             "latitude": sum(point[1] for point in points) / len(points)
         }
-    cache[query] = result
+    status = "found" if result else "not_found"
+    cache[query] = {"status": status, "result": result}
+    os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
     with open(cache_file, "a", encoding="utf-8", newline="\n") as output:
-        output.write(json.dumps({"query": query, "result": result}, ensure_ascii=False, separators=(",", ":")) + "\n")
+        output.write(json.dumps({"query": query, "status": status, "result": result},
+                                ensure_ascii=False, separators=(",", ":")) + "\n")
     time.sleep(minimum_interval)
     return result
 
 
-def records(property_file, building_file, onemap_cache_file=None):
+def checkpoint_token(cache):
+    state = [(query, entry["status"], entry["result"]) for query, entry in sorted(cache.items())]
+    return hashlib.sha256(json.dumps(state, ensure_ascii=False, separators=(",", ":"),
+                                     sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def records(property_file, building_file, onemap_cache_file, bridge_url, minimum_interval=0.2):
     properties = load_properties(property_file)
     buildings = load_buildings(building_file)
-    token = clean(os.environ.get("ONEMAP_ACCESS_TOKEN"))
     onemap_cache = load_onemap_cache(onemap_cache_file)
+    output = []
+    candidate_count = 0
+    resolved_count = 0
+    failure = None
     for key in sorted(properties):
         property_rows = properties[key]
         building_rows = buildings.get(key, [])
         if len(property_rows) != 1:
             continue
+        candidate_count += 1
         row = property_rows[0]
         if len(building_rows) == 1:
             building, longitude, latitude = building_rows[0]
-        elif token and onemap_cache_file:
-            building = onemap_result(row, token, onemap_cache, onemap_cache_file)
+            resolved_count += 1
+        elif failure is None or f"{clean(row.get('blk_no'))} {clean(row.get('street'))}" in onemap_cache:
+            try:
+                building = onemap_result(row, bridge_url, onemap_cache, onemap_cache_file, minimum_interval)
+            except TemporaryOnemapFailure as error:
+                failure = error
+                continue
+            resolved_count += 1
             if not building:
                 continue
             longitude, latitude = building["longitude"], building["latitude"]
@@ -204,7 +255,7 @@ def records(property_file, building_file, onemap_cache_file=None):
             continue
         entity_id = clean(building.get("ENTITYID")) or "onemap"
         object_id = clean(building.get("OBJECTID")) or clean(building.get("POSTAL_COD"))
-        yield {
+        output.append({
             "id": f"hdb-building:{entity_id}:{object_id}",
             "source_record_id": f"hdb-building:{entity_id}:{object_id}",
             "source_dataset": "HDB Property Information + HDB Existing Building",
@@ -221,7 +272,17 @@ def records(property_file, building_file, onemap_cache_file=None):
             "property_type": "apartment",
             "residential_building_id": f"hdb-property:{key[0]}:{key[1]}",
             "residential_building_class": "apartments"
-        }
+        })
+    source_complete = failure is None and resolved_count == candidate_count
+    return RecordBatch(
+        output,
+        source_complete,
+        None if source_complete else checkpoint_token(onemap_cache),
+        candidate_count,
+        resolved_count,
+        failure.kind if failure else None,
+        failure.next_available_at if failure else None,
+    )
 
 
 def select_balanced(values, maximum, per_locality):
@@ -245,17 +306,45 @@ def main():
     parser.add_argument("--property-csv", required=True)
     parser.add_argument("--building-geojson", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--onemap-cache")
+    parser.add_argument("--onemap-cache", required=True)
+    parser.add_argument("--onemap-bridge-url", required=True)
+    parser.add_argument("--state-output", required=True)
+    parser.add_argument("--minimum-interval", type=float, default=0.2)
     parser.add_argument("--max-records", type=int, required=True)
     parser.add_argument("--per-locality", type=int, required=True)
     args = parser.parse_args()
-    selected = select_balanced(
-        records(args.property_csv, args.building_geojson, args.onemap_cache),
-        args.max_records, args.per_locality
-    )
+    if args.max_records < 1 or args.per_locality < 1 or args.minimum_interval < 0:
+        raise ValueError("Invalid export limits")
+    batch = records(args.property_csv, args.building_geojson, args.onemap_cache,
+                    args.onemap_bridge_url, args.minimum_interval)
+    selected = select_balanced(batch, args.max_records, args.per_locality)
     with open(args.output, "w", encoding="utf-8", newline="\n") as output:
         for value in selected:
             output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    state = {
+        "version": 1,
+        "source_complete": batch.source_complete,
+        "checkpoint_token": batch.checkpoint_token,
+        "candidate_count": batch.candidate_count,
+        "resolved_count": batch.resolved_count,
+        "publishable_count": len(batch),
+        "selected_count": len(selected),
+        "temporary_failure": batch.temporary_failure,
+        "next_available_at": batch.next_available_at,
+    }
+    absolute = os.path.abspath(args.state_output)
+    os.makedirs(os.path.dirname(absolute), exist_ok=True)
+    temporary = f"{absolute}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as output:
+            json.dump(state, output, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            output.write("\n")
+        os.replace(temporary, absolute)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

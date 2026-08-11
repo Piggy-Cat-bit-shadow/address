@@ -9,7 +9,7 @@ RUN npm run build
 FROM node:24-bookworm AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gosu python3 python3-pip python3-venv \
+  && apt-get install -y --no-install-recommends ca-certificates curl gosu python3 python3-pip python3-venv zstd \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 address \
   && useradd --uid 10001 --gid address --home-dir /srv/address --shell /usr/sbin/nologin address

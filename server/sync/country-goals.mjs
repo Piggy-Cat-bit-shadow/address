@@ -96,9 +96,11 @@ export const evaluateCountryGoals = async (database) => {
   const [policiesResult, coverageResult, overridesResult, catalogSummaries] = await Promise.all([
     database.prepare(`SELECT policy.country_code,policy.enabled,policy.target_count,policy.min_per_node,
         policy.coverage_ratio,policy.level1_min,policy.level2_min,
-        COALESCE(root.residential_count,0) AS current_count
+        CASE WHEN COALESCE(root.residential_count,0)=0 AND COALESCE(state.residential_count,0)>0
+          THEN state.residential_count ELSE COALESCE(root.residential_count,0) END AS current_count
       FROM sync_country_policies policy
       LEFT JOIN admin_coverage_stats root ON root.node_key=policy.country_code AND root.level=0
+      LEFT JOIN sync_country_state state ON state.country_code=policy.country_code
       ORDER BY policy.country_code`).all(),
     database.prepare(`SELECT coverage.country_code,coverage.level,coverage.region_code,coverage.residential_count,
         override.min_count AS override_target

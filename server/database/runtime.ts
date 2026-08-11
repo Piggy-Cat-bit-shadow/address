@@ -1,6 +1,7 @@
 import {
   createPostgresPool, initializePostgres, PostgresDatabase
 } from './postgres.mjs';
+import { ensureAddressPolicies } from '../sync/address-policy.mjs';
 
 export interface RuntimeDatabases {
   driver: 'postgres';
@@ -15,7 +16,6 @@ export const openRuntimeDatabases = async (
 ): Promise<RuntimeDatabases> => {
   if (environment.NODE_ENV === 'test' && environment.ADDRESS_TEST_DATABASE === 'memory') {
     const { initializeTestDatabase, openTestDatabase } = await import('../../tests/helpers/postgres-test-database.mjs');
-    const { ensureAddressPolicies } = await import('../sync/address-policy.mjs');
     const database = openTestDatabase(':memory:') as PostgresDatabase;
     await initializeTestDatabase(database, new URL('../control/schema.sql', import.meta.url));
     await ensureAddressPolicies(database);
@@ -31,6 +31,7 @@ export const openRuntimeDatabases = async (
   if (!postgresUrl) throw new Error('POSTGRES_URL or DATABASE_URL is required');
   const pool = createPostgresPool({ environment });
   await initializePostgres(pool);
+  await ensureAddressPolicies(new PostgresDatabase(pool));
   return {
     driver: 'postgres',
     address: new PostgresDatabase(pool),

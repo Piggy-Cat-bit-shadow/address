@@ -51,9 +51,14 @@ export class SyncHistoryStore {
     for (const source of sources) {
       const before = snapshots.get(source.countryCode) || { count: 0, goals: {} };
       await this.database.prepare(`INSERT INTO sync_run_countries(
-        run_id,country_code,source_id,trigger_name,status,before_count,before_goals_json,created_at,updated_at
-      ) VALUES (?,?,?,?, 'queued', ?, ?, ?, ?) ON CONFLICT(run_id,country_code,source_id) DO NOTHING`).bind(
-        job.id, source.countryCode, source.sourceId, job.trigger, before.count, json(before.goals), now, now
+        run_id,country_code,source_id,trigger_name,status,before_count,before_goals_json,
+        source_fingerprint,source_version_before,adapter_revision,created_at,updated_at
+      ) VALUES (?,?,?,?, 'queued', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id,country_code,source_id) DO NOTHING`).bind(
+        job.id, source.countryCode, source.sourceId, job.trigger, before.count, json(before.goals),
+        job.sourceFingerprints?.[source.sourceId] || null,
+        job.sourceInputs?.[source.sourceId]?.sourceVersion || null,
+        job.sourceInputs?.[source.sourceId]?.adapterRevision || null,
+        now, now
       ).run();
     }
   }
@@ -92,10 +97,10 @@ export class SyncHistoryStore {
         executedByCountry.set(row.country_code, (executedByCountry.get(row.country_code) || 0) + 1);
       }
     }
-    await this.database.prepare(`UPDATE sync_runs SET status=?,progress_json=?,error_code=?,error_message=?,
+    await this.database.prepare(`UPDATE sync_runs SET status=?,progress_json=?,error_code=?,error_message=?,failure_phase=?,
       completed_at=?,updated_at=? WHERE id=?`).bind(
       status, json({ phase: job.phase, releaseId: job.releaseId || null }), job.errorCode || null,
-      job.error || null, job.completedAt || now, now, job.id
+      job.error || null, job.failurePhase || null, job.completedAt || now, now, job.id
     ).run();
     for (const row of rows) {
       const countryCode = String(row.country_code);
@@ -112,23 +117,41 @@ export class SyncHistoryStore {
       const errorMessage = !executed || outcomeSkipped ? null
         : outcome?.error || (childStatus === 'failed' ? job.error || null : null);
       const metrics = outcome?.metrics && typeof outcome.metrics === 'object' ? outcome.metrics : {};
-      await this.database.prepare(`UPDATE sync_run_countries SET status=?,completed_at=?,heartbeat_at=?,
+      await this.database.prepare(`UPDATE sync_run_countries SET status=?,completed_at=?,heartbeat_at=?,failure_phase=?,
         after_count=?,net_growth=?,after_goals_json=?,candidate_count=?,accepted_count=?,rejected_count=?,
-        rejection_reasons_json=?,metrics_json=?,error_code=?,error_message=?,updated_at=?
+        rejection_reasons_json=?,metrics_json=?,source_complete=?,source_version_after=?,checkpoint_token=?,error_code=?,error_message=?,updated_at=?
         WHERE run_id=? AND country_code=? AND source_id=?`).bind(
-        childStatus, job.completedAt || now, job.heartbeatAt || now,
+        childStatus, job.completedAt || now, job.heartbeatAt || now, outcome?.failurePhase || job.failurePhase || null,
         executed ? after.count : row.before_count,
         executed && singleSourceCountry ? after.count - Number(row.before_count || 0) : null,
         executed ? json(after.goals) : row.before_goals_json || '{}',
         Number.isFinite(Number(metrics.candidateCount)) ? Number(metrics.candidateCount) : null,
         Number.isFinite(Number(outcome?.acceptedCount)) ? Number(outcome.acceptedCount) : null,
         Number.isFinite(Number(outcome?.rejectedCount)) ? Number(outcome.rejectedCount) : null,
-        json(outcome?.rejectionReasons), json(metrics),
+        json(outcome?.rejectionReasons), json(metrics), outcome?.sourceComplete === false ? 0 : 1,
+        outcome?.sourceVersion || null, outcome?.checkpointToken || null,
         errorCode, errorMessage, now, job.id, countryCode, sourceId
       ).run();
     }
     await this.database.prepare(`UPDATE sync_scheduler_state SET active_run_id=NULL,heartbeat_at=?,updated_at=?
       WHERE scheduler_id='address-sync' AND active_run_id=?`).bind(now, now, job.id).run();
+  }
+
+  async pendingSourceStateApplications() {
+    return (await this.database.prepare(`SELECT run_id,country_code,source_id,status,completed_at,net_growth,
+      before_goals_json,after_goals_json,source_complete,source_fingerprint,
+      source_version_before,source_version_after,adapter_revision,checkpoint_token,
+      error_code,error_message,failure_phase,metrics_json
+      FROM sync_run_countries
+      WHERE trigger_name='queue' AND status IN ('succeeded','failed') AND source_id<>''
+        AND source_state_applied_at IS NULL
+      ORDER BY completed_at,run_id,country_code,source_id`).all()).results;
+  }
+
+  async markSourceStateApplied({ runId, countryCode, sourceId, appliedAt = this.now().toISOString() }) {
+    return this.database.prepare(`UPDATE sync_run_countries SET source_state_applied_at=?,updated_at=?
+      WHERE run_id=? AND country_code=? AND source_id=? AND source_state_applied_at IS NULL`)
+      .bind(appliedAt, appliedAt, runId, countryCode, sourceId).run();
   }
 
   async pauseForQuota({ runId, countryCode, sourceId } = {}) {
@@ -163,10 +186,11 @@ export class SyncHistoryStore {
       WHERE kind='address-pool' AND status IN ('queued','running')`).all()).results;
     for (const run of runs) {
       await this.database.prepare(`UPDATE sync_run_countries SET status='failed',completed_at=?,heartbeat_at=?,
-        net_growth=NULL,error_code='SYNC_JOB_INTERRUPTED',error_message='Synchronization interrupted before completion',updated_at=?
+        net_growth=NULL,error_code='SYNC_JOB_INTERRUPTED',error_message='Synchronization interrupted before completion',
+        failure_phase='interrupted',updated_at=?
         WHERE run_id=? AND status IN ('queued','running')`).bind(now, now, now, run.id).run();
       await this.database.prepare(`UPDATE sync_runs SET status='failed',error_code='SYNC_JOB_INTERRUPTED',
-        error_message='Synchronization interrupted before completion',completed_at=?,updated_at=? WHERE id=?`)
+        error_message='Synchronization interrupted before completion',failure_phase='interrupted',completed_at=?,updated_at=? WHERE id=?`)
         .bind(now, now, run.id).run();
     }
     if (runs.length) {

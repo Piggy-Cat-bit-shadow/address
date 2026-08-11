@@ -178,14 +178,14 @@ const deferredLocalizations = (record) => {
   };
 };
 
-const googleTranslate = async (values, target, fetchImpl) => {
+const googleTranslate = async (values, target, fetchImpl, signal) => {
   const boundary = '[[[ADDRESS_COMPONENT_BOUNDARY]]]';
   const url = new URL('https://translate.googleapis.com/translate_a/single');
   Object.entries({ client: 'gtx', dt: 't', sl: 'auto', tl: target, q: values.join(`\n${boundary}\n`) })
     .forEach(([key, value]) => url.searchParams.set(key, value));
   const response = await fetchImpl(url, {
     headers: { Accept: 'application/json', 'User-Agent': 'address-sync/1.0' },
-    signal: AbortSignal.timeout(20_000)
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000)
   });
   if (!response.ok) return null;
   const payload = await response.json();
@@ -196,7 +196,7 @@ const googleTranslate = async (values, target, fetchImpl) => {
   return translations.length === values.length && translations.every(Boolean) ? translations : null;
 };
 
-const youdaoTranslate = async (values, target, environment, fetchImpl) => {
+const youdaoTranslate = async (values, target, environment, fetchImpl, signal) => {
   const appKey = environment.YOUDAO_APP_KEY?.trim();
   const appSecret = environment.YOUDAO_APP_SECRET?.trim();
   if (!appKey || !appSecret) return null;
@@ -211,7 +211,7 @@ const youdaoTranslate = async (values, target, environment, fetchImpl) => {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'address-sync/1.0' },
     body,
-    signal: AbortSignal.timeout(20_000)
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000)
   });
   if (!response.ok) return null;
   const payload = await response.json();
@@ -221,21 +221,28 @@ const youdaoTranslate = async (values, target, environment, fetchImpl) => {
   return translations.length === values.length && translations.every(Boolean) ? translations : null;
 };
 
-export const translateValues = async (values, target, environment, fetchImpl, cache) => {
-  const output = cache ? await cache.get(values, target) : new Map();
+export const translateValues = async (values, target, environment, fetchImpl, cache, signal) => {
+  signal?.throwIfAborted();
+  const output = cache ? await cache.get(values, target, signal) : new Map();
   const missing = values.filter((value) => !usableTranslation(output.get(value), target));
   for (let offset = 0; offset < missing.length; offset += 30) {
+    signal?.throwIfAborted();
     const chunk = missing.slice(offset, offset + 30);
     let primary;
     try {
       if (!/^(0|false|no)$/iu.test(String(environment.GOOGLE_TRANSLATION_ENABLED ?? 'true'))) {
-        primary = await googleTranslate(chunk, target, fetchImpl);
+        primary = await googleTranslate(chunk, target, fetchImpl, signal);
       }
-    } catch {}
+    } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
+    }
     const retry = chunk.filter((_, index) => !usableTranslation(primary?.[index], target));
     let secondary;
     if (retry.length) {
-      try { secondary = await youdaoTranslate(retry, target, environment, fetchImpl); } catch {}
+      try { secondary = await youdaoTranslate(retry, target, environment, fetchImpl, signal); }
+      catch (error) {
+        if (signal?.aborted) signal.throwIfAborted();
+      }
     }
     const fallback = fillTranslations(retry, secondary || []);
     const translated = new Map(chunk.map((value, index) => {
@@ -246,7 +253,7 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
         : usableTranslation(replacement, target) ? replacement : candidate || replacement || value];
     }));
     for (const [value, translation] of translated) output.set(value, translation);
-    await cache?.set(translated, target);
+    await cache?.set(translated, target, signal);
   }
   return output;
 };
@@ -254,8 +261,10 @@ export const translateValues = async (values, target, environment, fetchImpl, ca
 export const localizeAddressRecords = async (records, {
   environment = process.env,
   fetchImpl = fetch,
-  cache
+  cache,
+  signal
 } = {}) => {
+  signal?.throwIfAborted();
   const selectedOnlineCountries = new Set(String(environment.ADDRESS_SYNC_TRANSLATION_COUNTRIES || '')
     .split(',').map((value) => value.trim().toUpperCase()).filter(Boolean));
   const useOnlineTranslation = boolean(environment.ADDRESS_SYNC_TRANSLATION_ENABLED, false)
@@ -267,9 +276,10 @@ export const localizeAddressRecords = async (records, {
   const needsEnglish = records.some((record) => !record.nativeLanguage.toLowerCase().startsWith('en'));
   const needsChinese = records.some((record) => record.nativeLanguage !== 'zh-CN');
   const [english, chinese] = await Promise.all([
-    needsEnglish ? translateValues(values, 'en', environment, fetchImpl, cache) : Promise.resolve(new Map(values.map((value) => [value, value]))),
-    needsChinese ? translateValues(values, 'zh-CN', environment, fetchImpl, cache) : Promise.resolve(new Map(values.map((value) => [value, value])))
+    needsEnglish ? translateValues(values, 'en', environment, fetchImpl, cache, signal) : Promise.resolve(new Map(values.map((value) => [value, value]))),
+    needsChinese ? translateValues(values, 'zh-CN', environment, fetchImpl, cache, signal) : Promise.resolve(new Map(values.map((value) => [value, value])))
   ]);
+  signal?.throwIfAborted();
   return records.map((record) => {
     const build = (translations) => Object.fromEntries(Object.entries(record.components).map(([field, value]) => [
       field,
@@ -296,11 +306,12 @@ export class PostgresTranslationCache {
     this.database = database;
   }
 
-  async get(values, targetLanguage) {
+  async get(values, targetLanguage, signal) {
     const originals = new Map(values.map((value) => [sha256(value), value]));
     const output = new Map();
     const keys = [...originals.keys()];
     for (let offset = 0; offset < keys.length; offset += 500) {
+      signal?.throwIfAborted();
       const chunk = keys.slice(offset, offset + 500);
       const rows = await this.database.prepare(`SELECT cache_key,value FROM translation_cache
         WHERE target_language=? AND cache_key IN (${chunk.map(() => '?').join(',')})`)
@@ -313,8 +324,9 @@ export class PostgresTranslationCache {
     return output;
   }
 
-  async set(translations, targetLanguage) {
+  async set(translations, targetLanguage, signal) {
     const updatedAt = new Date().toISOString();
+    signal?.throwIfAborted();
     await this.database.batch([...translations].map(([original, translated]) => this.database.prepare(`
       INSERT INTO translation_cache(cache_key,target_language,value,updated_at) VALUES (?,?,?,?)
       ON CONFLICT(cache_key,target_language) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
@@ -609,14 +621,17 @@ export const runAddressEtl = async ({
   catalog: providedCatalog,
   adapters: providedAdapters,
   credentialPool = null,
+  credentialBrokerClient = null,
   importer: providedImporter,
   localizeRecords = localizeAddressRecords,
   stateStore: providedStateStore,
   measureStorage = measureStorageBytes
 } = {}) => {
+  const checkpoint = () => signal?.throwIfAborted();
   const reportProgress = async (progress) => {
     try { await onProgress(progress); } catch (error) { console.error('[address-sync] progress reporting failed', error); }
   };
+  checkpoint();
   const catalog = providedCatalog || await loadSourceCatalog(undefined, environment);
   const requested = selectShards(catalog, requestedShards);
   const stateFile = resolve(cacheDir, 'manifest.json');
@@ -641,12 +656,16 @@ export const runAddressEtl = async ({
     signal,
     environment,
     credentialPool,
+    credentialBrokerClient,
     loadSeedLocations
   });
   const importer = activeRun ? providedImporter || new PostgresAddressImporter({
     database,
     normalizeRecord: normalizeSourceRecord,
-    localizeRecords: (records) => localizeRecords(records, { cache: new PostgresTranslationCache(database) }),
+    localizeRecords: (records, options = {}) => localizeRecords(records, {
+      cache: new PostgresTranslationCache(database),
+      signal: options.signal
+    }),
     hash: sha256,
     reverseGeocoder: (countryCode) => CatalogReverseGeocoder.load(database, countryCode),
     rebuildFormattedAddress: formattedAddress
@@ -721,10 +740,13 @@ export const runAddressEtl = async ({
         : null,
       metrics: qualityFailure ? error?.metrics || task.previous?.metrics || null : null,
       errorUrl: error?.url || null,
-      errorStatus: error?.status ?? null
+      errorStatus: error?.status ?? null,
+      sourceComplete: error?.sourceComplete !== false,
+      checkpointToken: error?.checkpointToken || null
     };
   };
   const recordFailure = async (task, error) => {
+    checkpoint();
     console.error(`[address-sync] ${task.shard.countryCode} failed`, error);
     const report = failureReport(task, error);
     reports.push(report);
@@ -744,6 +766,7 @@ export const runAddressEtl = async ({
   try {
     const work = [];
     for (const shard of selected) {
+      checkpoint();
       const previous = state.shards[shard.id];
       if (syncMode === 'daily' && !estimate && !isCountryDue(previous, shard.intervalDays, checkedAt)) {
         reports.push({ shardId: shard.id, shardKey: shard.id, sourceId: shard.source.id, countryCode: shard.countryCode, status: 'not-due', intervalDays: shard.intervalDays, lastChecked: previous.lastChecked, sourceVersion: previous.sourceVersion });
@@ -768,9 +791,11 @@ export const runAddressEtl = async ({
 
     const discovered = await mapConcurrent(work, runtimePolicy.prepareConcurrency, async (task) => {
       try {
+        checkpoint();
         await reportProgress({ phase: 'discover', countryCode: task.shard.countryCode, sourceId: task.shard.id });
         console.log(`[address-sync] ${task.shard.countryCode} discover`);
-        const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir });
+        const discoveredSource = await adapters.discover(task.shard, { includeAssetSizes: estimate, syncMode, cacheDir, signal });
+        checkpoint();
         const discovery = {
           ...discoveredSource,
           failureSignature: sourceQualityFailureSignature(task.shard, discoveredSource, task.policy)
@@ -780,6 +805,7 @@ export const runAddressEtl = async ({
     });
     const planned = [];
     for (const task of discovered) {
+      checkpoint();
       if (task.error) { await recordFailure(task, task.error); continue; }
       if (['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED'].includes(task.previous?.errorCode)
         && task.previous.failureSignature === task.discovery.failureSignature) {
@@ -827,7 +853,34 @@ export const runAddressEtl = async ({
     }
 
     const importPreparedTask = async (task) => {
+      checkpoint();
       if (task.error) { await recordFailure(task, task.error); return; }
+      if (task.materialized?.sourceComplete === false && !task.materialized.file) {
+        Object.assign(task.report, {
+          status: 'partial', sourceComplete: false,
+          checkpointToken: task.materialized.checkpointToken || null,
+          checkpointStage: task.materialized.checkpointStage || null,
+          nextAttemptAt: task.materialized.nextAttemptAt || null,
+          cacheBytes: task.materialized.cacheBytes || 0,
+          cacheHit: task.materialized.cacheHit === true,
+          checksumSha256: null,
+          sourceChecksumSha256: task.previous?.sourceChecksumSha256 || null,
+          acceptedCount: task.previous?.acceptedCount ?? null,
+          rejectedCount: task.previous?.rejectedCount ?? null,
+          rejectionReasons: task.previous?.rejectionReasons || {},
+          metrics: {
+            ...(task.previous?.metrics || {}),
+            checkpointStage: task.materialized.checkpointStage || null,
+            nextAttemptAt: task.materialized.nextAttemptAt || null
+          },
+          lastSuccessfulAt: task.previous?.lastSuccessfulAt || null
+        });
+        state.shards[task.shard.id] = task.report;
+        await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
+        reports.push(task.report);
+        console.log(`[address-sync] ${task.shard.countryCode} checkpoint stage=${task.report.checkpointStage || 'materialize'}`);
+        return;
+      }
       try {
         const materializedStorageBytes = await measureStorage([dataRoot]);
         storageBudget = assertStorageBudget({ currentBytes: materializedStorageBytes, additionalBytes: task.estimatedDatabaseBytes, softLimitBytes, hardLimitBytes });
@@ -836,8 +889,10 @@ export const runAddressEtl = async ({
         const imported = await importer.importShard({
           shard: task.shard, discovery: task.discovery, materialized: task.materialized,
           maxRecords: task.policy.targetCount, sourceMaxRecords: task.report.targetCount, perLocality, policy: task.policy,
-          storagePolicy: { allowShadowExpansion: storageBudget.allowShadowExpansion, softLimitBytes, hardLimitBytes }
+          storagePolicy: { allowShadowExpansion: storageBudget.allowShadowExpansion, softLimitBytes, hardLimitBytes },
+          signal
         });
+        checkpoint();
         const storageBytesAfterImport = await measureStorage([dataRoot]);
         storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
         Object.assign(task.report, {
@@ -847,6 +902,8 @@ export const runAddressEtl = async ({
           acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
           rejectionReasons: imported.rejectionReasons || {}, metrics: imported.metrics || null,
           localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
+          sourceComplete: task.materialized.sourceComplete !== false,
+          checkpointToken: task.materialized.checkpointToken || null,
           deficit: Math.max(0, task.report.targetCount - imported.acceptedCount), storageBytesAfterImport,
           allowShadowExpansion: storageBudget.allowShadowExpansion, lastSuccessfulAt: checkedAt.toISOString()
         });
@@ -863,6 +920,7 @@ export const runAddressEtl = async ({
     };
 
     for (let offset = 0; offset < planned.length; offset += runtimePolicy.prepareConcurrency) {
+      checkpoint();
       const wave = planned.slice(offset, offset + runtimePolicy.prepareConcurrency);
       const waveRaw = new Map();
       for (const task of wave) {
@@ -885,6 +943,7 @@ export const runAddressEtl = async ({
       }
       const preparedWave = await mapConcurrent(wave, runtimePolicy.prepareConcurrency, async (task) => {
         try {
+          checkpoint();
           await reportProgress({ phase: 'materialize', countryCode: task.shard.countryCode, sourceId: task.shard.id });
           console.log(`[address-sync] ${task.shard.countryCode} materialize`);
           const shardTarget = task.report.targetCount;
@@ -892,8 +951,10 @@ export const runAddressEtl = async ({
           const candidatePerLocality = Math.max(perLocality, ...task.policy.levelLimits);
           const materialized = await adapters.materialize(task.shard, task.discovery, {
             cacheDir, maxBytes: Math.max(1, hardLimitBytes - currentStorage),
-            maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1
+            maxRecords: candidateLimit, perLocality: candidatePerLocality, retainRaw, sharedRaw: wave.length > 1,
+            signal
           });
+          checkpoint();
           return { ...task, materialized };
         } catch (error) { return { ...task, error }; }
       });
@@ -902,8 +963,9 @@ export const runAddressEtl = async ({
     }
     if (database && activeRun && !providedImporter) {
       for (const countryCode of changedCountries) {
+        checkpoint();
         await reportProgress({ phase: 'coverage', countryCode });
-        const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString());
+        const coverage = await refreshResidentialCoverage(database, countryCode, checkedAt.toISOString(), signal);
         console.log(`[address-sync] ${countryCode} coverage mapped=${coverage.matchedAddresses} unmatched=${coverage.unmatchedAddresses}`);
       }
     }

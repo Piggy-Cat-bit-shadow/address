@@ -18,6 +18,8 @@ create_secret "$SECRET_ROOT/postgres_password" 36
 create_secret "$SECRET_ROOT/config_master_key" 32
 create_secret "$SECRET_ROOT/admin_bootstrap_password" 24
 create_secret "$SECRET_ROOT/sync_admin_token" 36
+create_secret "$SECRET_ROOT/credential_broker_production_token" 36
+create_secret "$SECRET_ROOT/credential_broker_test_token" 36
 
 printf 'Compose directories and secrets are ready in %s\n' "$ROOT"
 printf 'Initial administrator password: %s\n' "$SECRET_ROOT/admin_bootstrap_password"

@@ -211,6 +211,14 @@ CREATE TABLE IF NOT EXISTS sync_country_runtime (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_worker_leases (
+  worker_id TEXT PRIMARY KEY,
+  owner_token TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_shard_state (
   shard_id TEXT PRIMARY KEY,
   country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
@@ -237,12 +245,22 @@ CREATE TABLE IF NOT EXISTS sync_source_execution_state (
   failure_fingerprint TEXT,
   consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
   failure_code TEXT,
+  adapter TEXT,
+  failure_phase TEXT,
+  failure_signature TEXT,
+  checkpoint_token TEXT,
+  probe_failures INTEGER NOT NULL DEFAULT 0 CHECK (probe_failures >= 0),
+  probe_version TEXT,
   next_attempt_at TEXT,
   exhausted_at TEXT,
   last_attempt_at TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (country_code, source_id)
 );
+
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS checkpoint_token TEXT;
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS probe_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS probe_version TEXT;
 
 CREATE TABLE IF NOT EXISTS cn_admin_areas (
   adcode TEXT PRIMARY KEY,
@@ -447,6 +465,11 @@ CREATE INDEX IF NOT EXISTS idx_residential_city_id ON residential_coverage(count
 CREATE INDEX IF NOT EXISTS idx_sync_country_due ON sync_country_state(status, next_sync_at, country_code);
 CREATE INDEX IF NOT EXISTS idx_sync_shard_due ON sync_shard_state(status, next_sync_at, country_code, shard_id);
 CREATE INDEX IF NOT EXISTS idx_sync_source_execution_due ON sync_source_execution_state(state,next_attempt_at);
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS adapter TEXT;
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS failure_phase TEXT;
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS failure_signature TEXT;
+CREATE INDEX IF NOT EXISTS idx_sync_source_execution_failure_domain
+  ON sync_source_execution_state(country_code,adapter,failure_phase,failure_signature,state);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_country_created ON sync_jobs(country_code, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,level,name);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
@@ -525,5 +548,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 9) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 13) AS version
 ON CONFLICT (version) DO NOTHING;

@@ -19,6 +19,12 @@ export interface ChinaAddressDataStatus {
   waitReason?: string | null;
 }
 
+export interface AddressDataQueueState {
+  state: string;
+  reason?: string | null;
+  nextAttemptAt?: string | null;
+}
+
 export interface AddressDataSource {
   id: string;
   name: string;
@@ -233,7 +239,7 @@ const groupSources = (rows: SourceRow[]): Map<string, AddressDataSource[]> => {
 export const listAddressData = async (
   database: Database,
   china?: ChinaAddressDataStatus,
-  queueStates: Map<string, string> = new Map()
+  queueStates: Map<string, string | AddressDataQueueState> = new Map()
 ): Promise<AddressDataCountry[]> => {
   const [countryResult, shardResult, pruneResult, sourceResult, goals] = await Promise.all([
     database.prepare(`SELECT policy.country_code,policy.enabled,policy.target_count,
@@ -284,10 +290,14 @@ export const listAddressData = async (
     const countMet = goal?.countMet ?? currentCount >= targetCount;
     const coverageMet = Boolean(goal?.coverageMet && goal.overrideMet);
     const complete = Boolean(goal?.complete);
-    const status = countryState(row, shards, complete, china, queueStates.get(row.country_code));
+    const queueValue = queueStates.get(row.country_code);
+    const queue = typeof queueValue === 'string' ? { state: queueValue } : queueValue;
+    const status = countryState(row, shards, complete, china, queue?.state);
+    const chinaReason = status === 'blocked' && ['unconfigured', 'missing_credentials'].includes(String(china?.waitReason || ''))
+      ? 'missing_api_key:china_maps' : china?.waitReason;
     const nextAttemptAt = row.country_code === 'CN'
       ? china?.nextAttemptAt || null
-      : firstIso([row.country_next_sync_at, ...shards.map((shard) => shard.next_sync_at)]);
+      : queue?.nextAttemptAt || firstIso([row.country_next_sync_at, ...shards.map((shard) => shard.next_sync_at)]);
     return {
       countryCode: row.country_code,
       enabled: Boolean(row.enabled),
@@ -319,8 +329,9 @@ export const listAddressData = async (
       nextAttemptAt,
       lastSuccessfulAt: latestIso([row.country_last_success_at, ...shards.map((shard) => shard.last_success_at)]),
       lastError: row.country_code === 'CN'
-        ? china?.waitReason || row.country_last_error || null
-        : shards.find((shard) => shard.status === 'failed')?.last_error || row.country_last_error || null
+        ? chinaReason || row.country_last_error || null
+        : status === 'blocked' && queue?.reason ? queue.reason
+          : shards.find((shard) => shard.status === 'failed')?.last_error || row.country_last_error || null
     };
   });
 };

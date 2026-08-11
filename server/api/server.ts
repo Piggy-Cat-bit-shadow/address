@@ -14,6 +14,7 @@ import {
 import { ChinaDataService } from '../china/service';
 import { countries } from '../../src/domain/countries';
 import { DatabaseRandomAddressService } from './services/database-random-address';
+import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -29,9 +30,11 @@ const masterKey = masterKeyFrom(process.env.CONFIG_MASTER_KEY);
 const control = new ControlStore(controlDatabase, masterKey);
 await control.initialize(process.env.ADMIN_BOOTSTRAP_PASSWORD, process.env);
 await Promise.all(credentialsFromEnvironment(process.env).map((credential) => control.ensureCredential(credential)));
+const credentialBroker = await createCredentialBrokerClient(process.env);
 const china = new ChinaDataService(database, control, dataRoot, {
   postgresUrl: runtimeDatabases.postgresUrl,
-  masterKey
+  masterKey,
+  credentialBroker: credentialBroker ? { url: credentialBroker.url, token: credentialBroker.token } : undefined
 });
 const port = integer(process.env.API_PORT, 8787);
 const hostname = process.env.API_HOST || '0.0.0.0';
@@ -39,6 +42,7 @@ const trustProxy = process.env.TRUST_PROXY === 'true';
 const staticRoot = resolve(process.env.STATIC_ROOT || 'dist');
 const syncControlUrl = process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791';
 const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
+const releaseId = process.env.ADDRESS_RELEASE?.trim() || 'development';
 const triggerCountrySync = async (countryCode: string): Promise<Record<string, unknown>> => {
   const token = process.env.SYNC_ADMIN_TOKEN?.trim();
   if (!token) throw new Error('SYNC_CONTROL_UNAVAILABLE');
@@ -80,6 +84,7 @@ const amapProxyRateLimit = createAmapProxyRateLimiter();
 const randomAddressPool = new DatabaseRandomAddressService(database, countries.map(({ code }) => code));
 await randomAddressPool.start();
 const securityHeaders = (response: Response): Response => {
+  response.headers.set('X-Address-Release', releaseId);
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -212,9 +217,8 @@ const shutdown = (): void => {
   if (stopping) return;
   stopping = true;
   if (chinaInitialization) void chinaInitialization.terminate().catch(() => undefined);
-  china.close();
   server.close((error) => {
-    void randomAddressPool.close().finally(() => {
+    void china.close().finally(() => randomAddressPool.close()).finally(() => {
       void runtimeDatabases.close().finally(() => {
         if (error) {
           console.error(error);

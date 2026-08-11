@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { strFromU8, unzipSync } from 'fflate';
 
@@ -9,9 +10,12 @@ const countryCodes = new Set([
   'CN', 'TH', 'PH', 'VN', 'TR', 'SA', 'IN', 'AU', 'BR', 'NG', 'ZA'
 ]);
 const usStateCodes = new Set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split(' '));
-const cacheDir = new URL('../.data-cache/', import.meta.url);
-const outputUrl = new URL('../.data-cache/catalog-seed.sql', import.meta.url);
-const manifestUrl = new URL('../src/domain/location-catalog.meta.json', import.meta.url);
+const runtimeCacheDir = String(process.env.LOCATION_CATALOG_CACHE_DIR || '').trim();
+const cacheDir = resolve(runtimeCacheDir || '.data-cache');
+const outputUrl = resolve(cacheDir, 'catalog-seed.sql');
+const manifestUrl = runtimeCacheDir
+  ? resolve(cacheDir, 'location-catalog.meta.json')
+  : new URL('../src/domain/location-catalog.meta.json', import.meta.url);
 const residentialCoverageUrl = new URL('../src/domain/residential-coverage.json', import.meta.url);
 const refresh = process.argv.includes('--refresh');
 
@@ -24,7 +28,7 @@ const sources = {
 await mkdir(cacheDir, { recursive: true });
 
 const download = async (name, url) => {
-  const target = new URL(name, cacheDir);
+  const target = resolve(cacheDir, name);
   if (!refresh) {
     try {
       if ((await stat(target)).size > 0) return target;
@@ -151,7 +155,13 @@ writeBatch(stream, 'catalog_postcodes_staging', ['id', 'country_code', 'region_i
   postcode.id, postcode.country_code, postcode.state_id || null, postcode.city_id || null, postcode.code,
   postcode.locality_name || '', number(postcode.latitude), number(postcode.longitude)
 ]);
-stream.write(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude)
+stream.write(`CREATE UNIQUE INDEX catalog_regions_staging_id_idx ON catalog_regions_staging(id);
+CREATE UNIQUE INDEX catalog_cities_staging_id_idx ON catalog_cities_staging(id);
+CREATE UNIQUE INDEX catalog_postcodes_staging_id_idx ON catalog_postcodes_staging(id);
+ANALYZE catalog_regions_staging;
+ANALYZE catalog_cities_staging;
+ANALYZE catalog_postcodes_staging;
+INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude)
 SELECT id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude FROM catalog_regions_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,code=excluded.code,name=excluded.name,native_name=excluded.native_name,zh_name=excluded.zh_name,type=excluded.type,parent_id=excluded.parent_id,path=excluded.path,latitude=excluded.latitude,longitude=excluded.longitude;
 INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude)
@@ -160,9 +170,9 @@ ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=exclu
 INSERT INTO catalog_postcodes(id,country_code,region_id,city_id,code,locality_name,latitude,longitude)
 SELECT id,country_code,region_id,city_id,code,locality_name,latitude,longitude FROM catalog_postcodes_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=excluded.region_id,city_id=excluded.city_id,code=excluded.code,locality_name=excluded.locality_name,latitude=excluded.latitude,longitude=excluded.longitude;
-DELETE FROM catalog_postcodes WHERE id NOT IN (SELECT id FROM catalog_postcodes_staging);
-DELETE FROM catalog_cities WHERE id NOT IN (SELECT id FROM catalog_cities_staging);
-DELETE FROM catalog_regions WHERE id NOT IN (SELECT id FROM catalog_regions_staging);
+DELETE FROM catalog_postcodes AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_postcodes_staging AS staging WHERE staging.id = target.id);
+DELETE FROM catalog_cities AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_cities_staging AS staging WHERE staging.id = target.id);
+DELETE FROM catalog_regions AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_regions_staging AS staging WHERE staging.id = target.id);
 DROP TABLE catalog_postcodes_staging;
 DROP TABLE catalog_cities_staging;
 DROP TABLE catalog_regions_staging;
@@ -203,4 +213,4 @@ const manifest = {
 };
 await writeFile(manifestUrl, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 console.log(JSON.stringify(manifest.totals));
-console.log(outputUrl.pathname);
+console.log(outputUrl);

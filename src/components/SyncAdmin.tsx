@@ -1,5 +1,5 @@
 import {
-  useCallback, useEffect, useMemo, useRef, useState,
+  useCallback, useEffect, useId, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent
 } from 'react';
 import {
@@ -15,6 +15,12 @@ import type { CountryShortcutConfig, Locale, LocationOption, LocationShortcut } 
 import { WorldCoverageMap } from './WorldCoverageMap';
 
 type View = 'dashboard' | 'blacklist' | 'access' | 'providers' | 'addressData' | 'syncQueue' | 'syncHistory' | 'shortcuts' | 'tokens';
+const adminViews = new Set<View>(['dashboard', 'blacklist', 'access', 'providers', 'addressData', 'syncQueue', 'syncHistory', 'shortcuts', 'tokens']);
+const viewFromLocation = (): View => {
+  if (typeof window === 'undefined') return 'dashboard';
+  const value = new URL(window.location.href).searchParams.get('view') as View | null;
+  return value && adminViews.has(value) ? value : 'dashboard';
+};
 export type AdminLocale = Locale;
 interface SyncAdminProps { locale: Locale }
 interface Credential {
@@ -93,10 +99,10 @@ interface SyncHistoryItem {
   id: string; kind: string; countryCode: string | null; sourceId: string; trigger: string; status: string;
   createdAt: string; startedAt: string | null; completedAt: string | null; heartbeatAt: string | null;
   deadlineAt: string | null; beforeCount: number | null; afterCount: number | null; netGrowth: number | null;
-  beforeGoals?: SyncQueueRules; afterGoals?: SyncQueueRules;
+  beforeGoals?: SyncQueueRules | null; afterGoals?: SyncQueueRules | null;
   candidateCount?: number | null; acceptedCount?: number | null; rejectedCount?: number | null;
   rejectionReasons?: Record<string, number>;
-  errorCode: string | null; errorMessage: string | null;
+  errorCode: string | null; errorMessage: string | null; failurePhase?: string | null;
 }
 interface SyncHistoryData {
   scheduler: { heartbeat_at?: string; last_planned_at?: string; active_run_id?: string | null } | null;
@@ -121,7 +127,7 @@ const baseAdminText = {
     blacklistTitle: '地址黑名单', blacklistDescription: '内置机构规则固定启用；可在下方追加全局排除关键词。', builtinRules: '内置排除规则', customKeywords: '自定义关键词', customKeywordHint: '一行一个关键词，匹配小区名、建筑名、街道或完整地址；最多 500 条。', blacklistSaved: '地址黑名单已保存', saveBlacklist: '保存黑名单', noCustomKeywords: '当前没有自定义关键词',
     accessTitle: '访问策略', accessDescription: '设置前端访问方式和管理员密码。', frontendPasswordEnabled: '启用前端访问密码', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
     providersTitle: '地图密钥', providersDescription: '管理地图 API 凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: 'API 名称', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaProvider: 'API 实时', quotaLocal: '本地统计', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功',
-    youdaoAppKey: '应用 ID（AppKey）', youdaoAppSecret: '应用密钥（AppSecret）', youdaoSaved: '有道翻译密钥已保存', youdaoConfigured: '已配置', youdaoNotConfigured: '未配置', translationTitle: '在线翻译', googleTranslationToggle: '启用谷歌翻译', translationSaved: '在线翻译设置已保存', geoapifyWorkerHint: '韩国同步进程在启动时读取服务器环境变量 GEOAPIFY_API_KEY；此处保存的密钥当前用于 API 实时查询。',
+    youdaoAppKey: '应用 ID（AppKey）', youdaoAppSecret: '应用密钥（AppSecret）', youdaoSaved: '有道翻译密钥已保存', youdaoConfigured: '已配置', youdaoNotConfigured: '未配置', translationTitle: '在线翻译', googleTranslationToggle: '启用谷歌翻译', translationSaved: '在线翻译设置已保存', geoapifyWorkerHint: '此处保存的 Geoapify Key 会用于韩国住宅地址同步和 API 查询，并按额度与冷却状态自动轮换。',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
     amapBrowserTitle: '高德地图的 Web端密钥', configureAmapBrowser: '配置密钥', editAmapBrowser: '修改密钥', amapBrowserDialog: '配置高德地图的 Web端密钥', amapBrowserLabel: '密钥名称', amapBrowserPlaceholder: '高德地图 Web端', amapApiKey: 'Web端 API Key', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德地图的 Web端密钥已保存', amapBrowserRemoved: '高德地图的 Web端密钥已删除', amapBrowserEmpty: '尚未配置高德地图的 Web端密钥', amapBrowserSecurity: '用于在前台地址结果页加载高德 JavaScript 地图，并与安全密钥配套使用。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德地图的 Web端密钥吗？',
     chinaTitle: '中国同步', chinaDescription: '查看合格住宅小区和行政区覆盖。', chinaTotal: '合格住宅小区', cities: '覆盖城市', districts: '覆盖区县', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '暂无区县数据', allProvinces: '全部省级', allCities: '全部城市', allDistricts: '全部区县', pageSize: '每页数量', previousPage: '上一页', nextPage: '下一页', pageSummary: '第 {page} / {pages} 页，共 {total} 条',
@@ -139,7 +145,7 @@ const baseAdminText = {
     blacklistTitle: 'Address blacklist', blacklistDescription: 'Built-in institution rules remain enabled. Add global exclusion keywords below.', builtinRules: 'Built-in exclusion rules', customKeywords: 'Custom keywords', customKeywordHint: 'One keyword per line. Matches community, building, street, or complete address. Maximum 500.', blacklistSaved: 'Address blacklist saved', saveBlacklist: 'Save blacklist', noCustomKeywords: 'No custom keywords configured',
     accessTitle: 'Access policy', accessDescription: 'Configure frontend access and administrator passwords.', frontendPasswordEnabled: 'Require a frontend password', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
     providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaProvider: 'Provider live', quotaLocal: 'Local count', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success',
-    youdaoAppKey: 'Application key', youdaoAppSecret: 'Application secret', youdaoSaved: 'Youdao credential saved', youdaoConfigured: 'Configured', youdaoNotConfigured: 'Not configured', translationTitle: 'Online translation', googleTranslationToggle: 'Enable Google translation', translationSaved: 'Translation settings saved', geoapifyWorkerHint: 'The Korea sync worker reads GEOAPIFY_API_KEY from the server environment at start; the key saved here currently serves API-side lookups.',
+    youdaoAppKey: 'Application key', youdaoAppSecret: 'Application secret', youdaoSaved: 'Youdao credential saved', youdaoConfigured: 'Configured', youdaoNotConfigured: 'Not configured', translationTitle: 'Online translation', googleTranslationToggle: 'Enable Google translation', translationSaved: 'Translation settings saved', geoapifyWorkerHint: 'Geoapify keys saved here are used for Korea residential synchronization and API lookups, with automatic quota and cooldown rotation.',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
     amapBrowserTitle: 'AMap Web credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap Web credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap Web map', amapApiKey: 'Web API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap Web credential saved', amapBrowserRemoved: 'AMap Web credential deleted', amapBrowserEmpty: 'No AMap Web credential configured', amapBrowserSecurity: 'Used to render AMap on address result pages. It is separate from the Web Service API keys used for server-side address synchronization.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap Web credential?',
     chinaTitle: 'China sync', chinaDescription: 'Review qualified residential communities and administrative coverage.', chinaTotal: 'Qualified residential communities', cities: 'Cities covered', districts: 'Districts covered', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'No district data', allProvinces: 'All provinces', allCities: 'All cities', allDistricts: 'All districts', pageSize: 'Rows per page', previousPage: 'Previous', nextPage: 'Next', pageSummary: 'Page {page} of {pages}, {total} total',
@@ -198,7 +204,8 @@ const syncHistoryBase = {
   lastHeartbeat: 'Last heartbeat', country: 'Country or region', allCountries: 'All countries', status: 'Status',
   source: 'Source', period: 'Time period', duration: 'Duration', growth: 'Address growth', trigger: 'Trigger',
   details: 'Details', empty: 'No synchronization history', queued: 'Queued', running: 'Running', succeeded: 'Execution succeeded',
-  failed: 'Failed', paused_quota: 'Paused for quota', needs_review: 'Needs review', cancelled: 'Not executed', previous: 'Previous', next: 'Next'
+  failed: 'Failed', paused_quota: 'Paused for quota', needs_review: 'Needs review', cancelled: 'Not executed', previous: 'Previous', next: 'Next',
+  candidates: 'Candidates', qualityPassed: 'Quality passed', rejected: 'Rejected', coveredNodes: 'Covered nodes', qualifiedNodes: 'Qualified nodes'
 };
 const syncHistoryText = Object.fromEntries((Object.keys(addressDataText) as AdminLocale[]).map((locale) => [locale, {
   ...syncHistoryBase,
@@ -207,13 +214,15 @@ const syncHistoryText = Object.fromEntries((Object.keys(addressDataText) as Admi
     lastHeartbeat: '最近心跳', country: '国家和地区', allCountries: '全部国家', status: '状态', source: '数据来源',
     period: '占用时间段', duration: '持续时间', growth: '总量净增', trigger: '触发方式', details: '结果说明',
     empty: '暂无同步历史', queued: '排队中', running: '同步中', succeeded: '执行成功', failed: '失败',
-    paused_quota: '等待额度', needs_review: '需要检查', cancelled: '未执行', previous: '上一页', next: '下一页'
+    paused_quota: '等待额度', needs_review: '需要检查', cancelled: '未执行', previous: '上一页', next: '下一页',
+    candidates: '候选', qualityPassed: '质量通过', rejected: '拒绝', coveredNodes: '覆盖节点', qualifiedNodes: '达标节点'
   } : locale === 'zh-TW' ? {
     nav: '同步歷史', title: '同步歷史', schedulerActive: '排程器執行中', schedulerIdle: '排程器未執行',
     lastHeartbeat: '最近心跳', country: '國家和地區', allCountries: '全部國家', status: '狀態', source: '資料來源',
     period: '佔用時段', duration: '持續時間', growth: '總量淨增', trigger: '觸發方式', details: '結果說明',
     empty: '暫無同步歷史', queued: '排隊中', running: '同步中', succeeded: '執行成功', failed: '失敗',
-    paused_quota: '等待額度', needs_review: '需要檢查', cancelled: '未執行', previous: '上一頁', next: '下一頁'
+    paused_quota: '等待額度', needs_review: '需要檢查', cancelled: '未執行', previous: '上一頁', next: '下一頁',
+    candidates: '候選', qualityPassed: '品質通過', rejected: '拒絕', coveredNodes: '覆蓋節點', qualifiedNodes: '達標節點'
   } : {})
 }])) as Record<AdminLocale, typeof syncHistoryBase>;
 
@@ -357,6 +366,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const locale = pageLocale;
   const t = adminText[locale];
   const [authenticated, setAuthenticated] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
   const [initialized, setInitialized] = useState(true);
   const [password, setPassword] = useState('');
   const [view, setView] = useState<View>('dashboard');
@@ -439,11 +449,39 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     void fetch('/admin/api/status').then((response) => response.json()).then((body) => setInitialized(Boolean(body.data?.initialized)))
       .catch((value) => setError(errorMessage(value, locale)));
     void fetch('/admin/api/session', { credentials: 'same-origin' }).then((response) => response.json()).then((body) => {
+      const selected = viewFromLocation();
+      viewRef.current = selected;
+      setView(selected);
       const active = Boolean(body.data?.authenticated);
       setAuthenticated(active);
-      if (active) void load(viewRef.current);
-    }).catch((value) => setError(errorMessage(value, locale)));
+      if (active) void load(selected);
+    }).catch((value) => setError(errorMessage(value, locale))).finally(() => setSessionReady(true));
   }, [load, locale]);
+
+  const selectView = useCallback((selected: View, history: 'push' | 'none' = 'push') => {
+    if (selected !== viewRef.current) loadControllers.current[viewRef.current]?.abort();
+    if (selected === 'dashboard') {
+      coverageParent.current = ''; setCoverageTrail([]);
+      setDataByView((values) => ({ ...values, dashboard: undefined }));
+    }
+    viewRef.current = selected; setView(selected);
+    if (history === 'push') {
+      const url = new URL(window.location.href);
+      if (selected === 'dashboard') url.searchParams.delete('view');
+      else url.searchParams.set('view', selected);
+      window.history.pushState({}, '', url);
+    }
+    void load(selected);
+  }, [load]);
+
+  useEffect(() => {
+    const restore = () => {
+      const selected = viewFromLocation();
+      if (selected !== viewRef.current) selectView(selected, 'none');
+    };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, [selectView]);
 
   const addressDataRunning = ((dataByView.addressData || []) as AddressDataCountry[]).some((country) => country.status === 'running');
   useEffect(() => {
@@ -459,7 +497,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
       const body = await result.json();
       if (!result.ok) throw new Error(errorMessage(body.error || 'LOGIN_FAILED', locale));
       setAuthenticated(true); setPassword('');
-      setTimeout(() => void load('dashboard'), 0);
+      setTimeout(() => void load(viewRef.current), 0);
     } catch (value) { setError(errorMessage(value, locale)); }
     finally { setLoginBusy(false); }
   };
@@ -479,6 +517,8 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     finally { setMutating(false); }
   };
 
+  if (!sessionReady) return <main className="admin-login"><div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div></main>;
+
   if (!authenticated) return <main className="admin-login">
     <form onSubmit={login}>
       <div className="admin-login-toolbar"><p>{t.brandName}{locale === 'zh-CN' ? '' : ' '}{t.brand}</p><LocaleMenu locale={pageLocale} change={changeLocale} className="locale-toggle" /></div>
@@ -491,14 +531,6 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     </form>
   </main>;
 
-  const selectView = (selected: View) => {
-    if (selected !== viewRef.current) loadControllers.current[viewRef.current]?.abort();
-    if (selected === 'dashboard') {
-      coverageParent.current = ''; setCoverageTrail([]);
-      setDataByView((values) => ({ ...values, dashboard: undefined }));
-    }
-    viewRef.current = selected; setView(selected); void load(selected);
-  };
   const openCoverage = (node: CoverageNode) => {
     if (!node.childCount) return;
     coverageParent.current = node.key;
@@ -577,7 +609,7 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
         <AmapBrowserSummary value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} reveal={reveal} />
       </Panel>
       <Panel title={t.providersTitle} actions={<button className="primary-action" onClick={() => setProviderDialog('create')}>+ {t.addKey}</button>}>
-      <CredentialTable values={credentials} locale={locale} reveal={reveal} actions={(credential) => <><button disabled={busy} onClick={() => setProviderDialog(credential)}>{t.edit}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}`, 'PUT', { enabled: !credential.enabled }, credential.enabled ? t.stop : t.enable)}>{credential.enabled ? t.stop : t.enable}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}/test`, 'POST', undefined, t.testSuccess)}>{t.test}</button><button disabled={busy} className="danger" onClick={() => void mutate(`/providers/${credential.id}`, 'DELETE', undefined, t.remove)}>{t.remove}</button></>} />
+      <CredentialTable values={credentials} locale={locale} reveal={reveal} actions={(credential) => <><button disabled={busy} onClick={() => setProviderDialog(credential)}>{t.edit}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}`, 'PUT', { enabled: !credential.enabled }, credential.enabled ? t.stop : t.enable)}>{credential.enabled ? t.stop : t.enable}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}/test`, 'POST', undefined, t.testSuccess)}>{t.test}</button><button disabled={busy} className="danger" onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, credential.label))) void mutate(`/providers/${credential.id}`, 'DELETE', undefined, t.remove); }}>{t.remove}</button></>} />
     </Panel><TranslationSettingsPanel value={value.translation} youdao={value.youdao} locale={locale} busy={busy} mutate={mutate} />{amapBrowserDialog && <AmapBrowserDialog value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} close={() => setAmapBrowserDialog(false)} />}{providerDialog && <ProviderCredentialDialog value={providerDialog === 'create' ? undefined : providerDialog} locale={locale} busy={busy} mutate={mutate} close={() => setProviderDialog(null)} />}</>;
   }
   if (view === 'addressData') {
@@ -602,6 +634,13 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
   }
   return null;
 }
+
+const credentialRemovalPrompt = (locale: AdminLocale, label: string): string => ({
+  en: `Delete map credential "${label}"?`, 'zh-CN': `确定删除地图密钥“${label}”吗？`, 'zh-TW': `確定刪除地圖金鑰「${label}」嗎？`,
+  ja: `地図認証情報「${label}」を削除しますか？`, ko: `지도 자격 증명 "${label}"을(를) 삭제하시겠습니까?`,
+  de: `Karten-Zugangsdaten "${label}" loeschen?`, fr: `Supprimer l'identifiant cartographique « ${label} » ?`,
+  es: `¿Eliminar la credencial de mapas "${label}"?`, pt: `Excluir a credencial de mapa "${label}"?`
+})[locale];
 
 function DashboardLoading({ label }: { label: string }) {
   return <div className="dashboard-loading" role="status" aria-label={label}>
@@ -1079,7 +1118,36 @@ function SecretCell({ mask, locale, reveal, path, field }: { mask: string; local
 const Panel = ({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) => <section className="admin-panel"><header><h2>{title}</h2>{actions}</header>{children}</section>;
 const EmptyState = ({ icon: Icon, text }: { icon: typeof Globe2; text: string }) => <div className="empty-hint"><span className="empty-hint-icon" aria-hidden="true"><Icon size={19} /></span><p>{text}</p></div>;
 const usagePercent = (used: number, limit: number): number => limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-const Dialog = ({ title, close, locale, children, className = '' }: { title: string; close: () => void; locale: AdminLocale; children: ReactNode; className?: string }) => <div className="dialog-backdrop" role="presentation"><section className={`admin-dialog ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}>×</button></header>{children}</section></div>;
+function Dialog({ title, close, locale, children, className = '' }: { title: string; close: () => void; locale: AdminLocale; children: ReactNode; className?: string }) {
+  const root = useRef<HTMLElement>(null);
+  const closeRef = useRef(close);
+  const titleId = useId();
+  useEffect(() => { closeRef.current = close; }, [close]);
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusable = () => [...(root.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+    window.setTimeout(() => (focusable()[0] || root.current)?.focus(), 0);
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return; }
+      if (event.key !== 'Tab') return;
+      const values = focusable();
+      if (!values.length) { event.preventDefault(); root.current?.focus(); return; }
+      const first = values[0];
+      const last = values[values.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', keyDown);
+    return () => {
+      document.removeEventListener('keydown', keyDown);
+      document.body.style.overflow = overflow;
+      previous?.focus();
+    };
+  }, []);
+  return <div className="dialog-backdrop" role="presentation"><section ref={root} className={`admin-dialog ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><button type="button" className="icon-button" title={adminText[locale].close} aria-label={adminText[locale].close} onClick={close}><X aria-hidden="true" /></button></header>{children}</section></div>;
+}
 const scopeLabel = (scope: string, locale: AdminLocale): string => ({ read: locale === 'zh-CN' ? '读取' : 'Read', generate: locale === 'zh-CN' ? '生成' : 'Generate', '*': locale === 'zh-CN' ? '全部' : 'All' } as Record<string, string>)[scope] || scope;
 const continentLabel = (group: string, locale: AdminLocale): string => {
   const t = adminText[locale];
@@ -1205,8 +1273,8 @@ const syncQueueRuleText: Record<AdminLocale, {
   pt: { total: 'Total do país', coverage: 'Cobertura administrativa', minimums: 'Mínimos de nível/nó', met: 'Atingido', unmet: 'Pendente', lowest: 'Nível inferior', level1: 'Nível 1', level2: 'Nível 2', overrides: 'Metas de nó', unmetPrefix: 'Pendente' }
 };
 const queueStateRank: Record<SyncQueueEntry['state'], number> = {
-  running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, scheduled_wait: 5,
-  source_limited: 6, suspended: 7, no_source: 8, blocked: 9, failed: 10, done: 11
+  running: 0, queued: 1, retry_wait: 2, cooldown_wait: 3, quota_wait: 4, blocked: 5,
+  scheduled_wait: 6, suspended: 7, failed: 8, source_limited: 9, no_source: 10, done: 11
 };
 const queueBadgeClass: Record<SyncQueueEntry['state'], string> = {
   running: 'running', queued: 'below_target', retry_wait: 'cooldown_wait', cooldown_wait: 'cooldown_wait', quota_wait: 'quota_wait',
@@ -1219,6 +1287,33 @@ const queueExtraStateText = (locale: AdminLocale) => locale === 'zh-CN' ? {
   retry_wait: '等待重試', scheduled_wait: '等待下次檢查', suspended: '重試已暫停', no_source: '沒有可執行來源'
 } : {
   retry_wait: 'Waiting to retry', scheduled_wait: 'Waiting for next check', suspended: 'Retries suspended', no_source: 'No runnable source'
+};
+const queueReasonText = (reason: string | null | undefined, locale: AdminLocale): string => {
+  if (!reason) return '';
+  if (reason.startsWith('missing_api_key:')) {
+    const provider = reason.slice('missing_api_key:'.length);
+    const name = provider === 'geoapify' ? 'GEOAPIFY_API_KEY'
+      : provider === 'mappls' ? 'MAPPLS_API_KEY'
+        : provider === 'china_maps' ? 'AMAP_API_KEY / BAIDU_API_KEY / TENCENT_API_KEY' : provider;
+    if (locale === 'zh-CN') return provider === 'china_maps' ? `至少配置一个中国地图 API Key：${name}` : `缺少 API Key：${name}`;
+    if (locale === 'zh-TW') return provider === 'china_maps' ? `至少設定一個中國地圖 API Key：${name}` : `缺少 API Key：${name}`;
+    return provider === 'china_maps' ? `Configure at least one China map API key: ${name}` : `Missing API key: ${name}`;
+  }
+  if (reason.startsWith('api_key_needs_review:') || reason.startsWith('api_key_disabled:')) {
+    const provider = reason.split(':')[1] || '';
+    const name = provider === 'geoapify' ? 'GEOAPIFY_API_KEY' : provider === 'mappls' ? 'MAPPLS_API_KEY' : provider;
+    return locale.startsWith('zh') ? `API Key 不可用，请在地图密钥中检查：${name}` : `API key unavailable; review it under Map Keys: ${name}`;
+  }
+  if (reason.startsWith('credential_import_pending:')) {
+    const provider = reason.split(':')[1] || '';
+    const name = provider === 'geoapify' ? 'GEOAPIFY_API_KEY' : provider === 'mappls' ? 'MAPPLS_API_KEY' : provider;
+    return locale.startsWith('zh') ? `正在导入环境变量中的 API Key：${name}` : `Importing API key from the environment: ${name}`;
+  }
+  if (reason.startsWith('missing_source_configuration:')) {
+    const name = reason.slice('missing_source_configuration:'.length);
+    return locale.startsWith('zh') ? `缺少数据源配置：${name}` : `Missing source configuration: ${name}`;
+  }
+  return reason;
 };
 
 function SyncQueuePanel({ initialData, locale, request }: { initialData: SyncQueueData; locale: AdminLocale; request: RequestData }) {
@@ -1243,12 +1338,12 @@ function SyncQueuePanel({ initialData, locale, request }: { initialData: SyncQue
     return () => { controller.abort(); if (timer) window.clearTimeout(timer); };
   }, [request]);
   const entries = data?.entries || [];
-  const active = entries.filter((entry) => entry.state !== 'done').sort((left, right) =>
+  const visible = [...entries].sort((left, right) =>
     (Number(left.countryCode !== 'CN') - Number(right.countryCode !== 'CN'))
     || (queueStateRank[left.state] - queueStateRank[right.state])
     || ((left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER))
     || left.countryCode.localeCompare(right.countryCode));
-  const doneCount = entries.length - active.length;
+  const doneCount = entries.filter((entry) => entry.state === 'done').length;
   const stateLabel = (entry: SyncQueueEntry): string => {
     if (entry.state === 'queued') return text.queueQueued;
     const extras = queueExtraStateText(locale);
@@ -1296,24 +1391,24 @@ function SyncQueuePanel({ initialData, locale, request }: { initialData: SyncQue
       return parts.join(' · ');
     }
     if (entry.state === 'quota_wait') {
-      return [entry.reason || '', entry.nextAttemptAt ? interpolate(text.queueResetIn, { time: remainingTime(entry.nextAttemptAt) }) : '']
+      return [queueReasonText(entry.reason, locale), entry.nextAttemptAt ? interpolate(text.queueResetIn, { time: remainingTime(entry.nextAttemptAt) }) : '']
         .filter(Boolean).join(' · ');
     }
     if (['retry_wait', 'cooldown_wait', 'scheduled_wait'].includes(entry.state)) {
       const retry = entry.nextAttemptAt ? `${remainingTime(entry.nextAttemptAt)} ${locale.startsWith('zh') ? '后重试' : 'until retry'}` : '';
-      return [entry.reason || '', retry].filter(Boolean).join(' · ');
+      return [queueReasonText(entry.reason, locale), retry].filter(Boolean).join(' · ');
     }
-    return entry.reason || '';
+    return queueReasonText(entry.reason, locale);
   };
   return <section className="admin-panel sync-queue-panel">
     <header><h2>{text.queueTitle}</h2>{data && <small>{dateTime(data.generatedAt, locale)}</small>}</header>
     {(failed || (data && !data.available)) && <p className="queue-unavailable">{text.queueUnavailable}</p>}
     {!data && !failed && <div className="admin-loading" role="status"><span className="loading-dot" />{t.loading}</div>}
-    {data && data.job && !active.some((entry) => entry.state === 'running')
+    {data && data.job && !visible.some((entry) => entry.state === 'running')
       && <p className="queue-job-note">{text.states.running} · {data.job.id} · {data.job.phase}</p>}
-    {data && (active.length ? <div className="table-scroll"><table>
+    {data && (visible.length ? <div className="table-scroll"><table>
       <thead><tr><th>{text.status}</th><th>{text.country}</th><th>{ruleText.total}</th><th>{ruleText.coverage}</th><th>{ruleText.minimums}</th><th>{text.lastError}</th></tr></thead>
-      <tbody>{active.map((entry) => {
+      <tbody>{visible.map((entry) => {
         const name = isCountryCode(entry.countryCode)
           ? localizedCountryName(entry.countryCode, locale, entry.countryCode)
           : entry.countryCode;
@@ -1340,6 +1435,7 @@ function SyncQueuePanel({ initialData, locale, request }: { initialData: SyncQue
 const syncHistoryStatusClass = (status: string): string => {
   if (status === 'succeeded') return 'ready';
   if (status === 'running') return 'running';
+  if (status === 'cancelled') return 'source_limited';
   if (['queued', 'paused_quota'].includes(status)) return 'quota_wait';
   if (status === 'needs_review') return 'below_target';
   return 'failed';
@@ -1356,6 +1452,43 @@ const durationLabel = (startedAt: string | null, completedAt: string | null, loc
   if (minutes < 60) return locale.startsWith('zh') ? `${minutes} 分 ${rest} 秒` : `${minutes}m ${rest}s`;
   const hours = Math.floor(minutes / 60); const remainingMinutes = minutes % 60;
   return locale.startsWith('zh') ? `${hours} 小时 ${remainingMinutes} 分` : `${hours}h ${remainingMinutes}m`;
+};
+
+const finiteGoalValue = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+export const syncHistoryGoalChange = (item: SyncHistoryItem, locale: AdminLocale): string => {
+  const before = item.beforeGoals; const after = item.afterGoals;
+  if (!before || !after) return '';
+  const text = syncHistoryText[locale];
+  const changes: string[] = [];
+  const beforeCovered = finiteGoalValue(before.administrativeCoverage?.covered);
+  const afterCovered = finiteGoalValue(after.administrativeCoverage?.covered);
+  if (beforeCovered !== null && afterCovered !== null) {
+    const covered = afterCovered - beforeCovered;
+    if (covered) changes.push(`${text.coveredNodes} ${covered > 0 ? '+' : ''}${covered}`);
+  }
+  const beforeQualified = finiteGoalValue(before.regionalMinimums?.lowest?.qualified);
+  const afterQualified = finiteGoalValue(after.regionalMinimums?.lowest?.qualified);
+  if (beforeQualified !== null && afterQualified !== null) {
+    const qualified = afterQualified - beforeQualified;
+    if (qualified) changes.push(`${text.qualifiedNodes} ${qualified > 0 ? '+' : ''}${qualified}`);
+  }
+  return changes.join(' · ');
+};
+
+export const syncHistoryResultDetail = (item: SyncHistoryItem, locale: AdminLocale): string => {
+  if (item.errorMessage || item.errorCode) return [item.failurePhase, item.errorMessage || item.errorCode].filter(Boolean).join(' · ');
+  const text = syncHistoryText[locale];
+  const parts: string[] = [];
+  if (item.candidateCount !== null && item.candidateCount !== undefined) parts.push(`${text.candidates} ${item.candidateCount.toLocaleString(locale)}`);
+  if (item.acceptedCount !== null && item.acceptedCount !== undefined) parts.push(`${text.qualityPassed} ${item.acceptedCount.toLocaleString(locale)}`);
+  if (item.rejectedCount !== null && item.rejectedCount !== undefined) parts.push(`${text.rejected} ${item.rejectedCount.toLocaleString(locale)}`);
+  const goals = syncHistoryGoalChange(item, locale); if (goals) parts.push(goals);
+  return parts.join(' · ');
 };
 
 function SyncHistoryPanel({ initialData, locale, request }: { initialData: SyncHistoryData; locale: AdminLocale; request: RequestData }) {
@@ -1390,25 +1523,6 @@ function SyncHistoryPanel({ initialData, locale, request }: { initialData: SyncH
     ...data.items.map((item) => item.countryCode).filter((value): value is string => Boolean(value))
   ])].sort();
   const statusLabel = (status: string): string => text[status as keyof typeof text] || status;
-  const goalChange = (item: SyncHistoryItem): string => {
-    const before = item.beforeGoals; const after = item.afterGoals;
-    if (!before || !after) return '';
-    const changes: string[] = [];
-    const covered = Number(after.administrativeCoverage?.covered || 0) - Number(before.administrativeCoverage?.covered || 0);
-    const qualified = Number(after.regionalMinimums?.lowest?.qualified || 0) - Number(before.regionalMinimums?.lowest?.qualified || 0);
-    if (covered) changes.push(`${locale.startsWith('zh') ? '覆盖节点' : 'covered nodes'} ${covered > 0 ? '+' : ''}${covered}`);
-    if (qualified) changes.push(`${locale.startsWith('zh') ? '达标节点' : 'qualified nodes'} ${qualified > 0 ? '+' : ''}${qualified}`);
-    return changes.join(' · ');
-  };
-  const resultDetail = (item: SyncHistoryItem): string => {
-    if (item.errorMessage || item.errorCode) return item.errorMessage || item.errorCode || '';
-    const parts: string[] = [];
-    if (item.candidateCount !== null && item.candidateCount !== undefined) parts.push(`${locale.startsWith('zh') ? '候选' : 'candidates'} ${item.candidateCount.toLocaleString(locale)}`);
-    if (item.acceptedCount !== null && item.acceptedCount !== undefined) parts.push(`${locale.startsWith('zh') ? '接受' : 'accepted'} ${item.acceptedCount.toLocaleString(locale)}`);
-    if (item.rejectedCount !== null && item.rejectedCount !== undefined) parts.push(`${locale.startsWith('zh') ? '拒绝' : 'rejected'} ${item.rejectedCount.toLocaleString(locale)}`);
-    const goals = goalChange(item); if (goals) parts.push(goals);
-    return parts.join(' · ');
-  };
   return <section className="admin-panel sync-history-panel">
     <header><h2>{text.title}</h2><div className="sync-history-toolbar">
       <label><span className="sr-only">{text.country}</span><select value={country} onChange={(event) => { setCountry(event.target.value); setOffset(0); }}>
@@ -1426,7 +1540,7 @@ function SyncHistoryPanel({ initialData, locale, request }: { initialData: SyncH
         <td><span className="history-period">{dateTime(item.startedAt || item.createdAt, locale)}<b>→</b>{dateTime(ended, locale)}</span></td>
         <td>{durationLabel(item.startedAt, item.completedAt, locale)}</td>
         <td className={(item.netGrowth || 0) > 0 ? 'history-growth-positive' : ''}>{item.netGrowth === null ? '-' : <>{item.netGrowth > 0 ? '+' : ''}{item.netGrowth.toLocaleString(locale)}</>}</td>
-        <td title={resultDetail(item)}>{resultDetail(item) || '-'}</td>
+        <td title={syncHistoryResultDetail(item, locale)}>{syncHistoryResultDetail(item, locale) || '-'}</td>
       </tr>;
     })}</tbody></table></div> : <p className="admin-empty">{text.empty}</p>}
     {(offset > 0 || data.hasMore) && <footer className="sync-history-pagination">
@@ -1588,7 +1702,10 @@ function CountryShortcutEditor({ value, locale, busy, mutate, request }: {
     await mutate(`/settings/country-shortcuts/${value.countryCode}`, 'DELETE', undefined, text.resetDone);
   };
   return <form className="shortcut-editor" onSubmit={save}>
-    <div className="shortcut-editor-status"><strong>{isCountryCode(value.countryCode) ? localizedCountryName(value.countryCode, locale, value.countryCode) : value.countryCode}</strong><span className={`badge ${value.customized ? 'customized' : ''}`}>{value.customized ? text.customized : text.defaults}</span></div>
+    <div className="shortcut-editor-toolbar">
+      <div className="shortcut-editor-status"><strong>{isCountryCode(value.countryCode) ? localizedCountryName(value.countryCode, locale, value.countryCode) : value.countryCode}</strong><span className={`badge ${value.customized ? 'customized' : ''}`}>{value.customized ? text.customized : text.defaults}</span></div>
+      <div className="shortcut-editor-actions"><button type="button" className="secondary-action" disabled={busy || !value.customized} onClick={() => void reset()}><RotateCcw size={15} />{text.reset}</button><button className="primary-action" disabled={busy}><Save size={15} />{text.save}</button></div>
+    </div>
     <section className="shortcut-editor-section special-title-editor"><header><h3>{text.specialTitle}</h3></header><div>
       <input required aria-label={text.specialTitle} value={usesChineseSource(locale) ? draft.specialAreaTitle['zh-CN'] : draft.specialAreaTitle.en} onChange={(event) => setDraft((current) => ({ ...current, specialAreaTitle: { ...current.specialAreaTitle, [usesChineseSource(locale) ? 'zh-CN' : 'en']: event.target.value } }))} />
     </div></section>
@@ -1596,7 +1713,6 @@ function CountryShortcutEditor({ value, locale, busy, mutate, request }: {
     {renderList('popularCities', text.cities, 'city')}
     <section className="shortcut-special-type"><label><span>{text.type}</span><select value={specialType} onChange={(event) => setSpecialType(event.target.value as ShortcutCatalogField)}><option value="region">{text.region}</option><option value="city">{text.city}</option><option value="postcode">{text.postcode}</option></select></label></section>
     {renderList('specialAreas', text.specialAreas, specialType)}
-    <div className="shortcut-editor-actions"><button type="button" className="secondary-action" disabled={busy || !value.customized} onClick={() => void reset()}><RotateCcw size={15} />{text.reset}</button><button className="primary-action" disabled={busy}><Save size={15} />{text.save}</button></div>
   </form>;
 }
 
@@ -1696,7 +1812,7 @@ function AddressDataDialog({ value, locale, busy, mutate, request, close }: {
         <div><a href={source.homepageUrl} target="_blank" rel="noreferrer">{source.name}</a><small>{source.id}</small></div>
         <dl><div><dt>{text.activeRecords}</dt><dd>{source.activeCount.toLocaleString(locale)}</dd></div><div><dt>{text.latestVersion}</dt><dd>{source.latestVersion || '-'}</dd></div><div><dt>{text.lastImport}</dt><dd>{dateTime(source.latestImportedAt, locale)}</dd></div></dl>
       </article>) : <EmptyState icon={Database} text={text.noSources} />}</section>
-      {value.lastError && <div className="address-data-message"><strong>{text.lastError}</strong><span>{value.lastError}</span></div>}
+      {value.lastError && <div className="address-data-message"><strong>{text.lastError}</strong><span>{queueReasonText(value.lastError, locale)}</span></div>}
       {value.countryCode === 'CN' && <section className="china-area-detail"><h3>{adminText[locale].districtCoverage}</h3><ChinaAreaCoverage locale={locale} request={request} /></section>}
       <div className="dialog-actions split-actions"><button type="button" className="secondary-action" disabled={busy || !enabled || value.status === 'running'} onClick={() => void sync()}>{value.status === 'running' ? text.syncing : text.sync}</button><div><button type="button" onClick={close}>{adminText[locale].cancel}</button><button className="primary-action" disabled={busy || saving}>{text.save}</button></div></div>
     </form>

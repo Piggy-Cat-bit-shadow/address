@@ -399,6 +399,7 @@
       "shareAlike": false,
       "redistributionAllowed": true,
       "updateCadence": "monthly",
+      "quotaProvider": "onemap",
       "maxRecords": 12000,
       "qualityGate": {
         "minimumRecords": 1000,
@@ -643,7 +644,10 @@
         {
           "countryCode": "PH",
           "extractId": "philippines",
-          "postcodeDataUrl": "https://phlpost.gov.ph/zip-code-locator/"
+          "postcodeDataUrl": "https://phlpost.gov.ph/zip-code-locator/",
+          "postcodeMetadataUrl": "https://phlpost.gov.ph/wp-sitemap-posts-page-1.xml",
+          "postcodeMetadataFormat": "sitemap",
+          "postcodeMetadataMatchUrl": "https://phlpost.gov.ph/zip-code-locator/"
         },
         {
           "countryCode": "VN",

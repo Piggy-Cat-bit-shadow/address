@@ -44,8 +44,8 @@ describe('China sync worker controller', () => {
     });
   });
 
-  afterEach(() => {
-    service.close();
+  afterEach(async () => {
+    await service.close();
     addressDb.close();
     controlDb.close();
   });
@@ -91,7 +91,56 @@ describe('China sync worker controller', () => {
   it('asks the active worker to stop on close', async () => {
     await service.start();
     const worker = workers[0];
-    service.close();
+    const closing = service.close();
     expect(worker.posted).toContainEqual({ type: 'stop' });
+    worker.emit('exit', 0);
+    await closing;
+  });
+
+  it('allows only one worker across service instances sharing PostgreSQL', async () => {
+    const standby = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://test', masterKey: Buffer.alloc(32, 7)
+    });
+    try {
+      await service.start();
+      await expect(standby.start()).rejects.toThrow('CHINA_SYNC_STANDBY');
+      expect(workers).toHaveLength(1);
+      workers[0].emit('exit', 0);
+    } finally {
+      await standby.close();
+    }
+  });
+
+  it('takes over a stale database lease automatically', async () => {
+    await addressDb.prepare(`INSERT INTO sync_worker_leases(
+      worker_id,owner_token,heartbeat_at,expires_at,updated_at
+    ) VALUES ('china-sync','dead-owner','2026-01-01T00:00:00.000Z','2026-01-01T00:01:00.000Z','2026-01-01T00:00:00.000Z')`).run();
+    await service.start();
+    expect(workers).toHaveLength(1);
+    const lease = await addressDb.prepare("SELECT owner_token FROM sync_worker_leases WHERE worker_id='china-sync'")
+      .first<{ owner_token: string }>();
+    expect(lease?.owner_token).not.toBe('dead-owner');
+    workers[0].emit('exit', 0);
+  });
+
+  it('keeps the lease until the stopping worker has exited', async () => {
+    const standby = new ChinaDataService(addressDb, control, undefined, {
+      postgresUrl: 'postgresql://test', masterKey: Buffer.alloc(32, 7)
+    });
+    try {
+      await service.start();
+      const worker = workers[0];
+      const closing = service.close();
+      await expect(standby.start()).rejects.toThrow('CHINA_SYNC_STANDBY');
+      worker.emit('exit', 0);
+      await closing;
+      await standby.start();
+      expect(workers).toHaveLength(2);
+      const standbyClosing = standby.close();
+      workers[1].emit('exit', 0);
+      await standbyClosing;
+    } finally {
+      await standby.close();
+    }
   });
 });

@@ -24,7 +24,11 @@ parentPort?.on('message', (message: { type?: string }) => {
 });
 parentPort?.unref();
 try {
-  const result = await new ChinaDataService(addressDb, control, data.dataRoot)
+  const result = await new ChinaDataService(addressDb, control, data.dataRoot, {
+    postgresUrl: data.postgresUrl,
+    masterKey: Buffer.from(data.masterKey),
+    credentialBroker: data.credentialBroker
+  })
     .runSync(data.runId, data.targets, data.providers);
   parentPort?.postMessage({ type: 'done', ...result } satisfies ChinaWorkerMessage);
 } finally {

@@ -106,6 +106,20 @@ export const removeFavorite = async (id: string): Promise<boolean> => {
   return true;
 };
 
+export const restoreFavorite = async (favorite: FavoriteAddress): Promise<void> => {
+  const current = await listFavorites();
+  if (current.values.some((value) => value.id === favorite.id)) return;
+  const values = normalizedFavoritePositions([...current.values, favorite]);
+  const changed = values.filter((value) => value.countryCode === favorite.countryCode);
+  const database = await openDatabase();
+  if (!database) { changed.forEach((value) => memory.set(value.id, value)); broadcast(); return; }
+  const transaction = database.transaction(STORE_NAME, 'readwrite');
+  const store = transaction.objectStore(STORE_NAME);
+  changed.forEach((value) => store.put(value));
+  await transactionDone(transaction);
+  broadcast();
+};
+
 export const reorderFavorite = async (id: string, position: number): Promise<void> => {
   const current = await listFavorites();
   const values = moveFavoriteWithinCountry(current.values, id, position);

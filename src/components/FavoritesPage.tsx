@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { DndContext, KeyboardSensor, PointerSensor, TouchSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -10,7 +10,7 @@ import { favoritesCopy, type FavoritesCopy } from '../domain/favorites-i18n';
 import { messages } from '../domain/i18n';
 import { localeDefinitions, localizedCountryName, pathForLocale } from '../domain/locales';
 import type { CountryCode, CountryGroup, Locale } from '../domain/types';
-import { listFavorites, removeFavorite, reorderFavorite, subscribeToFavorites } from '../services/favorite-store';
+import { listFavorites, removeFavorite, reorderFavorite, restoreFavorite, subscribeToFavorites } from '../services/favorite-store';
 
 interface Props { locale: Locale }
 type GroupMode = 'continent' | 'country';
@@ -30,6 +30,8 @@ export default function FavoritesPage({ locale }: Props) {
   const [continent, setContinent] = useState<CountryGroup | ''>('');
   const [country, setCountry] = useState<CountryCode | ''>('');
   const [copied, setCopied] = useState('');
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string; removed?: FavoriteAddress } | null>(null);
+  const feedbackTimer = useRef<number | undefined>(undefined);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 6 } }),
@@ -40,7 +42,17 @@ export default function FavoritesPage({ locale }: Props) {
     const result = await listFavorites();
     setFavorites(result.values); setPersistent(result.persistent); setReady(true);
   };
-  useEffect(() => { void refresh(); return subscribeToFavorites(() => void refresh()); }, []);
+  useEffect(() => {
+    void refresh();
+    const unsubscribe = subscribeToFavorites(() => void refresh());
+    return () => { unsubscribe(); window.clearTimeout(feedbackTimer.current); };
+  }, []);
+
+  const showFeedback = (value: typeof feedback) => {
+    window.clearTimeout(feedbackTimer.current);
+    setFeedback(value);
+    feedbackTimer.current = window.setTimeout(() => setFeedback(null), 4000);
+  };
 
   const availableCountries = useMemo(() => countries.filter((item) => favorites.some((favorite) => favorite.countryCode === item.code)
     && (!continent || item.group === continent)), [favorites, continent]);
@@ -59,13 +71,30 @@ export default function FavoritesPage({ locale }: Props) {
   };
   const copyAddress = async (favorite: FavoriteAddress) => {
     const presentation = addressDisplayPresentation(favorite.snapshot, storedAddressLanguage(), locale);
-    await copyText(presentation.singleLine);
-    setCopied(favorite.id); window.setTimeout(() => setCopied(''), 1200);
+    try {
+      await copyText(presentation.singleLine);
+      setCopied(favorite.id); showFeedback({ kind: 'success', message: text.copied });
+      window.setTimeout(() => setCopied(''), 1200);
+    } catch { showFeedback({ kind: 'error', message: text.copyFailed }); }
+  };
+
+  const removeAddress = async (id: string) => {
+    const removed = favorites.find((favorite) => favorite.id === id);
+    if (!removed || !await removeFavorite(id)) return;
+    await refresh();
+    showFeedback({ kind: 'success', message: text.removed, removed });
+  };
+
+  const undoRemove = async () => {
+    if (!feedback?.removed) return;
+    await restoreFavorite(feedback.removed);
+    await refresh();
+    showFeedback({ kind: 'success', message: text.saved });
   };
 
   const renderCountry = ({ country: configured, values }: typeof countrySections[number]) => <FavoriteCountrySection
     key={configured.code} countryCode={configured.code} values={values} locale={locale} text={text} copied={copied}
-    remove={async (id) => { await removeFavorite(id); await refresh(); }} copy={copyAddress}
+    remove={removeAddress} copy={copyAddress}
     move={async (id, position) => { await reorderFavorite(id, position); await refresh(); }} />;
 
   const groupedByContinent = groupOrder.map((group) => ({ group, countries: countrySections.filter(({ country: item }) => item.group === group) }))
@@ -103,6 +132,7 @@ export default function FavoritesPage({ locale }: Props) {
               : countrySections.map(renderCountry)}</div>
           </DndContext>}
     </main>
+    {feedback && <div className={`copy-toast ${feedback.kind}`} role={feedback.kind === 'error' ? 'alert' : 'status'} aria-live={feedback.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true"><span aria-hidden="true">{feedback.kind === 'success' ? '✓' : '!'}</span>{feedback.message}{feedback.removed && <button type="button" onClick={() => void undoRemove()}>{text.undo}</button>}</div>}
   </div>;
 }
 

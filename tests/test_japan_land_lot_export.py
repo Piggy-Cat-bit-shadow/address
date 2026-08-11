@@ -127,6 +127,101 @@ def square(minimum_longitude, minimum_latitude, size=0.001):
 
 @unittest.skipUnless(HAS_SHAPELY, "shapely is required for containment tests")
 class MatchCityLotsTest(unittest.TestCase):
+    def test_land_lot_inserts_commit_in_bounded_idempotent_batches(self):
+        connection = open_store()
+        rows = [(
+            f"chiban/batch-{index}", "京都府", "京都市北区", "", "大宮南田尻町",
+            f"{index + 1}番地", "6038166", 135.75, 35.05, index,
+            f"plateau/batch-{index}", "residential", ""
+        ) for index in range(1201)]
+
+        class TrackingConnection:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.commits = 0
+
+            def execute(self, *args, **kwargs):
+                return self.wrapped.execute(*args, **kwargs)
+
+            def executemany(self, *args, **kwargs):
+                return self.wrapped.executemany(*args, **kwargs)
+
+            def commit(self):
+                self.commits += 1
+                return self.wrapped.commit()
+
+            def rollback(self):
+                return self.wrapped.rollback()
+
+        tracked = TrackingConnection(connection)
+        self.assertEqual(MODULE.insert_land_lot_candidates(tracked, rows, batch_size=500), 1201)
+        self.assertEqual(tracked.commits, 3)
+        self.assertEqual(MODULE.insert_land_lot_candidates(tracked, rows, batch_size=500), 0)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 1201)
+
+    def test_land_lot_insert_resumes_after_a_failed_batch(self):
+        connection = open_store()
+        rows = [(
+            f"chiban/resume-{index}", "京都府", "京都市北区", "", "大宮南田尻町",
+            f"{index + 1}番地", "6038166", 135.75, 35.05, index,
+            f"plateau/resume-{index}", "residential", ""
+        ) for index in range(1001)]
+
+        class FailSecondBatch:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.batches = 0
+
+            def execute(self, *args, **kwargs):
+                return self.wrapped.execute(*args, **kwargs)
+
+            def executemany(self, *args, **kwargs):
+                self.batches += 1
+                if self.batches == 2:
+                    raise RuntimeError("fixture interrupted batch")
+                return self.wrapped.executemany(*args, **kwargs)
+
+            def commit(self):
+                return self.wrapped.commit()
+
+            def rollback(self):
+                return self.wrapped.rollback()
+
+        progress = []
+        with self.assertRaisesRegex(RuntimeError, "fixture interrupted batch"):
+            MODULE.insert_land_lot_candidates(
+                FailSecondBatch(connection), rows, batch_size=500, progress=progress.append
+            )
+        self.assertEqual(progress, [500])
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 500)
+
+        class TrackRetryBatches:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.source_ids = []
+
+            def execute(self, *args, **kwargs):
+                return self.wrapped.execute(*args, **kwargs)
+
+            def executemany(self, statement, values):
+                self.source_ids.extend(value[0] for value in values)
+                return self.wrapped.executemany(statement, values)
+
+            def commit(self):
+                return self.wrapped.commit()
+
+            def rollback(self):
+                return self.wrapped.rollback()
+
+        retry = TrackRetryBatches(connection)
+        retry_progress = []
+        self.assertEqual(MODULE.insert_land_lot_candidates(
+            retry, rows, batch_size=500, progress=retry_progress.append
+        ), 501)
+        self.assertEqual(retry.source_ids, [f"chiban/resume-{index}" for index in range(500, 1001)])
+        self.assertEqual(retry_progress, [1000, 1001])
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 1001)
+
     def test_unique_residential_containment_inserts_candidate(self):
         connection = open_store()
         lots = [make_lot("45番地", 135.7505, 35.0505)]

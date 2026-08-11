@@ -149,17 +149,12 @@ const residentialPoolClause = (alias = 'address'): string => `${alias}.active=1
 const postcodeAvailability = async (db: Database, country: CountryCode, rows: PostcodeRow[]): Promise<Map<number, number>> => {
   if (!rows.length) return new Map();
   const placeholders = rows.map(() => '?').join(',');
-  // The pool is aggregated once by normalized postcode; a correlated
-  // per-postcode scan of address_pool blocks the event loop for minutes on
-  // large regions and has taken the API down in production.
-  const result = await db.prepare(`SELECT postcode.id AS id, COALESCE(pool.address_count,0) AS address_count
-    FROM catalog_postcodes postcode LEFT JOIN (
-      SELECT LOWER(REPLACE(address.postcode,' ','')) AS code_key, COUNT(*) AS address_count
-      FROM address_pool address
-      WHERE address.country_code=? AND ${residentialPoolClause('address')}
-      GROUP BY LOWER(REPLACE(address.postcode,' ',''))
-    ) pool ON pool.code_key=LOWER(REPLACE(postcode.code,' ',''))
-    WHERE postcode.id IN (${placeholders})`)
+  // Use the persisted normalized key so PostgreSQL can use the country/postcode index.
+  const result = await db.prepare(`SELECT postcode.id AS id, COUNT(address.id) AS address_count
+    FROM catalog_postcodes postcode LEFT JOIN address_pool address
+      ON address.country_code=? AND address.postcode_key=LOWER(REPLACE(postcode.code,' ',''))
+      AND ${residentialPoolClause('address')}
+    WHERE postcode.id IN (${placeholders}) GROUP BY postcode.id`)
     .bind(country, ...rows.map((row) => row.id)).all<AvailabilityRow>();
   return availabilityMap(result.results || []);
 };
@@ -608,12 +603,9 @@ const queryPostcodes = async (db: Database, input: CatalogQuery, limit: number, 
   const where = `p.country_code = ? ${parentSql} AND (LOWER(p.code) LIKE ? ESCAPE '\\' OR LOWER(p.locality_name) LIKE ? ESCAPE '\\')`;
   const bindings = [input.country, ...parentBindings, pattern, pattern];
   const count = await db.prepare(`SELECT COUNT(DISTINCT p.code) AS total FROM catalog_postcodes p LEFT JOIN catalog_cities c ON c.id = p.city_id WHERE ${where}`).bind(...bindings).first<{ total: number }>();
-  // Uncorrelated pool subquery: the previous per-postcode EXISTS scan ran for
-  // minutes on large regions (observed >90s for one US state) and crashed the
-  // API process in production.
   const availableCount = await db.prepare(`SELECT COUNT(DISTINCT p.code) AS total FROM catalog_postcodes p
     LEFT JOIN catalog_cities c ON c.id=p.city_id WHERE ${where} AND LOWER(REPLACE(p.code,' ','')) IN (
-      SELECT LOWER(REPLACE(address.postcode,' ','')) FROM address_pool address
+      SELECT address.postcode_key FROM address_pool address
       WHERE address.country_code=? AND ${residentialPoolClause('address')}
     )`).bind(...bindings, input.country).first<{ total: number }>();
   const result = await db.prepare(`SELECT MIN(p.id) AS id, MAX(p.city_id) AS city_id, p.code,

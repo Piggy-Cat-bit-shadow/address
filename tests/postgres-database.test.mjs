@@ -5,7 +5,7 @@ import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../se
 describe('PostgreSQL database adapter', () => {
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 9, control_version: 11 }], fields: [], rowCount: 1
+      rows: [{ address_version: 13, control_version: 16 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -15,7 +15,7 @@ describe('PostgreSQL database adapter', () => {
 
   it('migrates a database that only has the previous schema versions', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 8, control_version: 10 }], fields: [], rowCount: 1
+      rows: [{ address_version: 9, control_version: 11 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -38,9 +38,9 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 9)");
+    expect(addressSchema).toContain("generate_series(1, 13)");
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
-    expect(controlSchema).toContain("generate_series(1, 11)");
+    expect(controlSchema).toContain("generate_series(1, 16)");
   });
 
   it('rewrites parameters without changing quoted question marks', async () => {

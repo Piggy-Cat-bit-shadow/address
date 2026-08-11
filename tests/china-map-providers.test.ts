@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bd09ToWgs84, gcj02ToWgs84, wgs84ToGcj02 } from '../server/china/coordinates';
-import { fetchAmapCommunities, fetchBaiduCommunities, fetchTencentCommunities } from '../server/china/providers';
+import {
+  fetchAmapCommunities, fetchBaiduCommunities, fetchBrokerCommunities, fetchTencentCommunities
+} from '../server/china/providers';
 
 const response = (value: unknown) => async () => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
 
@@ -20,6 +22,28 @@ describe('China map community providers', () => {
     expect(baidu.candidates[0]).toMatchObject({ provider: 'baidu', providerPoiId: 'b-1', rawCrs: 'BD-09' });
     expect([amap.rawCount, tencent.rawCount, baidu.rawCount]).toEqual([1, 1, 1]);
     expect(JSON.stringify([amap, tencent, baidu])).not.toContain('secret');
+  });
+
+  it('parses China communities returned through the broker without receiving a provider key', async () => {
+    const requests: unknown[][] = [];
+    const broker = {
+      request: async (...args: unknown[]) => {
+        requests.push(args);
+        return { status: '1', pois: [{
+          id: 'broker-a-1', name: '望京花园', address: '阜通东大街6号', location: '116.470000,39.995000',
+          pname: '北京市', cityname: '北京市', adname: '朝阳区', typecode: '120302', adcode: '110105'
+        }] };
+      },
+      availability: async () => ({})
+    };
+    const page = await fetchBrokerCommunities('amap', '110105', 2, broker, '望京街道');
+    expect(requests).toEqual([['amap.place-search', {
+      region: '110105', page: 2, subdivision: '望京街道'
+    }]]);
+    expect(page).toMatchObject({
+      rawCount: 1, candidates: [expect.objectContaining({ provider: 'amap', providerPoiId: 'broker-a-1' })]
+    });
+    expect(JSON.stringify(requests)).not.toMatch(/key|secret/iu);
   });
 
   it('uses exact Amap residential type and district boundaries', async () => {

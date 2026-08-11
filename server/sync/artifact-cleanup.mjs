@@ -3,8 +3,6 @@ import { isAbsolute, relative, resolve } from 'node:path';
 
 const temporaryFile = (name) => name.endsWith('.part')
   || name.includes('.tmp')
-  || name.endsWith('.candidates.duckdb')
-  || name.endsWith('.candidates.duckdb.wal')
   || name.endsWith('.locations.idx');
 const temporaryDirectory = (name, retainRaw) => name.includes('.tmp')
   || (!retainRaw && /^plateau-\d{5}-\d{4}$/u.test(name));
@@ -12,24 +10,18 @@ const ownerPid = (name) => {
   const match = name.match(/\.(\d+)\.tmp(?:\.|$)/u);
   return match ? Number.parseInt(match[1], 10) : null;
 };
+const cacheArtifact = (root, target) => {
+  const parts = relative(root, target).split(/[\\/]/u);
+  if (parts[0] === 'normalized') return parts[1] !== 'duckdb-home';
+  return parts[0] === 'raw' && !parts.some((part) => part.includes('-state-'));
+};
 const inside = (root, target) => {
   const path = relative(root, target);
   return path && !path.startsWith('..') && !isAbsolute(path);
 };
-const processIsAlive = (pid) => {
-  if (!Number.isSafeInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
-};
-
 export const createSyncArtifactCleanup = ({
   cacheDir,
   isBusy = () => false,
-  isAlive = processIsAlive,
   now = () => Date.now(),
   staleMs = 6 * 60 * 60_000,
   intervalMs = 15 * 60_000,
@@ -54,7 +46,7 @@ export const createSyncArtifactCleanup = ({
           const metadata = await stat(target).catch(() => null);
           const expired = metadata && now() - metadata.mtimeMs >= staleMs;
           const pid = ownerPid(entry.name);
-          const removable = pid ? !isAlive(pid) : expired;
+          const removable = pid ? true : expired;
           if (removable && temporaryDirectory(entry.name, retainRaw)) {
             if (isBusy()) return;
             await rm(target, { recursive: true, force: true });
@@ -64,11 +56,12 @@ export const createSyncArtifactCleanup = ({
           }
           continue;
         }
-        if (!entry.isFile() || !temporaryFile(entry.name)) continue;
+        if (!entry.isFile()) continue;
         const metadata = await stat(target).catch(() => null);
         if (!metadata) continue;
         const pid = ownerPid(entry.name);
-        const removable = pid ? !isAlive(pid) : now() - metadata.mtimeMs >= staleMs;
+        const expired = now() - metadata.mtimeMs >= staleMs;
+        const removable = temporaryFile(entry.name) ? (pid ? true : expired) : expired && cacheArtifact(root, target);
         if (!removable) continue;
         if (isBusy()) return;
         await rm(target, { force: true });

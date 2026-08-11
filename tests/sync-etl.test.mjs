@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { strToU8, zipSync } from 'fflate';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,15 +11,54 @@ import { openTestDatabase } from './helpers/postgres-test-database.mjs';
 import { PostgresAddressImporter } from '../server/sync/postgres-address-importer.mjs';
 import {
   canonicalizeHtmlText, createSourceAdapters, loadSourceCatalog, normalizedCachePolicyIdentity,
-  parseGeofabrikMd5, sourceSizeMatches, stableHtmlFingerprint
+  parseGeofabrikMd5, sourceAdapterRevisions, sourceSizeMatches, stableHtmlFingerprint
 } from '../server/sync/source-adapters.mjs';
 import { runAddressSync } from '../server/sync/run-address-sync.mjs';
+import { runProcess } from '../server/sync/process.mjs';
 
 const execFileAsync = promisify(execFile);
 const directories = [];
 afterEach(async () => {
   const { rm } = await import('node:fs/promises');
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('synchronization process diagnostics', () => {
+  it('captures bounded stderr when a child process fails', async () => {
+    const failure = await runProcess({
+      file: process.execPath,
+      args: ['-e', "process.stderr.write('fixture failure detail\\n'); process.exit(3)"]
+    }).catch((error) => error);
+    expect(failure).toMatchObject({ code: 'SYNC_PROCESS_FAILED', stderr: 'fixture failure detail' });
+    expect(failure.message).toContain('fixture failure detail');
+  });
+
+  it('does not report a timeout until the child process has closed', async () => {
+    const child = new EventEmitter();
+    child.pid = undefined;
+    child.stderr = null;
+    child.kill = vi.fn(() => true);
+    let settled = false;
+    const result = runProcess({
+      file: 'fixture-child',
+      timeoutMs: 1_000,
+      terminationGraceMs: 20,
+      spawnImpl: () => child
+    }).catch((error) => error).finally(() => { settled = true; });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_050));
+    expect(settled).toBe(false);
+    child.emit('close', null, 'SIGKILL');
+    await expect(result).resolves.toMatchObject({ code: 'SYNC_PROCESS_TIMEOUT' });
+  });
+});
+
+describe('PostgreSQL publication query shape', () => {
+  it('uses anti-joins for country retirement and orphan cleanup', async () => {
+    const source = await readFile(new URL('../server/sync/postgres-address-importer.mjs', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/active=1 AND id NOT IN/u);
+    expect(source).not.toMatch(/active=0\s+AND id NOT IN/u);
+    expect(source.match(/LEFT JOIN[\s\S]+?\.address_id IS NULL/gu)).toHaveLength(2);
+  });
 });
 
 const source = {
@@ -146,7 +186,10 @@ describe('address source shard catalog', () => {
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-sa')).toMatchObject({ extractId: 'gcc-states', boundaryIso3: 'SAU' });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-ph')).toMatchObject({
       countryCode: 'PH', extractId: 'philippines',
-      postcodeDataUrl: 'https://phlpost.gov.ph/zip-code-locator/'
+      postcodeDataUrl: 'https://phlpost.gov.ph/zip-code-locator/',
+      postcodeMetadataUrl: expect.stringContaining('/wp-sitemap-posts-page-1.xml'),
+      postcodeMetadataFormat: 'sitemap',
+      postcodeMetadataMatchUrl: 'https://phlpost.gov.ph/zip-code-locator/'
     });
     expect(catalog.shards.find((shard) => shard.id === 'geofabrik-osm-vn')).toMatchObject({
       countryCode: 'VN', extractId: 'vietnam', postcodeDataFormat: 'pdf',
@@ -159,6 +202,11 @@ describe('address source shard catalog', () => {
     expect(base.shards.some((shard) => shard.id === 'mappls-in-residential')).toBe(false);
     expect(base.shards.some((shard) => shard.id === 'vpostcode-vn-licensed')).toBe(false);
     expect(base.shards.some((shard) => shard.id === 'ng-licensed-residential')).toBe(false);
+    const incomplete = await loadSourceCatalog(undefined, { ADDRESS_SYNC_VPOSTCODE_ENABLED: 'true' });
+    expect(incomplete.shards.find((shard) => shard.id === 'vpostcode-vn-licensed')).toMatchObject({
+      countryCode: 'VN',
+      source: { configurationError: 'missing_source_configuration:ADDRESS_SYNC_VPOSTCODE_FEED_URL' }
+    });
     const enabled = await loadSourceCatalog(undefined, {
       ADDRESS_SYNC_MAPPLS_ENABLED: 'true',
       ADDRESS_SYNC_VPOSTCODE_ENABLED: 'true',
@@ -339,6 +387,84 @@ describe('address source shard catalog', () => {
     expect(checkpoint).toMatchObject({ version: discovery.version, complete: false, seedIndex: 0, categoryIndex: 0, page: 1 });
   });
 
+  it('reports an incomplete Mappls checkpoint instead of treating it as a complete source scan', async () => {
+    const cacheDir = resolve('.data-cache', `mappls-partial-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const seeds = Array.from({ length: 10 }, (_, index) => ({
+      latitude: 20 + index / 100,
+      longitude: 70 + index / 100
+    }));
+    const brokerCalls = [];
+    const credentialBrokerClient = {
+      request: async (operation, parameters) => {
+        brokerCalls.push([operation, parameters]);
+        if (operation === 'mappls.nearby') {
+          const id = `EL${String(parameters.latitude).replace(/\D/gu, '')}`;
+          return { suggestedLocations: [{ eLoc: id }], pageInfo: { totalPages: 1 } };
+        }
+        return {
+        eloc: parameters.eLoc,
+        houseNumber: '18',
+        street: 'MG Road',
+        district: 'Central Delhi',
+        city: 'New Delhi',
+        state: 'Delhi',
+        pincode: '110001',
+        latitude: 28.632,
+        longitude: 77.219
+        };
+      }
+    };
+    const adapters = createSourceAdapters({
+      credentialBrokerClient,
+      environment: {
+        MAPPLS_MAX_REQUESTS_PER_RUN: '10'
+      },
+      loadSeedLocations: async () => seeds
+    });
+    const shard = {
+      id: 'mappls-in-residential', countryCode: 'IN', maxRecords: 100,
+      source: { id: 'mappls-in-residential', adapter: 'mappls-residential', name: 'Mappls fixture' }
+    };
+    const materialized = await adapters.materialize(shard, {
+      adapter: 'mappls-residential', version: 'fixture-v1', categoryCodes: ['RES001']
+    }, { cacheDir, maxBytes: 10_000_000, maxRecords: 100, perLocality: 10, retainRaw: false });
+    expect(materialized).toMatchObject({ sourceComplete: false, checkpointToken: expect.any(String) });
+    const resumed = await adapters.materialize(shard, {
+      adapter: 'mappls-residential', version: 'fixture-v1', categoryCodes: ['RES001']
+    }, { cacheDir, maxBytes: 10_000_000, maxRecords: 100, perLocality: 10, retainRaw: false });
+    expect(resumed.checkpointToken).not.toBe(materialized.checkpointToken);
+    expect(brokerCalls.some(([operation]) => operation === 'mappls.nearby')).toBe(true);
+    expect(brokerCalls.some(([operation]) => operation === 'mappls.entity')).toBe(true);
+  });
+
+  it('rounds the PDOK page size up so 400 seeds can satisfy a 50000-record target', async () => {
+    const cacheDir = resolve('.data-cache', `pdok-capacity-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const requested = [];
+    const adapters = createSourceAdapters({
+      fetchImpl: async (input) => {
+        requested.push(new URL(String(input)));
+        throw new Error('stop after observing the requested page size');
+      },
+      environment: { PDOK_BAG_MAX_PAGES_PER_SEED: '2' },
+      loadSeedLocations: async () => Array.from({ length: 400 }, (_, index) => ({
+        latitude: 50.4 + Math.floor(index / 20) * 0.1,
+        longitude: 3.2 + (index % 20) * 0.15
+      }))
+    });
+    const shard = {
+      id: 'pdok-bag-nl', countryCode: 'NL',
+      source: { id: 'pdok-bag-nl', adapter: 'pdok-bag', name: 'PDOK BAG fixture' },
+      qualityGate: { minimumRecords: 50_000 }
+    };
+    await expect(adapters.materialize(shard, {
+      adapter: 'pdok-bag', version: 'fixture-v1', dataUrl: 'https://api.example.test/items'
+    }, { cacheDir, maxBytes: 10_000_000, maxRecords: 50_000, perLocality: 10, retainRaw: false }))
+      .rejects.toThrow('Source metadata request failed');
+    expect(requested[0].searchParams.get('limit')).toBe('63');
+  });
+
   it('removes a remote licensed feed after exporter failure', async () => {
     const cacheDir = resolve('.data-cache', `licensed-cleanup-${process.pid}-${Date.now()}`);
     directories.push(cacheDir);
@@ -416,6 +542,67 @@ describe('address source shard catalog', () => {
     expect(discovery.version).toContain('-p');
   });
 
+  it('keeps Geofabrik metadata probes lightweight when a postcode source is configured', async () => {
+    const requested = [];
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const url = String(input);
+      requested.push({ url, method: init.method || 'GET' });
+      if (url.endsWith('index-v1-nogeom.json')) return Response.json({ features: [{
+        properties: { id: 'vietnam', urls: { pbf: 'https://download.geofabrik.de/asia/vietnam-latest.osm.pbf' } }
+      }] });
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: {
+        'last-modified': 'Thu, 31 Jul 2026 00:00:00 GMT', etag: 'vn', 'content-length': '100'
+      } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const discovery = await createSourceAdapters({ fetchImpl }).discover({
+      id: 'geofabrik-osm-vn', countryCode: 'VN', extractId: 'vietnam',
+      postcodeDataUrl: 'https://example.test/vietnam-postcodes.pdf', postcodeDataFormat: 'pdf',
+      source: { adapter: 'geofabrik' }
+    }, { syncMode: 'probe' });
+
+    expect(discovery).toMatchObject({
+      version: expect.stringMatching(/^2026-07-31-vn-p[a-f\d]{16}$/u), estimateMethod: 'metadata-probe'
+    });
+    expect(requested).toEqual([
+      { url: expect.stringContaining('index-v1-nogeom.json'), method: 'GET' },
+      { url: 'https://download.geofabrik.de/asia/vietnam-latest.osm.pbf', method: 'HEAD' },
+      { url: 'https://example.test/vietnam-postcodes.pdf', method: 'HEAD' }
+    ]);
+  });
+
+  it('uses the official Philippine page metadata endpoint without downloading the postcode page', async () => {
+    const requested = [];
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const url = String(input);
+      requested.push({ url, method: init.method || 'GET' });
+      if (url.endsWith('index-v1-nogeom.json')) return Response.json({ features: [{
+        properties: { id: 'philippines', urls: { pbf: 'https://download.geofabrik.de/asia/philippines-latest.osm.pbf' } }
+      }] });
+      if (url.endsWith('/wp-sitemap-posts-page-1.xml')) return new Response(
+        '<urlset><url><loc>https://phlpost.gov.ph/zip-code-locator/</loc><lastmod>2026-08-01T04:00:00+08:00</lastmod></url></urlset>'
+      );
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: {
+        'last-modified': 'Thu, 31 Jul 2026 00:00:00 GMT', etag: 'ph', 'content-length': '100'
+      } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const discovery = await createSourceAdapters({ fetchImpl }).discover({
+      id: 'geofabrik-osm-ph', countryCode: 'PH', extractId: 'philippines',
+      postcodeDataUrl: 'https://phlpost.gov.ph/zip-code-locator/',
+      postcodeMetadataUrl: 'https://phlpost.gov.ph/wp-sitemap-posts-page-1.xml',
+      postcodeMetadataFormat: 'sitemap',
+      postcodeMetadataMatchUrl: 'https://phlpost.gov.ph/zip-code-locator/',
+      source: { adapter: 'geofabrik' }
+    }, { syncMode: 'probe' });
+
+    expect(discovery.version).toMatch(/^2026-07-31-ph-p[a-f\d]{16}$/u);
+    expect(requested.some(({ url }) => url === 'https://phlpost.gov.ph/zip-code-locator/')).toBe(false);
+    expect(requested.at(-1)).toEqual({
+      url: 'https://phlpost.gov.ph/wp-sitemap-posts-page-1.xml', method: 'GET'
+    });
+  });
+
   it('fingerprints postcode HTML by stable visible content and reuses the discovered artifact', async () => {
     const cacheDir = resolve('.data-cache', `postcode-html-${process.pid}-${Date.now()}`);
     directories.push(cacheDir);
@@ -459,7 +646,8 @@ describe('address source shard catalog', () => {
     expect(requests).toBe(3);
   });
 
-  it('adds the Overture Buildings source only when residential classification is enabled', async () => {
+  it('enables Overture residential classification by default and allows an explicit opt-out', async () => {
+    expect(sourceAdapterRevisions.overture).toBe('residential-buildings-v5');
     const fetchImpl = async (input) => {
       const url = String(input);
       if (url.endsWith('/catalog.json')) return Response.json({ latest: '2026-06-17.0' });
@@ -470,8 +658,10 @@ describe('address source shard catalog', () => {
       });
     };
     const shard = { countryCode: 'US', source: { adapter: 'overture' } };
+    const defaulted = await createSourceAdapters({ fetchImpl, environment: {} }).discover(shard);
     const enabled = await createSourceAdapters({ fetchImpl, enableOvertureResidential: true }).discover(shard);
     const disabled = await createSourceAdapters({ fetchImpl, enableOvertureResidential: false }).discover(shard);
+    expect(defaulted.buildingAssets).toEqual(['https://example.test/address.parquet']);
     expect(enabled.buildingAssets).toEqual(['https://example.test/address.parquet']);
     expect(enabled.buildingAssetEntries).toEqual([{
       url: 'https://example.test/address.parquet', bbox: [-180, -90, 180, 90]
@@ -604,41 +794,63 @@ describe('address source shard catalog', () => {
       if (url.endsWith('.tar.zst')) return new Response(plateauPayload);
       throw new Error(`Unexpected request: ${url}`);
     };
-    const execute = async ({ file, args, phase }) => {
-      calls.push({ file, args, phase });
+    const checkpoint = {
+      version: 1, abr_complete: false, abr_completed_cities: [], plateau_completed: [],
+      osm_scanned_ways: 0, osm_complete: false, final_complete: false
+    };
+    const execute = async ({ file, args, phase, timeoutMs }) => {
+      calls.push({ file, args, phase, timeoutMs });
       if (phase.startsWith('extract:')) {
         const directory = args[args.indexOf('-C') + 1];
         await mkdir(directory, { recursive: true });
         await writeFile(resolve(directory, 'buildings.parquet'), plateauPayload, 'utf8');
       } else {
-        await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({ id: 'fixture-jp' })}\n`, 'utf8');
+        const stage = args[args.indexOf('--stage') + 1];
+        if (stage === 'abr') checkpoint.abr_complete = true;
+        if (stage === 'plateau') checkpoint.plateau_completed = ['13113'];
+        if (stage === 'osm') checkpoint.osm_complete = true;
+        if (stage === 'final') {
+          checkpoint.final_complete = true;
+          await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({ id: 'fixture-jp' })}\n`, 'utf8');
+        }
+        await writeFile(args[args.indexOf('--checkpoint-file') + 1], JSON.stringify(checkpoint));
       }
     };
     const adapters = createSourceAdapters({ fetchImpl, execute, pythonBin: 'python-fixture' });
     const discovery = await adapters.discover(shard);
     expect(discovery).toMatchObject({
       adapter: 'japan-abr',
-        version: '1735102668-plateau-only-2026-06-30-abr-rsdt-plateau-osm-chiban-v10',
+        version: '1735102668-plateau-only-2026-06-30-abr-rsdt-plateau-osm-chiban-v14',
       sourceBytes: 14, osmUrl: null, osmVersion: 'plateau-only', osmBytes: null,
       postalVersion: '2026-06-30', postalBytes: 7, plateauBytes: 7
     });
-    const materialized = await adapters.materialize(shard, discovery, {
+    const options = {
       cacheDir, maxRecords: 60000, perLocality: 200, maxBytes: 1024, retainRaw: false, sharedRaw: false
-    });
+    };
+    for (let stage = 0; stage < 3; stage += 1) {
+      await expect(adapters.materialize(shard, discovery, options)).resolves.toMatchObject({
+        sourceComplete: false, checkpointToken: expect.any(String)
+      });
+    }
+    const materialized = await adapters.materialize(shard, discovery, options);
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
     expect(materialized.file).toContain('-m20000-p200.jsonl');
-    expect(calls).toHaveLength(2);
-    expect(calls[0]).toMatchObject({ file: 'tar', phase: 'extract:japan-abr-residential:13113' });
-    const materializeCall = calls.find(({ phase }) => phase === 'materialize:japan-abr-residential');
+    expect(calls.filter(({ phase }) => phase.startsWith('extract:'))).toHaveLength(1);
+    const materializeCall = calls.find(({ args }) => args.includes('plateau'));
     expect(materializeCall).toMatchObject({ file: 'python-fixture' });
+    expect(materializeCall.timeoutMs).toBe(75 * 60_000);
     expect(materializeCall.args).toEqual(expect.arrayContaining([
       expect.stringContaining('japan-abr-export.py'), '--abr-url', shard.source.dataUrl,
+      '--checkpoint-file', expect.stringContaining('checkpoint.json'),
+      '--store-file', expect.stringContaining('candidates.duckdb'),
       '--max-records', '20000', '--per-locality', '200', '--plateau-parquet',
       expect.stringContaining('buildings.parquet')
     ]));
     expect(materializeCall.args).toEqual(expect.arrayContaining(['--plateau-city-code', '13113']));
     expect(materializeCall.args).toContain('--land-lot');
     expect(materializeCall.args).not.toContain('--osm-pbf');
+    await expect(readFile(dirname(materializeCall.args[materializeCall.args.indexOf('--checkpoint-file') + 1]), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('uses a verified Geofabrik checksum when Japan PBF metadata HEAD is unavailable', async () => {
@@ -662,8 +874,88 @@ describe('address source shard catalog', () => {
     expect(discovery).toMatchObject({
       osmUrl: 'https://example.test/japan.osm.pbf', osmMd5: checksum,
       osmVersion: checksum, osmBytes: null,
-      version: `1735102668-${checksum}-2026-06-30-abr-rsdt-plateau-osm-chiban-v10`
+      version: `1735102668-${checksum}-2026-06-30-abr-rsdt-plateau-osm-chiban-v14`
     });
+  });
+
+  it('turns a Japan timeout with durable progress into an automatic resumable checkpoint', async () => {
+    const cacheDir = resolve('.data-cache', `japan-resume-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const catalog = await loadSourceCatalog();
+    const catalogShard = catalog.shards.find((entry) => entry.id === 'japan-abr-residential');
+    const plateauPayload = 'plateau';
+    const shard = {
+      ...catalogShard,
+      source: {
+        ...catalogShard.source,
+        useOsmSupplement: false,
+        plateauBundles: [{
+          cityCode: '13113', year: 2023, url: 'https://example.test/plateau.tar.zst',
+          sha256: createHash('sha256').update(plateauPayload).digest('hex'), bytes: plateauPayload.length
+        }]
+      }
+    };
+    const fetchImpl = async (input, init = {}) => {
+      const url = String(input);
+      if (url === shard.source.dataUrl) return Response.json({ meta: { updated: 1_735_102_668 }, data: [] });
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: {
+        'last-modified': 'Tue, 30 Jun 2026 00:00:00 GMT',
+        'content-length': url.endsWith('.zip') ? '7' : '8'
+      } });
+      if (url.endsWith('.zip')) return new Response('postal!');
+      if (url.endsWith('.tar.zst')) return new Response(plateauPayload);
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const calls = [];
+    let attempt = 0;
+    const execute = async ({ args, phase }) => {
+      calls.push({ args, phase });
+      if (phase.startsWith('extract:')) {
+        const directory = args[args.indexOf('-C') + 1];
+        await mkdir(directory, { recursive: true });
+        await writeFile(resolve(directory, 'buildings.parquet'), plateauPayload);
+        return;
+      }
+      attempt += 1;
+      const stage = args[args.indexOf('--stage') + 1];
+      const checkpointFile = args[args.indexOf('--checkpoint-file') + 1];
+      const state = JSON.parse(await readFile(checkpointFile, 'utf8').catch(() => JSON.stringify({
+        version: 1, abr_complete: false, abr_completed_cities: [], plateau_completed: [],
+        osm_scanned_ways: 0, osm_complete: false, final_complete: false
+      })));
+      if (stage === 'abr') state.abr_complete = true;
+      if (stage === 'plateau') state.plateau_completed = ['13113'];
+      if (stage === 'osm') state.osm_complete = true;
+      if (stage === 'final') state.final_complete = true;
+      await writeFile(checkpointFile, JSON.stringify(state));
+      if (attempt === 1) {
+        throw Object.assign(new Error('fixture timeout'), { code: 'SYNC_PROCESS_TIMEOUT' });
+      }
+      if (stage === 'final') {
+        await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({ id: 'fixture-jp' })}\n`);
+      }
+    };
+    const adapters = createSourceAdapters({ fetchImpl, execute, pythonBin: 'python-fixture' });
+    const discovery = await adapters.discover(shard);
+    const options = {
+      cacheDir, maxRecords: 60000, perLocality: 200, maxBytes: 1024,
+      retainRaw: false, sharedRaw: false
+    };
+
+    await expect(adapters.materialize(shard, discovery, options)).rejects.toMatchObject({
+      code: 'SOURCE_PARTIAL', sourceComplete: false, checkpointToken: expect.any(String)
+    });
+    await expect(adapters.materialize(shard, discovery, options)).resolves.toMatchObject({ sourceComplete: false });
+    await expect(adapters.materialize(shard, discovery, options)).resolves.toMatchObject({ sourceComplete: false });
+    await expect(adapters.materialize(shard, discovery, options)).resolves.toMatchObject({
+      format: 'overture-jsonl', cacheHit: false
+    });
+
+    expect(calls.filter(({ phase }) => phase.startsWith('extract:'))).toHaveLength(1);
+    const materializeCalls = calls.filter(({ phase }) => phase === 'materialize:japan-abr-residential');
+    expect(materializeCalls).toHaveLength(4);
+    expect(materializeCalls[1].args).toContain('--plateau-parquet');
+    expect(materializeCalls[2].args).not.toContain('--plateau-parquet');
   });
 
   it('discovers and materializes the official Singapore HDB residential source', async () => {
@@ -671,6 +963,7 @@ describe('address source shard catalog', () => {
     directories.push(cacheDir);
     const catalog = await loadSourceCatalog();
     const shard = catalog.shards.find((entry) => entry.id === 'singapore-hdb-residential');
+    expect(shard.quotaProvider).toBe('onemap');
     const calls = [];
     const fetchImpl = async (input, init = {}) => {
       const url = String(input);
@@ -687,14 +980,24 @@ describe('address source shard catalog', () => {
       if (url.endsWith('.geojson')) return new Response('buildings');
       throw new Error(`Unexpected request: ${url}`);
     };
-    const execute = async ({ file, args, phase }) => {
-      calls.push({ file, args, phase });
+    const execute = async ({ file, args, phase, env }) => {
+      calls.push({ file, args, phase, env });
       await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({ id: 'fixture-sg' })}\n`, 'utf8');
+      await writeFile(args[args.indexOf('--state-output') + 1], JSON.stringify({
+        version: 1, source_complete: true, checkpoint_token: 'complete-fixture'
+      }), 'utf8');
     };
-    const adapters = createSourceAdapters({ fetchImpl, execute, pythonBin: 'python-fixture' });
+    const brokerCalls = [];
+    const adapters = createSourceAdapters({
+      fetchImpl, execute, pythonBin: 'python-fixture',
+      environment: { ONEMAP_ACCESS_TOKEN: 'must-not-reach-child' },
+      credentialBrokerClient: {
+        request: async (...args) => { brokerCalls.push(args); return { results: [] }; }
+      }
+    });
     const discovery = await adapters.discover(shard);
     expect(discovery).toMatchObject({
-      adapter: 'singapore-hdb', version: '2026-07-29-hdb-property-building-onemap-v2',
+      adapter: 'singapore-hdb', version: '2026-07-29-hdb-property-building-onemap-v3',
       sourceBytes: 17, propertyBytes: 8, buildingBytes: 9, residentialBuildingAvailable: true
     });
     const materialized = await adapters.materialize(shard, discovery, {
@@ -704,17 +1007,59 @@ describe('address source shard catalog', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ file: 'python-fixture', phase: 'materialize:singapore-hdb-residential' });
     expect(calls[0].args).toEqual(expect.arrayContaining([
-      expect.stringContaining('singapore-hdb-export.py'), '--onemap-cache',
+      expect.stringContaining('singapore-hdb-export.py'), '--onemap-bridge-url',
+      expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\//u), '--onemap-cache',
       expect.stringContaining('singapore-hdb-residential-onemap-cache.jsonl'),
+      '--state-output', expect.stringContaining('singapore-hdb-residential'),
       '--max-records', '12000', '--per-locality', '1000'
     ]));
+    expect(calls[0].env.ONEMAP_ACCESS_TOKEN).toBeUndefined();
+    expect(Object.keys(calls[0].env).some((name) => name.startsWith('CREDENTIAL_BROKER_'))).toBe(false);
+  });
+
+  it('preserves Singapore inputs and checkpoint without publishing a partial snapshot', async () => {
+    const cacheDir = resolve('.data-cache', `singapore-hdb-partial-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const catalog = await loadSourceCatalog();
+    const shard = catalog.shards.find((entry) => entry.id === 'singapore-hdb-residential');
+    const fetchImpl = async (input, init = {}) => {
+      const url = String(input);
+      if (url.includes('initiate-download')) return Response.json({ data: { url: url.includes(shard.source.propertyDatasetId)
+        ? 'https://example.test/property.csv' : 'https://example.test/buildings.geojson' } });
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: {
+        'last-modified': 'Wed, 29 Jul 2026 00:00:00 GMT', 'content-length': '8'
+      } });
+      return new Response('fixture!');
+    };
+    const execute = async ({ args }) => {
+      await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({ id: 'must-not-publish' })}\n`);
+      await writeFile(args[args.indexOf('--state-output') + 1], JSON.stringify({
+        version: 1, source_complete: false, checkpoint_token: 'checkpoint-sg-1',
+        temporary_failure: 'quota', next_available_at: '2026-08-11T00:00:00Z'
+      }));
+    };
+    const adapters = createSourceAdapters({
+      fetchImpl, execute, pythonBin: 'python-fixture',
+      credentialBrokerClient: { request: async () => ({ results: [] }) }
+    });
+    const discovery = await adapters.discover(shard);
+    const materialized = await adapters.materialize(shard, discovery, {
+      cacheDir, maxRecords: 12000, perLocality: 1000, maxBytes: 1024, retainRaw: false
+    });
+    expect(materialized).toMatchObject({
+      file: null, format: 'checkpoint', sourceComplete: false,
+      checkpointToken: 'checkpoint-sg-1', checkpointStage: 'quota',
+      nextAttemptAt: '2026-08-11T00:00:00Z'
+    });
+    await expect(readFile(resolve(cacheDir, 'raw', `singapore-hdb-residential-${discovery.version}-property.csv`), 'utf8'))
+      .resolves.toBe('fixture!');
   });
 
   it('discovers and materializes the official K-apt apartment source', async () => {
     const cacheDir = resolve('.data-cache', `korea-kapt-${process.pid}-${Date.now()}`);
     directories.push(cacheDir);
-    const catalog = await loadSourceCatalog();
-    const shard = catalog.shards.find((entry) => entry.id === 'korea-kapt-residential');
+    const sourceCatalog = await loadSourceCatalog();
+    const shard = sourceCatalog.shards.find((entry) => entry.id === 'korea-kapt-residential');
     const calls = [];
     const reports = [];
     const requestedKeys = [];
@@ -734,8 +1079,18 @@ describe('address source shard catalog', () => {
       if (url.searchParams.get('apiKey') === 'secret-a') return new Response(null, { status: 401 });
       return Response.json({ results: [{ country_code: 'kr', state: '서울특별시', postcode: '03000' }] });
     };
+    const catalogData = `${JSON.stringify({
+      source_record_id: 'kapt-fixture', admin1: '서울특별시', locality: '종로구', district: '내수동',
+      address_levels: ['서울특별시', '종로구', '내수동'], latitude: 37.574, longitude: 126.977,
+      source_rank: 'fixture'
+    })}\n`;
+    const catalogChecksum = createHash('sha256').update(catalogData).digest('hex');
     const execute = async ({ file, args, env, phase }) => {
       calls.push({ file, args, env, phase });
+      if (args.includes('--catalog-output')) {
+        await writeFile(args[args.indexOf('--catalog-output') + 1], catalogData, 'utf8');
+        return;
+      }
       expect(env.GEOAPIFY_API_KEY).toBeUndefined();
       expect(env.ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//u);
       const response = await fetch(env.ADDRESS_SYNC_GEOAPIFY_BRIDGE_URL, {
@@ -747,30 +1102,93 @@ describe('address source shard catalog', () => {
         id: 'kapt-fixture', country: 'KR', postcode: '03000', street: '종로', number: '1',
         property_type: 'apartment', residential_building_id: 'A1'
       })}\n`, 'utf8');
+      await writeFile(args[args.indexOf('--state-output') + 1], JSON.stringify({
+        version: 1, source_complete: true, checkpoint_token: null,
+        catalog_fingerprint: catalogChecksum, candidate_count: 1, resolved_count: 1,
+        publishable_count: 1, selected_count: 1
+      }), 'utf8');
     };
     const adapters = createSourceAdapters({
       fetchImpl, execute, pythonBin: 'python-fixture', credentialPool,
       environment: { GEOAPIFY_API_KEY: 'must-not-reach-python' }
     });
-    const discovery = await adapters.discover(shard);
-    const today = new Date().toISOString().slice(0, 10);
+    const discovery = await adapters.discover(shard, { cacheDir });
     expect(discovery).toMatchObject({
-      adapter: 'korea-kapt', version: `2026-07-30-${today}-kapt-official-apartments-v3`
+      adapter: 'korea-kapt', version: `${catalogChecksum.slice(0, 24)}-kapt-official-apartments-v5`,
+      sourceChecksum: catalogChecksum
     });
     const materialized = await adapters.materialize(shard, discovery, {
       cacheDir, maxRecords: 60000, perLocality: 500, maxBytes: 1024, retainRaw: false
     });
     expect(materialized).toMatchObject({ format: 'overture-jsonl', cacheHit: false });
-    expect(materialized.file).toContain('-m20000-p500.jsonl');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args).toEqual(expect.arrayContaining([
+    expect(materialized.file).toContain('-m20000-p500-output-');
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ phase: 'discover:korea-kapt-residential' });
+    expect(calls[0].args).toEqual(expect.arrayContaining(['--catalog-output']));
+    expect(calls[1].args).toEqual(expect.arrayContaining([
       expect.stringContaining('korea-kapt-export.py'), '--postcode-cache',
       expect.stringContaining('korea-kapt-residential-postcode-cache.jsonl'),
+      '--catalog-input', expect.stringContaining(`korea-kapt-residential-catalog-${catalogChecksum.slice(0, 24)}.jsonl`),
+      '--state-output', expect.stringContaining('-state.'),
       '--max-records', '20000', '--per-locality', '500'
     ]));
-    expect(calls[0].args).not.toContain('--daily-geocode-limit');
+    expect(calls[1].args).not.toContain('--daily-geocode-limit');
     expect(requestedKeys).toEqual(['secret-a', 'secret-b']);
     expect(reports).toEqual([['geoapify-a', 'auth'], ['geoapify-b', 'success']]);
+  });
+
+  it('checkpoints a partial K-apt snapshot without replacing the published dataset', async () => {
+    const cacheDir = resolve('.data-cache', `kapt-resume-${process.pid}-${Date.now()}`);
+    directories.push(cacheDir);
+    const catalogData = `${JSON.stringify({
+      source_record_id: 'kapt-fixture', admin1: '서울특별시', locality: '종로구', district: '내수동',
+      address_levels: ['서울특별시', '종로구', '내수동'], latitude: 37.574, longitude: 126.977,
+      source_rank: 'fixture'
+    })}\n`;
+    const catalogChecksum = createHash('sha256').update(catalogData).digest('hex');
+    let materializations = 0;
+    const execute = async ({ args }) => {
+      if (args.includes('--catalog-output')) {
+        await writeFile(args[args.indexOf('--catalog-output') + 1], catalogData, 'utf8');
+        return;
+      }
+      materializations += 1;
+      await writeFile(args[args.indexOf('--output') + 1], `${JSON.stringify({
+        id: 'kapt-fixture', country: 'KR', postcode: '03000', street: '종로', number: '1',
+        property_type: 'apartment', residential_building_id: 'A1'
+      })}\n`, 'utf8');
+      await writeFile(args[args.indexOf('--state-output') + 1], JSON.stringify({
+        version: 1, source_complete: materializations > 1,
+        checkpoint_token: materializations > 1 ? null : 'checkpoint-1',
+        catalog_fingerprint: catalogChecksum, candidate_count: 2,
+        resolved_count: materializations > 1 ? 2 : 1, publishable_count: 1, selected_count: 1
+      }), 'utf8');
+    };
+    const catalog = await loadSourceCatalog();
+    const shard = catalog.shards.find((entry) => entry.id === 'korea-kapt-residential');
+    const adapters = createSourceAdapters({
+      fetchImpl: async () => new Response('<title>K-apt</title>', { status: 200 }),
+      execute,
+      pythonBin: 'python-fixture',
+      credentialPool: { acquire: async () => null, report: async () => {} }
+    });
+    const discovery = await adapters.discover(shard, { cacheDir });
+    const options = { cacheDir, maxRecords: 60000, perLocality: 500, maxBytes: 1024, retainRaw: false };
+    const partial = await adapters.materialize(shard, discovery, options);
+    expect(partial).toMatchObject({
+      file: null, format: 'checkpoint', sourceComplete: false,
+      checkpointToken: 'checkpoint-1', checkpointStage: 'materialize', cacheHit: false
+    });
+    const otherPolicy = await adapters.materialize(shard, discovery, { ...options, perLocality: 100 });
+    expect(otherPolicy).toMatchObject({ sourceComplete: true, checkpointToken: null, cacheHit: false });
+    const complete = await adapters.materialize(shard, discovery, options);
+    expect(complete).toMatchObject({ sourceComplete: true, checkpointToken: null, cacheHit: false });
+    await writeFile(complete.file, 'corrupt', 'utf8');
+    const repaired = await adapters.materialize(shard, discovery, options);
+    expect(repaired).toMatchObject({ sourceComplete: true, checkpointToken: null, cacheHit: false });
+    const cached = await adapters.materialize(shard, discovery, options);
+    expect(cached).toMatchObject({ sourceComplete: true, checkpointToken: null, cacheHit: true });
+    expect(materializations).toBe(4);
   });
 
   it('discovers and materializes the official eThekwini residential source', async () => {
@@ -1439,21 +1857,30 @@ describe('built-in ETL planning and publishing', () => {
     expect(geofabrik).toContain('if args.postcode_html and args.country != "PH"');
     expect(geofabrik).toContain('residential_selected = sorted(');
     expect(geofabrik).toContain('residential_selected + selected');
-    expect(japanAbr).toContain('def match_plateau_buildings(connection, parquet_paths):');
-    expect(japanAbr).toContain('None if any(lot_city_matches(priority, code, has_ward) for priority in priority_codes)');
+    expect(japanAbr).toContain('def match_plateau_buildings(connection, parquet_path, start_offset=0, progress=None):');
+    expect(japanAbr).toContain('max(city_limit, 2_000)');
+    expect(japanAbr).toContain('heapq.heapreplace(candidates, item)');
     expect(japanAbr).toContain("WHERE usage='residential'");
-    expect(japanAbr).toContain('intersects_xy(geometry, longitude, latitude)');
-    expect(japanAbr).toContain('match_residential_buildings(connection, args.osm_pbf, args.output)');
+    expect(japanAbr).toContain('self.tree.query(geometries, predicate="contains")');
+    expect(japanAbr).toContain('match_residential_buildings(');
     expect(japanAbr).toContain('POSTAL_RANGE_PATTERN');
     expect(japanAbr).toContain('street = clean(lines[0])');
     expect(japanAbr).toContain('if not district or district == street or not postcode:');
     expect(japanAbr).toContain('building_class not in RESIDENTIAL_BUILDINGS');
     expect(japanAbr).toContain('any(clean(tags.get(key)) not in {"", "no", "none"}');
-    expect(japanAbr).toContain('point_in_ring(longitude, latitude, ring)');
+    expect(japanAbr).toContain('checkpoint["osm_scanned_ways"] = scanned_ways');
     expect(japanAbr).toContain('FROM candidates WHERE building_id IS NOT NULL');
     expect(japanAbr).toContain('"residential_building_id": building_id');
-    expect(japanAbr).toContain('def match_city_lots(connection, lots, buildings, claimed_buildings):');
-    expect(japanAbr).toContain('WHERE residential_matches=1 AND blocked_matches=0');
+    expect(japanAbr).toContain('def match_city_lots(connection, lots, buildings, claimed_buildings, progress=None):');
+    expect(japanAbr).toContain('def insert_land_lot_candidates(connection, candidates, batch_size=LAND_LOT_INSERT_BATCH, progress=None):');
+    expect(japanAbr).toContain('connection.executemany');
+    expect(japanAbr).toContain('INSERT INTO candidates');
+    expect(japanAbr).not.toContain('source_id TEXT UNIQUE');
+    expect(japanAbr).toContain('checkpoint["plateau_building_completed"]');
+    expect(japanAbr).toContain('checkpoint["land_lot_candidate_count"]');
+    expect(japanAbr).toContain('SET memory_limit=?');
+    expect(japanAbr).toContain('SET temp_directory=?');
+    expect(japanAbr).toContain('residential_matches[lot_id] == 1 and blocked_matches[lot_id] == 0');
     expect(japanAbr).toContain('if building_lot_counts.get(building_uid) != 1:');
     expect(japanAbr).toContain('if building_id in claimed_buildings:');
   });
@@ -1554,6 +1981,58 @@ describe('built-in ETL planning and publishing', () => {
     expect(await database.prepare("SELECT active_count FROM address_datasets WHERE source_id='replacement-source'").first('active_count')).toBe(2);
     expect(await database.prepare('SELECT COUNT(*) AS count FROM address_pool_runtime').first('count')).toBe(2);
     expect(await database.prepare('SELECT active_count FROM pool_coverage').first('active_count')).toBe(2);
+    database.close();
+  });
+
+  it('rolls back an address publication when cancellation arrives during its transaction', async () => {
+    const directory = resolve('.data-cache', 'sync-etl-tests', randomUUID());
+    directories.push(directory);
+    await mkdir(directory, { recursive: true });
+    const file = resolve(directory, 'cancelled-publication.jsonl');
+    await writeFile(file, `${JSON.stringify({
+      id: 'cancelled-1', admin1: 'Pennsylvania', locality: 'Philadelphia', postal_city: 'Philadelphia',
+      postcode: '19103', street: 'Market Street', number: '1700', longitude: -75.169, latitude: 39.953,
+      property_type: 'residential', residential_building_id: 'cancelled-building-1', residential_building_class: 'house'
+    })}\n`, 'utf8');
+    const database = openTestDatabase(':memory:');
+    const controller = new AbortController();
+    const originalExec = database.exec.bind(database);
+    const originalBatch = database.batch.bind(database);
+    const transactionCommands = [];
+    let transactionStarted = false;
+    database.exec = async (sql) => {
+      transactionCommands.push(sql);
+      const result = await originalExec(sql);
+      if (sql === 'BEGIN') transactionStarted = true;
+      return result;
+    };
+    database.batch = async (statements) => {
+      const result = await originalBatch(statements);
+      if (transactionStarted && !controller.signal.aborted) {
+        controller.abort(Object.assign(new Error('fixture cancellation'), { code: 'SYNC_JOB_TIMEOUT' }));
+      }
+      return result;
+    };
+    const importer = new PostgresAddressImporter({
+      database,
+      normalizeRecord: normalizeSourceRecord,
+      hash: (value) => createHash('sha256').update(value).digest('hex'),
+      localizeRecords: async (records) => records.map((record) => ({
+        ...record,
+        localizations: Object.fromEntries(['native', 'en', 'zh-CN'].map((language) => [language, {
+          components: record.components, formattedAddress: record.formattedAddress, source: 'fixture'
+        }]))
+      }))
+    });
+    await expect(importer.importShard({
+      shard: { id: 'cancelled-us', countryCode: 'US', source },
+      discovery: { version: 'v1', dataUrl: source.dataUrl },
+      materialized: { file, format: 'overture-jsonl', checksum: 'f'.repeat(64) },
+      maxRecords: 10,
+      perLocality: 2,
+      signal: controller.signal
+    })).rejects.toMatchObject({ code: 'SYNC_JOB_TIMEOUT' });
+    expect(transactionCommands).toEqual(['BEGIN', 'ROLLBACK']);
     database.close();
   });
 
@@ -1814,6 +2293,33 @@ describe('built-in ETL planning and publishing', () => {
     });
     expect(result).toMatchObject({ dryRun: true, changed: false, selectedShards: ['fixture-us'] });
     expect(result.reports[0]).toMatchObject({ intervalDays: 30, sourceVersion: '2026-06-17.0', sourceBytes: 1234, status: 'planned' });
+  });
+
+  it('records a normal staged checkpoint as a successful partial result without importing', async () => {
+    const cacheDir = resolve('.data-cache', 'sync-etl-tests', randomUUID());
+    directories.push(cacheDir);
+    const importer = { importShard: vi.fn() };
+    const result = await runAddressEtl({
+      cacheDir,
+      catalog: { schemaVersion: 1, shards: [{ id: 'fixture-jp', countryCode: 'JP', intervalDays: 30, source }] },
+      syncMode: 'manual', importer,
+      adapters: {
+        discover: async () => ({
+          adapter: 'japan-abr', version: 'fixture-v1', dataUrl: source.dataUrl,
+          sourceBytes: 0, estimateMethod: 'fixture'
+        }),
+        materialize: async () => ({
+          file: null, format: 'checkpoint', cacheBytes: 0, checksum: null,
+          sourceComplete: false, checkpointToken: 'jp-checkpoint-1', checkpointStage: 'plateau'
+        })
+      }
+    });
+
+    expect(importer.importShard).not.toHaveBeenCalled();
+    expect(result.reports[0]).toMatchObject({
+      status: 'partial', sourceComplete: false,
+      checkpointToken: 'jp-checkpoint-1', checkpointStage: 'plateau'
+    });
   });
 
   it('selects only one due country for an automatic daily run', async () => {

@@ -31,9 +31,9 @@ const testSchema = (source) => String(source)
     JOIN address_sources ON address_sources.id=address_datasets.source_id AND address_sources.redistribution_allowed=1
     WHERE address_pool.active=1;`)
   .replace(/INSERT INTO schema_migrations\(version, applied_at\)[\s\S]*?ON CONFLICT \(version\) DO NOTHING;/u,
-    "INSERT INTO schema_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;")
+    "INSERT INTO schema_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;")
   .replace(/INSERT INTO control_migrations\(version,applied_at\)[\s\S]*?ON CONFLICT \(version\) DO NOTHING;/u,
-    "INSERT INTO control_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;");
+    "INSERT INTO control_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z'),(14,'2026-01-01T00:00:00Z'),(15,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;");
 
 export const openTestDatabase = (..._legacyArguments) => {
   const memory = newDb({ autoCreateForeignKeyIndices: true });

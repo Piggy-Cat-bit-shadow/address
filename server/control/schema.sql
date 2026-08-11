@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   progress_json TEXT NOT NULL DEFAULT '{}' CHECK (progress_json IS JSON),
   error_code TEXT,
   error_message TEXT,
+  failure_phase TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
@@ -168,10 +169,24 @@ CREATE TABLE IF NOT EXISTS sync_run_countries (
   after_goals_json TEXT NOT NULL DEFAULT '{}' CHECK (after_goals_json IS JSON),
   error_code TEXT,
   error_message TEXT,
+  failure_phase TEXT,
+  source_complete INTEGER NOT NULL DEFAULT 1 CHECK (source_complete IN (0, 1)),
+  source_fingerprint TEXT,
+  source_version_before TEXT,
+  source_version_after TEXT,
+  adapter_revision TEXT,
+  checkpoint_token TEXT,
+  source_state_applied_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (run_id, country_code, source_id)
 );
+
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS source_fingerprint TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS source_version_before TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS source_version_after TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS adapter_revision TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS checkpoint_token TEXT;
 
 CREATE TABLE IF NOT EXISTS sync_scheduler_state (
   scheduler_id TEXT PRIMARY KEY,
@@ -197,6 +212,45 @@ CREATE TABLE IF NOT EXISTS rate_limit_buckets (
   request_count INTEGER NOT NULL CHECK (request_count >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS credential_broker_requests (
+  id BIGSERIAL PRIMARY KEY,
+  client_id TEXT NOT NULL CHECK (client_id IN ('production','test')),
+  request_id TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','mappls')),
+  operation TEXT NOT NULL,
+  parameters_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','completed','failed','unknown')),
+  response_status INTEGER,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (client_id, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS credential_broker_dispatches (
+  id BIGSERIAL PRIMARY KEY,
+  request_key BIGINT NOT NULL REFERENCES credential_broker_requests(id) ON DELETE CASCADE,
+  credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL CHECK (status IN ('dispatched','success','rejected','unknown')),
+  outcome TEXT,
+  reserved_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS credential_broker_quota_counters (
+  scope_id TEXT NOT NULL,
+  service TEXT NOT NULL,
+  period TEXT NOT NULL CHECK (period IN ('day','month')),
+  period_start TEXT NOT NULL,
+  limit_count INTEGER NOT NULL CHECK (limit_count > 0),
+  dispatch_count INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_count >= 0),
+  production_count INTEGER NOT NULL DEFAULT 0 CHECK (production_count >= 0),
+  test_count INTEGER NOT NULL DEFAULT 0 CHECK (test_count >= 0),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope_id, service, period, period_start)
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_provider_credentials_pick ON provider_credentials(provider,enabled,status,cooldown_until,last_used_at);
 CREATE INDEX IF NOT EXISTS idx_provider_quota_windows_credential ON provider_quota_windows(credential_id,enabled,period);
@@ -205,16 +259,33 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_created ON sync_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_run_countries_history ON sync_run_countries(country_code,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_run_countries_status ON sync_run_countries(status,heartbeat_at);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_credential_broker_requests_status
+  ON credential_broker_requests(status,updated_at);
+CREATE INDEX IF NOT EXISTS idx_credential_broker_dispatches_request
+  ON credential_broker_dispatches(request_key,reserved_at);
 
 ALTER TABLE provider_credentials DROP CONSTRAINT IF EXISTS provider_credentials_provider_check;
 ALTER TABLE provider_credentials ADD CONSTRAINT provider_credentials_provider_check
   CHECK (provider IN ('amap','baidu','tencent','onemap','youdao','geoapify','google-geocoding','mappls'));
+
+ALTER TABLE credential_broker_requests DROP CONSTRAINT IF EXISTS credential_broker_requests_provider_check;
+ALTER TABLE credential_broker_requests ADD CONSTRAINT credential_broker_requests_provider_check
+  CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','mappls'));
 
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS candidate_count INTEGER;
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS accepted_count INTEGER;
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS rejected_count INTEGER;
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS rejection_reasons_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS metrics_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS failure_phase TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS failure_phase TEXT;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS source_complete INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS source_state_applied_at TEXT;
+
+UPDATE sync_run_countries SET source_state_applied_at=COALESCE(completed_at,updated_at)
+WHERE source_state_applied_at IS NULL
+  AND status IN ('paused_quota','needs_review','succeeded','failed','cancelled')
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=13);
 
 INSERT INTO provider_quota_windows(
   credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
@@ -224,5 +295,5 @@ FROM provider_credentials
 ON CONFLICT (credential_id,service,period) DO NOTHING;
 
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 11) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 16) AS version
 ON CONFLICT (version) DO NOTHING;

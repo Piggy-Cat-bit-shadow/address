@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createGeoapifyCredentialBridge } from './geoapify-credential-bridge.mjs';
+import { createOneMapCredentialBridge } from './onemap-credential-bridge.mjs';
 import { runProcess } from './process.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -25,11 +26,11 @@ const capeTownResidentialExporter = resolve(syncRoot, 'south-africa-cape-town-ex
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
 const licensedResidentialExporter = resolve(syncRoot, 'licensed-residential-export.py');
-const overtureResidentialRevision = 'residential-buildings-v4';
+const overtureResidentialRevision = 'residential-buildings-v5';
 const geofabrikExportRevision = 'g69';
-const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v10';
-const singaporeHdbExportRevision = 'hdb-property-building-onemap-v2';
-const koreaKaptExportRevision = 'kapt-official-apartments-v3';
+const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v14';
+const singaporeHdbExportRevision = 'hdb-property-building-onemap-v3';
+const koreaKaptExportRevision = 'kapt-official-apartments-v5';
 const openAddressesExportRevision = 'archive-residential-v2';
 const inegiResidentialExportRevision = 'official-dwelling-v1';
 const ethekwiniResidentialExportRevision = 'official-address-zoning-postcode-v1';
@@ -81,7 +82,21 @@ export class SourceMetadataError extends Error {
 }
 
 const retryableStatus = (status) => status === 408 || status === 429 || status >= 500;
-const wait = (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+const wait = (milliseconds, signal) => {
+  if (!signal) return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+  signal.throwIfAborted();
+  return new Promise((resolveWait, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolveWait();
+    }, milliseconds);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+};
 const execFileAsync = promisify(execFile);
 
 const curlMetadataFetch = async (input, init = {}) => {
@@ -99,7 +114,7 @@ const curlMetadataFetch = async (input, init = {}) => {
   };
   if ((init.method || 'GET') === 'HEAD') {
     const { stdout } = await execFileAsync('curl', ['-4', '-sSLI', '--connect-timeout', '15', '--max-time', '60', url], {
-      encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true
+      encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true, signal: init.signal
     });
     return parseHeaders(stdout);
   }
@@ -107,23 +122,24 @@ const curlMetadataFetch = async (input, init = {}) => {
     const sink = process.platform === 'win32' ? 'NUL' : '/dev/null';
     const { stdout } = await execFileAsync('curl', ['-4', '-fsSL', '-r', '0-0', '-D', '-', '-o', sink,
       '--connect-timeout', '15', '--max-time', '60', url], {
-      encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true
+      encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, windowsHide: true, signal: init.signal
     });
     return parseHeaders(stdout);
   }
   const { stdout } = await execFileAsync('curl', ['-4', '-fsSL', '--connect-timeout', '15', '--max-time', '60', url], {
-    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, signal: init.signal
   });
   return new Response(stdout, { status: 200, headers: { 'Content-Type': 'application/json' } });
 };
 
-const jsonRequest = async (url, fetchImpl, { attempts = 3 } = {}) => {
+const jsonRequest = async (url, fetchImpl, { attempts = 3, signal } = {}) => {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    signal?.throwIfAborted();
     try {
       const response = await fetchImpl(url, {
         headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(30_000)
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
       });
       if (!response.ok) {
         throw new SourceMetadataError(`Source metadata request returned HTTP ${response.status}`, {
@@ -150,24 +166,26 @@ const jsonRequest = async (url, fetchImpl, { attempts = 3 } = {}) => {
       const retryable = !(lastError instanceof SourceMetadataError) || lastError.status === null || retryableStatus(lastError.status)
         || lastError.code === 'SOURCE_METADATA_CONTENT_TYPE' || lastError.code === 'SOURCE_METADATA_JSON';
       if (!retryable || attempt === attempts) throw lastError;
-      await wait(250 * 2 ** (attempt - 1));
+      await wait(250 * 2 ** (attempt - 1), signal);
     }
   }
   throw lastError;
 };
 
-const headRequest = async (url, fetchImpl, { attempts = 3 } = {}) => {
+const headRequest = async (url, fetchImpl, { attempts = 3, signal } = {}) => {
   let lastError;
   let lastResponse;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    signal?.throwIfAborted();
     try {
-      const response = await fetchImpl(url, { method: 'HEAD' });
+      const response = await fetchImpl(url, { method: 'HEAD', signal });
       if (response.ok || !retryableStatus(response.status)) return response;
       lastResponse = response;
     } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
       lastError = error;
     }
-    if (attempt < attempts) await wait(250 * 2 ** (attempt - 1));
+    if (attempt < attempts) await wait(250 * 2 ** (attempt - 1), signal);
   }
   if (lastResponse) return lastResponse;
   throw lastError;
@@ -298,6 +316,17 @@ const digestFile = async (file, algorithm) => {
 
 export const sha256File = (file) => digestFile(file, 'sha256');
 
+const publishContentAddressed = async (temporary, destination, checksum) => {
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+    const existingChecksum = await sha256File(destination).catch(() => null);
+    if (existingChecksum !== checksum) throw error;
+    await rm(temporary, { force: true });
+  }
+};
+
 // Postcode locator pages often contain a changing nonce, timestamp, or
 // analytics markup even when the actual postal rows are unchanged. Hash only
 // visible semantic text so a dynamic wrapper cannot create a new source
@@ -383,8 +412,8 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
     }
     if (source.dataUrlEnvironment) {
       const configuredUrl = String(environment[source.dataUrlEnvironment] || '').trim();
-      if (!configuredUrl) throw new Error(`${source.dataUrlEnvironment} is required when ${source.id} is enabled`);
-      source.dataUrl = configuredUrl;
+      if (configuredUrl) source.dataUrl = configuredUrl;
+      else source.configurationError = `missing_source_configuration:${source.dataUrlEnvironment}`;
     }
     const intervalDays = source.intervalDays || catalog.defaultIntervalDays;
     if (source.adapter === 'overture') {
@@ -399,6 +428,9 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         boundaryIso3: extract.boundaryIso3,
         excludeBoundaryIso3: extract.excludeBoundaryIso3,
         postcodeDataUrl: extract.postcodeDataUrl,
+        postcodeMetadataUrl: extract.postcodeMetadataUrl,
+        postcodeMetadataFormat: extract.postcodeMetadataFormat,
+        postcodeMetadataMatchUrl: extract.postcodeMetadataMatchUrl,
         postcodeDataFormat: extract.postcodeDataFormat,
         maxRecords: extract.maxRecords ?? source.extractDefaults?.maxRecords,
         qualityGate: extract.qualityGate ?? source.extractDefaults?.qualityGate,
@@ -425,6 +457,7 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         countryCode: 'SG',
         maxRecords: source.maxRecords,
         qualityGate: source.qualityGate,
+        quotaProvider: source.quotaProvider,
         intervalDays,
         source
       });
@@ -515,24 +548,39 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
 
 export const createSourceAdapters = ({
   fetchImpl = fetch,
+  environment = process.env,
   execute = runProcess,
   processConcurrency = 3,
-  processTimeoutMs = Number(process.env.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 30 * 60_000),
+  processTimeoutMs = Number(environment.ADDRESS_SYNC_PROCESS_TIMEOUT_MS || 30 * 60_000),
   signal,
-  pythonBin = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
-  enableOvertureResidential = process.env.ADDRESS_SYNC_OVERTURE_BUILDINGS === 'true',
-  environment = process.env,
+  pythonBin = environment.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
+  enableOvertureResidential = environment.ADDRESS_SYNC_OVERTURE_BUILDINGS !== 'false',
   credentialPool = null,
+  credentialBrokerClient = null,
   loadSeedLocations = async () => []
 } = {}) => {
   const apiFetchImpl = fetchImpl;
   const useCurlTransport = fetchImpl === fetch;
   if (useCurlTransport) fetchImpl = curlMetadataFetch;
+  const fetchJson = (url, options = {}) => jsonRequest(url, fetchImpl, {
+    ...options,
+    signal: options.signal || signal
+  });
+  const fetchHead = (url, options = {}) => headRequest(url, fetchImpl, {
+    ...options,
+    signal: options.signal || signal
+  });
   let overtureCatalogPromise;
   let overtureBuildingCatalogPromise;
   let geofabrikIndexPromise;
   const processWaiters = [];
   let activeProcesses = 0;
+  const configuredJapanTimeout = Number(environment.ADDRESS_SYNC_JAPAN_PROCESS_TIMEOUT_MS);
+  const japanProcessTimeoutMs = Number.isInteger(configuredJapanTimeout)
+    ? Math.min(Math.max(configuredJapanTimeout, processTimeoutMs), 85 * 60_000)
+    : Math.min(Math.max(processTimeoutMs, 75 * 60_000), 85 * 60_000);
+  const timeoutForPhase = (phase) => String(phase || '').startsWith('materialize:japan-abr-')
+    ? japanProcessTimeoutMs : processTimeoutMs;
   const runExecute = async (options) => {
     if (activeProcesses >= processConcurrency) await new Promise((resolve) => processWaiters.push(resolve));
     activeProcesses += 1;
@@ -540,7 +588,7 @@ export const createSourceAdapters = ({
       return await execute({
         ...options,
         signal: options.signal || signal,
-        timeoutMs: options.timeoutMs || processTimeoutMs
+        timeoutMs: options.timeoutMs || timeoutForPhase(options.phase)
       });
     }
     finally {
@@ -622,12 +670,31 @@ export const createSourceAdapters = ({
   };
 
   const requestMappls = async (target) => {
+    if (credentialBrokerClient) {
+      const url = new URL(target);
+      if (url.hostname === 'search.mappls.com' && url.pathname === '/search/places/nearby/json') {
+        const [latitude, longitude] = String(url.searchParams.get('refLocation') || '').split(',').map(Number);
+        return credentialBrokerClient.request('mappls.nearby', {
+          latitude,
+          longitude,
+          categoryCode: url.searchParams.get('keywords') || '',
+          radius: Number(url.searchParams.get('radius')),
+          page: Number(url.searchParams.get('page'))
+        }, { signal });
+      }
+      if (url.hostname === 'explore.mappls.com' && url.pathname.startsWith('/apis/O2O/entity/')) {
+        return credentialBrokerClient.request('mappls.entity', {
+          eLoc: decodeURIComponent(url.pathname.slice('/apis/O2O/entity/'.length))
+        }, { signal });
+      }
+      throw Object.assign(new Error('Unsupported Mappls Broker operation'), { code: 'SOURCE_CONFIGURATION_INVALID' });
+    }
     const attempted = new Set();
     for (let pacingAttempt = 0; pacingAttempt < 20; pacingAttempt += 1) {
       const credential = await mapplsCredentialPool.acquire('mappls', { excludeIds: attempted });
       if (!credential) {
         if (!attempted.size && pacingAttempt < 19) {
-          await wait(100);
+          await wait(100, signal);
           continue;
         }
         throw Object.assign(new Error('No Mappls credential is currently available'), {
@@ -684,7 +751,7 @@ export const createSourceAdapters = ({
     const items = [];
     for (let offset = 0; offset < links.length; offset += 32) {
       items.push(...await Promise.all(links.slice(offset, offset + 32).map((link) =>
-        jsonRequest(new URL(link.href, collectionUrl).href, fetchImpl))));
+        fetchJson(new URL(link.href, collectionUrl).href))));
     }
     return items;
   };
@@ -692,10 +759,10 @@ export const createSourceAdapters = ({
   const overtureCatalog = async () => {
     if (!overtureCatalogPromise) overtureCatalogPromise = (async () => {
       const rootUrl = 'https://stac.overturemaps.org/catalog.json';
-      const root = await jsonRequest(rootUrl, fetchImpl);
+      const root = await fetchJson(rootUrl);
       if (!/^20\d{2}-\d{2}-\d{2}\.\d+$/u.test(root.latest || '')) throw new Error('Overture STAC did not return a valid latest release');
       const collectionUrl = `https://stac.overturemaps.org/${root.latest}/addresses/address/collection.json`;
-      const collection = await jsonRequest(collectionUrl, fetchImpl);
+      const collection = await fetchJson(collectionUrl);
       const items = await loadStacItems(collectionUrl, collection);
       return { version: root.latest, collectionUrl, items };
     })();
@@ -706,7 +773,7 @@ export const createSourceAdapters = ({
     if (!overtureBuildingCatalogPromise) overtureBuildingCatalogPromise = (async () => {
       const addressCatalog = await overtureCatalog();
       const collectionUrl = `https://stac.overturemaps.org/${addressCatalog.version}/buildings/building/collection.json`;
-      const collection = await jsonRequest(collectionUrl, fetchImpl);
+      const collection = await fetchJson(collectionUrl);
       return { collectionUrl, items: await loadStacItems(collectionUrl, collection) };
     })();
     return overtureBuildingCatalogPromise;
@@ -714,7 +781,7 @@ export const createSourceAdapters = ({
 
   const geofabrikIndex = async () => {
     if (!geofabrikIndexPromise) {
-      geofabrikIndexPromise = jsonRequest('https://download.geofabrik.de/index-v1-nogeom.json', fetchImpl)
+      geofabrikIndexPromise = fetchJson('https://download.geofabrik.de/index-v1-nogeom.json')
         .catch((error) => {
           geofabrikIndexPromise = undefined;
           throw error;
@@ -778,7 +845,7 @@ export const createSourceAdapters = ({
     const feature = index.features?.find((entry) => entry.properties?.id === shard.extractId);
     const dataUrl = feature?.properties?.urls?.pbf;
     if (!dataUrl) throw new Error(`Geofabrik extract is missing: ${shard.extractId}`);
-    const response = await headRequest(dataUrl, fetchImpl);
+    const response = await fetchHead(dataUrl);
     if (!response.ok) throw new Error(`Geofabrik metadata request failed (${response.status}): ${dataUrl}`);
     const modified = response.headers.get('last-modified');
     const etag = response.headers.get('etag')?.replaceAll('"', '') || '';
@@ -789,6 +856,7 @@ export const createSourceAdapters = ({
     let discoveryEtag = etag;
     let estimateMethod = 'http-content-length';
     let bootstrapRawFile = null;
+    let postcodeMetadataVersion = null;
     if (syncMode === 'initial') {
       const recent = await recentBootstrapRaw({ cacheDir, shard, dataUrl, currentDate: dateVersion, currentBytes: sourceBytes });
       if (recent) {
@@ -800,11 +868,54 @@ export const createSourceAdapters = ({
         bootstrapRawFile = recent.file;
       }
     }
+    if (shard.postcodeDataUrl) {
+      let metadataIdentity;
+      if (shard.postcodeMetadataUrl) {
+        const postcodeMetadata = await fetchImpl(shard.postcodeMetadataUrl, {
+          headers: { Accept: shard.postcodeMetadataFormat === 'sitemap' ? 'application/xml' : 'application/json' }, signal
+        });
+        if (!postcodeMetadata.ok) {
+          throw new Error(`Official postcode metadata request failed (${postcodeMetadata.status}): ${shard.postcodeMetadataUrl}`);
+        }
+        const metadataText = await postcodeMetadata.text();
+        if (shard.postcodeMetadataFormat === 'sitemap') {
+          const entries = [...metadataText.matchAll(/<url>([\s\S]*?)<\/url>/giu)].map((match) => match[1]);
+          const selected = entries.find((entry) => entry.includes(`<loc>${shard.postcodeMetadataMatchUrl}</loc>`));
+          const modified = selected?.match(/<lastmod>([^<]+)<\/lastmod>/iu)?.[1];
+          if (!modified) throw new Error(`Official postcode sitemap entry is missing: ${shard.postcodeMetadataMatchUrl}`);
+          metadataIdentity = `${shard.postcodeMetadataMatchUrl}\u001f${modified}`;
+        } else metadataIdentity = `${shard.postcodeMetadataUrl}\u001f${metadataText}`;
+      } else {
+        const postcodeMetadata = await fetchHead(shard.postcodeDataUrl, {
+          headers: { Accept: shard.postcodeDataFormat === 'pdf' ? 'application/pdf' : 'text/html' }
+        });
+        if (!postcodeMetadata.ok) {
+          throw new Error(`Official postcode metadata request failed (${postcodeMetadata.status}): ${shard.postcodeDataUrl}`);
+        }
+        const contentLength = postcodeMetadata.headers.get('content-length');
+        metadataIdentity = [
+          shard.postcodeDataUrl,
+          postcodeMetadata.headers.get('etag')?.replaceAll('"', '') || '',
+          postcodeMetadata.headers.get('last-modified') || '',
+          Number(contentLength) > 0 ? contentLength : ''
+        ].join('\u001f');
+      }
+      if (metadataIdentity.replaceAll('\u001f', '')) {
+        postcodeMetadataVersion = createHash('sha256').update(metadataIdentity).digest('hex').slice(0, 16);
+        version = `${version}-p${postcodeMetadataVersion}`;
+      }
+    }
+    if (syncMode === 'probe') {
+      return {
+        adapter: 'geofabrik', version, publishedAt, dataUrl, sourceBytes,
+        etag: discoveryEtag, lastModified: modified, estimateMethod: 'metadata-probe'
+      };
+    }
     let boundaryUrl = null;
     const boundaryDownloadUrl = async (iso3) => {
       const relation = osmBoundaryRelations[iso3];
       if (relation) return `https://polygons.openstreetmap.fr/get_geojson.py?id=${relation}&params=0`;
-      const boundary = await jsonRequest(`https://www.geoboundaries.org/api/current/gbOpen/${iso3}/ADM0/`, fetchImpl);
+      const boundary = await fetchJson(`https://www.geoboundaries.org/api/current/gbOpen/${iso3}/ADM0/`);
       if (!String(boundary.gjDownloadURL || '').startsWith('https://')) throw new Error(`Country boundary is missing: ${iso3}`);
       return boundary.gjDownloadURL;
     };
@@ -835,9 +946,9 @@ export const createSourceAdapters = ({
           forceRefresh: postcodeDataFormat === 'html'
         });
         if (postcodeBytes < 100_000) throw new Error(`Official postcode source is unexpectedly small: ${postcodeBytes}`);
-        postcodeVersion = postcodeDataFormat === 'html'
+        postcodeVersion = postcodeMetadataVersion || (postcodeDataFormat === 'html'
           ? await stableHtmlFingerprint(postcodeFile)
-          : await sha256File(postcodeFile).then((value) => value.slice(0, 16));
+          : await sha256File(postcodeFile).then((value) => value.slice(0, 16)));
       } else {
         const postcodeResponse = await fetchImpl(shard.postcodeDataUrl, {
           headers: { Accept: postcodeDataFormat === 'pdf' ? 'application/pdf' : 'text/html' },
@@ -849,11 +960,11 @@ export const createSourceAdapters = ({
         const postcodeContent = Buffer.from(await postcodeResponse.arrayBuffer());
         postcodeBytes = postcodeContent.byteLength;
         if (postcodeBytes < 100_000) throw new Error(`Official postcode source is unexpectedly small: ${postcodeBytes}`);
-        postcodeVersion = postcodeDataFormat === 'html'
+        postcodeVersion = postcodeMetadataVersion || (postcodeDataFormat === 'html'
           ? createHash('sha256').update(canonicalizeHtmlText(postcodeContent.toString('utf8'))).digest('hex').slice(0, 16)
-          : createHash('sha256').update(postcodeContent).digest('hex').slice(0, 16);
+          : createHash('sha256').update(postcodeContent).digest('hex').slice(0, 16));
       }
-      version = `${version}-p${postcodeVersion}`;
+      if (!postcodeMetadataVersion) version = `${version}-p${postcodeVersion}`;
     }
     return {
       adapter: 'geofabrik', version, publishedAt,
@@ -864,10 +975,10 @@ export const createSourceAdapters = ({
   };
 
   const discoverJapanAbr = async (shard) => {
-    const abr = await jsonRequest(shard.source.dataUrl, fetchImpl);
+    const abr = await fetchJson(shard.source.dataUrl);
     const postalUrl = shard.source.postalDataUrl;
     if (!String(postalUrl || '').startsWith('https://')) throw new Error('Japan Post data URL is missing');
-    const postalResponse = await headRequest(postalUrl, fetchImpl);
+    const postalResponse = await fetchHead(postalUrl);
     if (!postalResponse.ok) throw new Error(`Japan Post metadata request failed (${postalResponse.status}): ${postalUrl}`);
     const abrUpdated = Number(abr.meta?.updated);
     if (!Number.isSafeInteger(abrUpdated) || abrUpdated <= 0 || !Array.isArray(abr.data)) {
@@ -891,7 +1002,7 @@ export const createSourceAdapters = ({
         const feature = index.features?.find((entry) => entry.properties?.id === shard.extractId);
         const candidateUrl = feature?.properties?.urls?.pbf;
         if (candidateUrl) {
-          const candidateResponse = await headRequest(candidateUrl, fetchImpl);
+          const candidateResponse = await fetchHead(candidateUrl);
           if (candidateResponse.ok) {
             osmUrl = candidateUrl;
             osmResponse = candidateResponse;
@@ -938,18 +1049,18 @@ export const createSourceAdapters = ({
 
   const dataGovDownload = async (datasetId) => {
     const baseUrl = `https://api-open.data.gov.sg/v1/public/api/datasets/${datasetId}`;
-    let payload = await jsonRequest(`${baseUrl}/initiate-download`, fetchImpl);
+    let payload = await fetchJson(`${baseUrl}/initiate-download`);
     let dataUrl = payload.data?.url;
     for (let attempt = 0; !dataUrl && attempt < 10; attempt += 1) {
-      await wait(1_000);
-      payload = await jsonRequest(`${baseUrl}/poll-download`, fetchImpl);
+      await wait(1_000, signal);
+      payload = await fetchJson(`${baseUrl}/poll-download`);
       dataUrl = payload.data?.url;
     }
     if (!String(dataUrl || '').startsWith('https://')) throw new Error(`data.gov.sg download is unavailable: ${datasetId}`);
     let sourceBytes = null;
     let lastModified = null;
     try {
-      const response = await headRequest(dataUrl, fetchImpl);
+      const response = await fetchHead(dataUrl);
       if (response.ok) {
         sourceBytes = headerNumber(response.headers, 'content-length');
         lastModified = response.headers.get('last-modified');
@@ -984,28 +1095,49 @@ export const createSourceAdapters = ({
     };
   };
 
-  const discoverKoreaKapt = async (shard) => {
+  const discoverKoreaKapt = async (shard, options = {}) => {
     const response = await fetchImpl(shard.source.dataUrl, { headers: { Accept: 'text/html' } });
     if (!response.ok) throw new Error(`K-apt metadata request failed (${response.status}): ${shard.source.dataUrl}`);
     const page = await response.text();
     if (!page.includes('K-apt')) throw new Error('K-apt metadata page is invalid');
     const modified = response.headers.get('last-modified');
-    const sourceVersion = modified && Number.isFinite(new Date(modified).getTime())
-      ? new Date(modified).toISOString().slice(0, 10)
-      : 'latest';
-    const runDate = new Date().toISOString().slice(0, 10);
+    const rawRoot = resolve(options.cacheDir || environment.ADDRESS_SYNC_CACHE_DIR || '.data-cache', 'raw');
+    const temporary = resolve(rawRoot, `${shard.id}-catalog.${process.pid}.tmp`);
+    await mkdir(rawRoot, { recursive: true });
+    let catalogFile;
+    let sourceChecksum;
+    let sourceBytes;
+    try {
+      await runExecute({
+        file: pythonBin,
+        args: [koreaKaptExporter, '--catalog-output', temporary],
+        phase: `discover:${shard.id}`
+      });
+      const metadata = await stat(temporary);
+      if (!metadata.size) throw Object.assign(new Error('K-apt catalog has no qualifying residential records'), {
+        code: 'SOURCE_QUALITY_FAILED'
+      });
+      sourceBytes = metadata.size;
+      sourceChecksum = await sha256File(temporary);
+      catalogFile = resolve(rawRoot, `${shard.id}-catalog-${sourceChecksum.slice(0, 24)}.jsonl`);
+      await publishContentAddressed(temporary, catalogFile, sourceChecksum);
+    } finally {
+      await rm(temporary, { force: true });
+    }
     return {
       adapter: 'korea-kapt',
-      version: `${sourceVersion}-${runDate}-${koreaKaptExportRevision}`,
+      version: `${sourceChecksum.slice(0, 24)}-${koreaKaptExportRevision}`,
       publishedAt: modified ? new Date(modified).toISOString() : null,
       dataUrl: shard.source.dataUrl,
-      sourceBytes: null,
+      sourceBytes,
+      sourceChecksum,
+      catalogFile,
       estimateMethod: 'official-k-apt-dynamic-catalog'
     };
   };
 
   const discoverOpenAddresses = async (shard) => {
-    let response = await headRequest(shard.source.dataUrl, fetchImpl);
+    let response = await fetchHead(shard.source.dataUrl);
     if ([403, 405].includes(response.status)) {
       response = await fetchImpl(shard.source.dataUrl, { headers: { Range: 'bytes=0-0' } });
     }
@@ -1035,7 +1167,7 @@ export const createSourceAdapters = ({
 
   const discoverInegiResidential = async (shard) => {
     const inspect = async (url) => {
-      let response = await headRequest(url, fetchImpl);
+      let response = await fetchHead(url);
       if ([403, 405].includes(response.status)) {
         response = await fetchImpl(url, { headers: { Range: 'bytes=0-0' } });
       }
@@ -1065,9 +1197,9 @@ export const createSourceAdapters = ({
 
   const discoverEthekwiniResidential = async (shard) => {
     const [address, zoning, postalResponse] = await Promise.all([
-      jsonRequest(`${shard.source.addressUrl}?f=json`, fetchImpl),
-      jsonRequest(`${shard.source.zoningUrl}?f=json`, fetchImpl),
-      headRequest(shard.source.postalDataUrl, fetchImpl)
+      fetchJson(`${shard.source.addressUrl}?f=json`),
+      fetchJson(`${shard.source.zoningUrl}?f=json`),
+      fetchHead(shard.source.postalDataUrl)
     ]);
     if (!postalResponse.ok) {
       throw new Error(`South African Post Office metadata request failed (${postalResponse.status})`);
@@ -1096,8 +1228,8 @@ export const createSourceAdapters = ({
 
   const discoverCapeTownResidential = async (shard) => {
     const [parcel, postalResponse] = await Promise.all([
-      jsonRequest(`${shard.source.parcelUrl}?f=json`, fetchImpl),
-      headRequest(shard.source.postalDataUrl, fetchImpl)
+      fetchJson(`${shard.source.parcelUrl}?f=json`),
+      fetchHead(shard.source.postalDataUrl)
     ]);
     if (!postalResponse.ok) {
       throw new Error(`South African Post Office metadata request failed (${postalResponse.status})`);
@@ -1122,7 +1254,7 @@ export const createSourceAdapters = ({
 
   const discoverTaiwanResidential = async (shard) => {
     const inspect = async (url) => {
-      let response = await headRequest(url, fetchImpl);
+      let response = await fetchHead(url);
       if ([403, 405].includes(response.status)) {
         response = await fetchImpl(url, { headers: { Range: 'bytes=0-0' } });
       }
@@ -1173,7 +1305,7 @@ export const createSourceAdapters = ({
     const dataUrl = metadata.match(/https:\/\/static\.csdi\.gov\.hk\/csdi-webpage\/download\/[a-f\d]+\/csv/iu)?.[0];
     const date = metadata.match(/Last updated on[\s\S]{0,500}?(\d{2})\/(\d{2})\/(\d{4})/iu);
     if (!dataUrl || !date) throw new Error('Hong Kong source metadata is missing the download URL or update date');
-    const response = await headRequest(dataUrl, fetchImpl);
+    const response = await fetchHead(dataUrl);
     if (!response.ok) throw new Error(`Hong Kong source request failed (${response.status})`);
     const publishedAt = `${date[3]}-${date[2]}-${date[1]}T00:00:00.000Z`;
     return {
@@ -1241,7 +1373,7 @@ export const createSourceAdapters = ({
     requireLicensedSource(shard.source);
     const configuredVersion = String(environment[shard.source.versionEnvironment] || '').trim();
     if (/^https:\/\//iu.test(shard.source.dataUrl)) {
-      const response = await headRequest(shard.source.dataUrl, fetchImpl);
+      const response = await fetchHead(shard.source.dataUrl);
       if (!response.ok) throw new Error(`Licensed feed metadata request failed (${response.status})`);
       const modified = response.headers.get('last-modified');
       const etag = response.headers.get('etag')?.replaceAll('"', '') || '';
@@ -1274,7 +1406,7 @@ export const createSourceAdapters = ({
   };
 
   const discoverPdokBag = async (shard) => {
-    const metadata = await jsonRequest(shard.source.dataUrl, fetchImpl);
+    const metadata = await fetchJson(shard.source.dataUrl);
     const itemLink = metadata?.links?.find((link) => link.rel === 'items'
       && /(?:application\/geo\+json|application\/json)/iu.test(String(link.type || '')));
     const updated = metadata?.links?.find((link) => link.rel === 'self')?.updated;
@@ -1294,6 +1426,9 @@ export const createSourceAdapters = ({
   };
 
   const discover = (shard, options) => {
+    if (shard.source.configurationError) {
+      throw Object.assign(new Error(shard.source.configurationError), { code: 'SOURCE_CONFIGURATION_INVALID' });
+    }
     if (shard.source.adapter === 'overture') return discoverOverture(shard, options);
     if (shard.source.adapter === 'geofabrik') return discoverGeofabrik(shard, options);
     if (shard.source.adapter === 'japan-abr') return discoverJapanAbr(shard, options);
@@ -1311,7 +1446,9 @@ export const createSourceAdapters = ({
     throw new Error(`Unsupported source adapter: ${shard.source.adapter}`);
   };
 
-  const download = async (url, destination, { expectedBytes, maxBytes, forceRefresh = false }) => {
+  const download = async (url, destination, {
+    expectedBytes, maxBytes, forceRefresh = false, retainPartial = false
+  }) => {
     await mkdir(resolve(destination, '..'), { recursive: true });
     if (!forceRefresh) {
       try {
@@ -1332,7 +1469,8 @@ export const createSourceAdapters = ({
             args: ['-4', '-fL', '--retry', '3', '--retry-all-errors', '--connect-timeout', '15', '-C', '-', '-o', partial, url],
             signal
           });
-        } catch {
+        } catch (error) {
+          if (retainPartial && !String(error?.message || '').includes('code 33')) throw error;
           await rm(partial, { force: true });
           await runProcess({
             file: 'curl',
@@ -1366,7 +1504,7 @@ export const createSourceAdapters = ({
       completed = true;
       return (await stat(destination)).size;
     } finally {
-      if (!completed) await rm(partial, { force: true });
+      if (!completed && !retainPartial) await rm(partial, { force: true });
     }
   };
 
@@ -1507,6 +1645,7 @@ export const createSourceAdapters = ({
   const materializeJapanAbr = async (shard, discovery, options) => {
     const version = safeVersion(discovery.version);
     const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const candidateBudget = Number(shard.maxRecords || options.maxRecords);
     const policyIdentity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
     const output = resolve(options.cacheDir, 'normalized',
       `${shard.id}-${version}-${japanAbrExportRevision}-${policyIdentity}.jsonl`);
@@ -1514,83 +1653,163 @@ export const createSourceAdapters = ({
       const size = (await stat(output)).size;
       return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
     } catch {}
-    const postalIdentity = createHash('sha256')
-      .update(`${discovery.postalUrl}\u001f${discovery.postalVersion || version}`).digest('hex').slice(0, 16);
-    const osmIdentity = discovery.osmUrl
-      ? createHash('sha256').update(`${discovery.osmUrl}\u001f${discovery.osmVersion || version}`).digest('hex').slice(0, 16) : null;
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const stateIdentity = createHash('sha256')
+      .update(`${version}\u001f${japanAbrExportRevision}\u001f${candidateBudget}`).digest('hex').slice(0, 20);
+    const statePrefix = `${shard.id}-state-`;
+    const stateDirectory = resolve(rawRoot, `${statePrefix}${stateIdentity}`);
+    const checkpointFile = resolve(stateDirectory, 'checkpoint.json');
+    const storeFile = resolve(stateDirectory, 'candidates.duckdb');
+    await mkdir(stateDirectory, { recursive: true });
+    for (const entry of await readdir(rawRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(statePrefix) && entry.name !== basename(stateDirectory)) {
+        await rm(resolve(rawRoot, entry.name), { recursive: true, force: true });
+      }
+    }
+    const readCheckpoint = async () => {
+      try {
+        const value = JSON.parse(await readFile(checkpointFile, 'utf8'));
+        return value?.version === 1 ? value : null;
+      } catch { return null; }
+    };
+    const checkpointToken = (checkpoint) => checkpoint ? createHash('sha256').update(JSON.stringify({
+      abrComplete: checkpoint.abr_complete === true,
+      abrCompletedCities: [...(checkpoint.abr_completed_cities || [])].sort(),
+      abrAttempts: Object.fromEntries(Object.entries(checkpoint.abr_attempts || {}).sort()),
+      plateauCompleted: [...(checkpoint.plateau_completed || [])].sort(),
+      plateauBuildingCompleted: [...(checkpoint.plateau_building_completed || [])].sort(),
+      plateauOffsets: Object.fromEntries(Object.entries(checkpoint.plateau_offsets || {}).sort()),
+      landLotCandidateCount: Number(checkpoint.land_lot_candidate_count || 0),
+      osmScannedWays: Number(checkpoint.osm_scanned_ways || 0),
+      osmComplete: checkpoint.osm_complete === true,
+      finalComplete: checkpoint.final_complete === true
+    })).digest('hex') : null;
+    const existingCheckpoint = await readCheckpoint();
+    const completedBundles = new Set(existingCheckpoint?.plateau_completed || []);
+    const nextBundle = (discovery.plateauBundles || []).find((bundle) => !completedBundles.has(bundle.cityCode));
+    const stage = existingCheckpoint?.abr_complete !== true ? 'abr'
+      : nextBundle ? 'plateau'
+        : existingCheckpoint?.osm_complete !== true ? 'osm' : 'final';
     const osmFile = discovery.osmUrl
-      ? resolve(options.cacheDir, 'raw', `${osmIdentity}-${basename(new URL(discovery.osmUrl).pathname)}`) : null;
-    const postalFile = resolve(options.cacheDir, 'raw', `${postalIdentity}-${basename(new URL(discovery.postalUrl).pathname)}`);
-    const plateauArtifacts = (discovery.plateauBundles || []).map((bundle) => {
-      const directory = resolve(options.cacheDir, 'raw', `plateau-${bundle.cityCode}-${bundle.year}`);
-      return {
-        ...bundle,
-        directory,
-        bundleFile: resolve(options.cacheDir, 'raw', basename(new URL(bundle.url).pathname)),
-        parquetFile: resolve(directory, 'buildings.parquet')
-      };
-    });
+      ? resolve(stateDirectory, basename(new URL(discovery.osmUrl).pathname)) : null;
+    const postalFile = resolve(stateDirectory, basename(new URL(discovery.postalUrl).pathname));
+    const plateauArtifact = nextBundle ? {
+      ...nextBundle,
+      directory: resolve(stateDirectory, `plateau-${nextBundle.cityCode}-${nextBundle.year}`),
+      bundleFile: resolve(stateDirectory, basename(new URL(nextBundle.url).pathname))
+    } : null;
+    if (plateauArtifact) plateauArtifact.parquetFile = resolve(plateauArtifact.directory, 'buildings.parquet');
     const temporary = `${output}.${process.pid}.tmp`;
     await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
-    await Promise.all([
-      ...(osmFile ? [verifiedGeofabrikDownload(discovery.osmUrl, osmFile, {
-        expectedBytes: discovery.osmBytes, maxBytes: options.maxBytes
-      })] : []),
-      sharedDownload(discovery.postalUrl, postalFile, {
-        expectedBytes: discovery.postalBytes, maxBytes: Math.min(options.maxBytes, 100 * 1024 * 1024)
-      }),
-      ...plateauArtifacts.map(async (bundle) => {
-        await sharedDownload(bundle.url, bundle.bundleFile, {
-          expectedBytes: bundle.bytes, maxBytes: Math.min(options.maxBytes, bundle.bytes + 1024 * 1024)
-        });
-        const checksum = await sha256File(bundle.bundleFile);
-        if (checksum !== bundle.sha256) {
-          await rm(bundle.bundleFile, { force: true });
-          throw new Error(`Japan PLATEAU checksum mismatch: ${bundle.cityCode}`);
-        }
-        await rm(bundle.directory, { recursive: true, force: true });
-        await mkdir(bundle.directory, { recursive: true });
-        await runExecute({
-          file: 'tar',
-          args: ['-xf', bundle.bundleFile, '-C', bundle.directory, 'buildings.parquet'],
-          phase: `extract:${shard.id}:${bundle.cityCode}`
-        });
-      })
-    ]);
-    if (osmFile && options.sharedRaw && !options.retainRaw) sharedRawFiles.add(osmFile);
-    const [osmChecksum, postalChecksum] = await Promise.all([
-      osmFile ? sha256File(osmFile) : null,
-      sha256File(postalFile)
-    ]);
+    let completed = false;
+    let unitCompleted = false;
+    const currentAssets = () => stage === 'abr' ? [postalFile]
+      : stage === 'plateau' ? [postalFile, plateauArtifact.bundleFile, plateauArtifact.parquetFile]
+        : stage === 'osm' && osmFile ? [osmFile] : [];
+    const progressToken = async (checkpoint) => {
+      const assetBytes = [];
+      for (const file of currentAssets()) {
+        const completeBytes = await stat(file).then((value) => value.size).catch(() => 0);
+        const partialBytes = await stat(`${file}.part`).then((value) => value.size).catch(() => 0);
+        assetBytes.push([basename(file), completeBytes, partialBytes]);
+      }
+      if (!checkpoint && !assetBytes.some(([, completeBytes, partialBytes]) => completeBytes || partialBytes)) return null;
+      return createHash('sha256').update(JSON.stringify({
+        checkpoint: checkpointToken(checkpoint), stage, assetBytes
+      })).digest('hex');
+    };
+    const initialProgressToken = await progressToken(existingCheckpoint);
     try {
-      await runExecute({
-        file: pythonBin,
-        args: [japanAbrExporter,
-          '--abr-url', shard.source.dataUrl,
-          '--postal-zip', postalFile,
+      try {
+        if (stage === 'abr' || stage === 'plateau') {
+          await sharedDownload(discovery.postalUrl, postalFile, {
+            expectedBytes: discovery.postalBytes, maxBytes: Math.min(options.maxBytes, 100 * 1024 * 1024),
+            retainPartial: true
+          });
+        }
+        if (stage === 'plateau') {
+          await sharedDownload(plateauArtifact.url, plateauArtifact.bundleFile, {
+            expectedBytes: plateauArtifact.bytes,
+            maxBytes: Math.min(options.maxBytes, plateauArtifact.bytes + 1024 * 1024), retainPartial: true
+          });
+          const checksum = await sha256File(plateauArtifact.bundleFile);
+          if (checksum !== plateauArtifact.sha256) {
+            await rm(plateauArtifact.bundleFile, { force: true });
+            throw new Error(`Japan PLATEAU checksum mismatch: ${plateauArtifact.cityCode}`);
+          }
+          try {
+            await stat(plateauArtifact.parquetFile);
+          } catch {
+            await rm(plateauArtifact.directory, { recursive: true, force: true });
+            await mkdir(plateauArtifact.directory, { recursive: true });
+            await runExecute({
+              file: 'tar',
+              args: ['-xf', plateauArtifact.bundleFile, '-C', plateauArtifact.directory, 'buildings.parquet'],
+              phase: `extract:${shard.id}:${plateauArtifact.cityCode}`
+            });
+          }
+        }
+        if (stage === 'osm' && osmFile) {
+          await verifiedGeofabrikDownload(discovery.osmUrl, osmFile, {
+            expectedBytes: discovery.osmBytes, maxBytes: options.maxBytes, retainPartial: true
+          });
+        }
+        await runExecute({
+          file: pythonBin,
+          args: [japanAbrExporter,
+          '--stage', stage,
           '--output', temporary,
+          '--checkpoint-file', checkpointFile,
+          '--store-file', storeFile,
           '--max-records', String(sourceMaximum),
+          '--candidate-budget', String(candidateBudget),
           '--per-locality', String(options.perLocality),
-          ...(osmFile ? ['--osm-pbf', osmFile] : []),
-          ...(shard.source.landLot === true ? ['--land-lot'] : []),
-          ...plateauArtifacts.flatMap((bundle) => ['--plateau-city-code', bundle.cityCode]),
-          ...plateauArtifacts.flatMap((bundle) => ['--plateau-parquet', bundle.parquetFile])],
-        phase: `materialize:${shard.id}`
-      });
+          ...(['abr', 'plateau'].includes(stage) ? ['--abr-url', shard.source.dataUrl, '--postal-zip', postalFile] : []),
+          ...(stage === 'abr' ? (discovery.plateauBundles || []).flatMap((bundle) => ['--plateau-city-code', bundle.cityCode]) : []),
+          ...(stage === 'plateau' ? ['--plateau-city-code', plateauArtifact.cityCode,
+            '--plateau-parquet', plateauArtifact.parquetFile] : []),
+          ...(stage === 'plateau' && shard.source.landLot === true ? ['--land-lot'] : []),
+          ...(stage === 'osm' && osmFile ? ['--osm-pbf', osmFile] : [])],
+          phase: `materialize:${shard.id}`
+        });
+        unitCompleted = true;
+      } catch (error) {
+        const checkpoint = await readCheckpoint();
+        const token = await progressToken(checkpoint);
+        if (token && token !== initialProgressToken && checkpoint?.final_complete !== true) {
+          throw Object.assign(new Error(`Japan materialization checkpoint saved after ${error.message}`, { cause: error }), {
+            code: 'SOURCE_PARTIAL', sourceComplete: false, checkpointToken: token,
+            failurePhase: `materialize:${shard.id}`, stderr: error.stderr || null
+          });
+        }
+        throw error;
+      }
+      if (stage !== 'final') {
+        const checkpoint = await readCheckpoint();
+        return {
+          file: null, format: 'checkpoint', cacheBytes: 0, checksum: null, cacheHit: false,
+          sourceComplete: false, checkpointToken: await progressToken(checkpoint), checkpointStage: stage
+        };
+      }
       await rename(temporary, output);
+      completed = true;
     } finally {
-      await rm(temporary, { force: true });
-      if (osmFile && !options.retainRaw && !options.sharedRaw) await rm(osmFile, { force: true });
-      if (!options.retainRaw) await rm(postalFile, { force: true });
-      if (!options.retainRaw) {
-        await Promise.all(plateauArtifacts.flatMap((bundle) => [
-          rm(bundle.bundleFile, { force: true }), rm(bundle.directory, { recursive: true, force: true })
-        ]));
+      await Promise.all([rm(temporary, { force: true }), rm(`${temporary}.locations.idx`, { force: true })]);
+      if (unitCompleted && stage === 'plateau' && !options.retainRaw) {
+        await Promise.all([
+          rm(plateauArtifact.bundleFile, { force: true }),
+          rm(plateauArtifact.directory, { recursive: true, force: true })
+        ]);
+      }
+      if (unitCompleted && stage === 'osm' && osmFile && !options.retainRaw) await rm(osmFile, { force: true });
+      if (completed && !options.retainRaw) {
+        await rm(stateDirectory, { recursive: true, force: true });
       }
     }
     const size = (await stat(output)).size;
     const sourceChecksum = createHash('sha256')
-      .update([osmChecksum, postalChecksum, ...plateauArtifacts.map((bundle) => bundle.sha256)].filter(Boolean).join('\u001f'))
+      .update([discovery.osmMd5 || discovery.osmVersion, discovery.postalVersion,
+        ...(discovery.plateauBundles || []).map((bundle) => bundle.sha256)].filter(Boolean).join('\u001f'))
       .digest('hex');
     return {
       file: output,
@@ -1613,6 +1832,7 @@ export const createSourceAdapters = ({
     const propertyFile = resolve(rawRoot, `${shard.id}-${version}-property.csv`);
     const buildingFile = resolve(rawRoot, `${shard.id}-${version}-buildings.geojson`);
     const onemapCacheFile = resolve(rawRoot, `${shard.id}-onemap-cache.jsonl`);
+    const stateFile = resolve(rawRoot, `${shard.id}-${version}-state.json`);
     const temporary = `${output}.${process.pid}.tmp`;
     await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
     await Promise.all([
@@ -1627,21 +1847,56 @@ export const createSourceAdapters = ({
       sha256File(propertyFile), sha256File(buildingFile)
     ]);
     let completed = false;
+    const bridge = createOneMapCredentialBridge({ brokerClient: credentialBrokerClient, signal });
     try {
+      const bridgeUrl = await bridge.start();
+      const childEnvironment = { ...environment };
+      for (const name of Object.keys(childEnvironment)) {
+        if (/^ONEMAP_ACCESS_TOKEN(?:_\d+)?$/u.test(name) || /^CREDENTIAL_BROKER_/u.test(name)) {
+          delete childEnvironment[name];
+        }
+      }
       await runExecute({
         file: pythonBin,
         args: [singaporeHdbExporter,
           '--property-csv', propertyFile,
           '--building-geojson', buildingFile,
+          '--onemap-bridge-url', bridgeUrl,
           '--onemap-cache', onemapCacheFile,
+          '--state-output', stateFile,
           '--output', temporary,
           '--max-records', String(options.maxRecords),
           '--per-locality', String(options.perLocality)],
+        env: childEnvironment,
         phase: `materialize:${shard.id}`
       });
+      let state;
+      try { state = JSON.parse(await readFile(stateFile, 'utf8')); }
+      catch (cause) {
+        throw Object.assign(new Error('Singapore HDB exporter did not write valid state', { cause }), {
+          code: 'SOURCE_STATE_INVALID'
+        });
+      }
+      if (state?.version !== 1 || typeof state.source_complete !== 'boolean') {
+        throw Object.assign(new Error('Singapore HDB exporter state is invalid'), { code: 'SOURCE_STATE_INVALID' });
+      }
+      if (!state.source_complete) {
+        return {
+          file: null,
+          format: 'checkpoint',
+          cacheBytes: 0,
+          checksum: null,
+          cacheHit: false,
+          sourceComplete: false,
+          checkpointToken: state.checkpoint_token || null,
+          checkpointStage: state.temporary_failure || 'onemap',
+          nextAttemptAt: state.next_available_at || null
+        };
+      }
       await rename(temporary, output);
       completed = true;
     } finally {
+      await bridge.close();
       await rm(temporary, { force: true });
       if (!options.retainRaw && completed) {
         await Promise.all([rm(propertyFile, { force: true }), rm(buildingFile, { force: true })]);
@@ -1663,31 +1918,64 @@ export const createSourceAdapters = ({
   const materializeKoreaKapt = async (shard, discovery, options) => {
     const version = safeVersion(discovery.version);
     const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
-    const output = resolve(options.cacheDir, 'normalized',
-      `${shard.id}-${version}-${normalizedCachePolicyIdentity(sourceMaximum, options.perLocality)}.jsonl`);
-    try {
-      const size = (await stat(output)).size;
-      return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
-    } catch {}
-    const cacheFile = resolve(options.cacheDir, 'raw', `${shard.id}-postcode-cache.jsonl`);
-    const temporary = `${output}.${process.pid}.tmp`;
-    await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
-    await mkdir(resolve(options.cacheDir, 'raw'), { recursive: true });
+    const policyIdentity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
+    const identity = `${shard.id}-${version}-${policyIdentity}`;
+    const normalizedRoot = resolve(options.cacheDir, 'normalized');
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const validCounts = (state) => {
+      const counts = ['candidate_count', 'resolved_count', 'publishable_count', 'selected_count']
+        .map((name) => Number(state[name]));
+      return counts.every((value) => Number.isSafeInteger(value) && value >= 0)
+        && counts[3] <= counts[2] && counts[2] <= counts[1] && counts[1] <= counts[0];
+    };
+    const validState = (state) => state?.version === 1
+      && state.catalog_fingerprint === discovery.sourceChecksum
+      && typeof state.source_complete === 'boolean'
+      && validCounts(state)
+      && (state.source_complete ? state.resolved_count === state.candidate_count
+        : typeof state.checkpoint_token === 'string' && state.checkpoint_token.length > 0);
+    const manifests = await readdir(rawRoot).catch(() => []);
+    for (const name of manifests.filter((entry) => entry.startsWith(`${identity}-manifest-`) && entry.endsWith('.json')).sort()) {
+      try {
+        const manifest = JSON.parse(await readFile(resolve(rawRoot, name), 'utf8'));
+        if (!validState(manifest) || manifest.source_complete !== true || manifest.policy_identity !== policyIdentity
+            || basename(manifest.output_file) !== manifest.output_file
+            || !manifest.output_file.startsWith(`${identity}-output-`)
+            || !/^[a-f\d]{64}$/u.test(String(manifest.output_checksum || ''))
+            || !Number.isSafeInteger(manifest.output_bytes) || manifest.output_bytes < 0) continue;
+        const output = resolve(normalizedRoot, manifest.output_file);
+        const size = (await stat(output)).size;
+        if (size !== manifest.output_bytes || await sha256File(output) !== manifest.output_checksum) continue;
+        return {
+          file: output, format: 'overture-jsonl', cacheBytes: size, checksum: manifest.output_checksum,
+          sourceChecksum: discovery.sourceChecksum, cacheHit: true, sourceComplete: true, checkpointToken: null
+        };
+      } catch {}
+    }
+    const cacheFile = resolve(rawRoot, `${shard.id}-postcode-cache.jsonl`);
+    const temporary = resolve(normalizedRoot, `${identity}.${process.pid}.tmp`);
+    const temporaryState = resolve(rawRoot, `${identity}-state.${process.pid}.tmp`);
+    await Promise.all([
+      mkdir(normalizedRoot, { recursive: true }),
+      mkdir(rawRoot, { recursive: true })
+    ]);
     const bridge = createGeoapifyCredentialBridge({
       credentialPool: geoapifyCredentialPool,
+      brokerClient: credentialBrokerClient,
       fetchImpl: apiFetchImpl,
       signal
     });
     const bridgeUrl = await bridge.start();
     const childEnvironment = Object.fromEntries(Object.entries(environment).filter(([name]) =>
       name !== 'GEOAPIFY_API_KEY' && !/^GEOAPIFY_API_KEY_\d+$/u.test(name)));
-    let completed = false;
     try {
       try {
         await runExecute({
           file: pythonBin,
           args: [koreaKaptExporter,
             '--output', temporary,
+            '--catalog-input', discovery.catalogFile,
+            '--state-output', temporaryState,
             '--max-records', String(sourceMaximum),
             '--per-locality', String(options.perLocality),
             '--postcode-cache', cacheFile,
@@ -1701,22 +1989,62 @@ export const createSourceAdapters = ({
         });
         throw error;
       }
-      await rename(temporary, output);
-      completed = true;
+      const state = JSON.parse(await readFile(temporaryState, 'utf8'));
+      if (!validState(state)) {
+        throw Object.assign(new Error('K-apt exporter returned invalid resume state'), {
+          code: 'SOURCE_METADATA_INVALID'
+        });
+      }
+      const outputBytes = (await stat(temporary)).size;
+      if (!state.source_complete) {
+        return {
+          file: null,
+          format: 'checkpoint',
+          cacheBytes: 0,
+          checksum: null,
+          sourceChecksum: discovery.sourceChecksum,
+          cacheHit: false,
+          sourceComplete: false,
+          checkpointToken: state.checkpoint_token || null,
+          checkpointStage: bridge.unavailable() ? 'credential' : 'materialize',
+          nextAttemptAt: bridge.nextAvailableAt?.() || null
+        };
+      }
+      const outputChecksum = await sha256File(temporary);
+      const outputFile = `${identity}-output-${outputChecksum.slice(0, 24)}-${process.pid}-${Date.now()}.jsonl`;
+      const output = resolve(normalizedRoot, outputFile);
+      await publishContentAddressed(temporary, output, outputChecksum);
+      const manifest = {
+        ...state,
+        policy_identity: policyIdentity,
+        output_file: outputFile,
+        output_checksum: outputChecksum,
+        output_bytes: outputBytes
+      };
+      const manifestPayload = `${JSON.stringify(manifest)}\n`;
+      const manifestChecksum = createHash('sha256').update(manifestPayload).digest('hex');
+      const temporaryManifest = resolve(rawRoot, `${identity}-manifest.${process.pid}.tmp`);
+      const manifestFile = resolve(rawRoot, `${identity}-manifest-${manifestChecksum.slice(0, 24)}.json`);
+      try {
+        await writeFile(temporaryManifest, manifestPayload, 'utf8');
+        await publishContentAddressed(temporaryManifest, manifestFile, manifestChecksum);
+      } finally {
+        await rm(temporaryManifest, { force: true });
+      }
+      return {
+        file: output,
+        format: 'overture-jsonl',
+        cacheBytes: outputBytes,
+        checksum: outputChecksum,
+        sourceChecksum: discovery.sourceChecksum,
+        cacheHit: false,
+        sourceComplete: true,
+        checkpointToken: null
+      };
     } finally {
       await bridge.close();
-      await rm(temporary, { force: true });
+      await Promise.all([rm(temporary, { force: true }), rm(temporaryState, { force: true })]);
     }
-    const size = (await stat(output)).size;
-    return {
-      file: output,
-      format: 'overture-jsonl',
-      cacheBytes: size,
-      checksum: await sha256File(output),
-      sourceChecksum: createHash('sha256').update(`${discovery.version}\u001f${size}`).digest('hex'),
-      cacheHit: false,
-      completed
-    };
   };
 
   const materializeOpenAddresses = async (shard, discovery, options) => {
@@ -2074,6 +2402,7 @@ export const createSourceAdapters = ({
     try {
       await rename(temporary, destination);
     } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
       if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
       await rm(destination, { force: true });
       await rename(temporary, destination);
@@ -2149,7 +2478,7 @@ export const createSourceAdapters = ({
       try {
         const size = (await stat(output)).size;
         if (await hasMinimumLines(output, Number(shard.qualityGate?.minimumRecords || 1))) {
-          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true, sourceComplete: true };
         }
         await rm(output, { force: true });
         checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
@@ -2160,7 +2489,7 @@ export const createSourceAdapters = ({
           await copyFile(candidates, temporary);
           await replaceFile(temporary, output);
           const size = (await stat(output)).size;
-          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true, sourceComplete: true };
         } catch {
           checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
         }
@@ -2204,6 +2533,7 @@ export const createSourceAdapters = ({
     let pageCompleted = true;
     try {
       while (!checkpoint.complete && acceptedCount < sourceMaximum && requests < requestBudget) {
+        signal?.throwIfAborted();
         if (checkpoint.seedIndex >= seeds.length) {
           checkpoint.complete = true;
           break;
@@ -2224,6 +2554,7 @@ export const createSourceAdapters = ({
         const locations = Array.isArray(nearbyPayload?.suggestedLocations) ? nearbyPayload.suggestedLocations : [];
         pageCompleted = true;
         for (const nearby of locations) {
+          signal?.throwIfAborted();
           const eLoc = String(nearby.eLoc || nearby.eloc || '').trim();
           if (!eLoc || processed.has(eLoc)) continue;
           if (requests >= requestBudget) { pageCompleted = false; break; }
@@ -2254,8 +2585,18 @@ export const createSourceAdapters = ({
     } finally {
       await persistCheckpoint();
     }
+    const checkpointToken = createHash('sha256').update(JSON.stringify({
+      seedIndex: checkpoint.seedIndex,
+      categoryIndex: checkpoint.categoryIndex,
+      page: checkpoint.page,
+      processedCount: processed.size,
+      acceptedCount,
+      complete: checkpoint.complete
+    })).digest('hex');
     if (!acceptedCount) throw Object.assign(new Error('Mappls discovery checkpoint advanced without a publishable record'), {
-      code: checkpoint.complete ? 'SOURCE_QUALITY_FAILED' : 'SOURCE_PARTIAL'
+      code: checkpoint.complete ? 'SOURCE_QUALITY_FAILED' : 'SOURCE_PARTIAL',
+      sourceComplete: checkpoint.complete,
+      checkpointToken
     });
     const temporary = `${output}.${process.pid}.tmp`;
     await copyFile(candidates, temporary);
@@ -2267,7 +2608,9 @@ export const createSourceAdapters = ({
       cacheBytes: size,
       checksum: await sha256File(output),
       sourceChecksum: await sha256File(candidates),
-      cacheHit: false
+      cacheHit: false,
+      sourceComplete: checkpoint.complete,
+      checkpointToken
     };
   };
 
@@ -2331,7 +2674,7 @@ export const createSourceAdapters = ({
     const maximumPages = Math.max(1, Math.min(10,
       Number.parseInt(environment.PDOK_BAG_MAX_PAGES_PER_SEED || '2', 10) || 2));
     const pageLimit = Math.max(1, Math.min(250,
-      Math.floor(sourceMaximum / Math.max(1, seeds.length * maximumPages)) || 1));
+      Math.ceil(sourceMaximum / Math.max(1, seeds.length * maximumPages)) || 1));
     const apiOrigin = new URL(discovery.dataUrl).origin;
     const apiPath = new URL(discovery.dataUrl).pathname;
     const checkedItemsUrl = (value) => {
@@ -2346,6 +2689,7 @@ export const createSourceAdapters = ({
     let requests = 0;
     try {
       while (!checkpoint.complete && acceptedCount < sourceMaximum && requests < requestBudget) {
+        signal?.throwIfAborted();
         if (checkpoint.seedIndex >= seeds.length) {
           checkpoint.complete = true;
           break;
@@ -2371,7 +2715,7 @@ export const createSourceAdapters = ({
         ].map((value) => value.toFixed(6)).join(','));
         const requestUrl = checkedItemsUrl(checkpoint.round > 0
           ? checkpoint.nextBySeed[String(seedIndex)] : firstPage);
-        const payload = await jsonRequest(requestUrl, fetchImpl);
+        const payload = await fetchJson(requestUrl);
         requests += 1;
         if (payload?.type !== 'FeatureCollection' || !Array.isArray(payload.features)) {
           throw Object.assign(new Error('PDOK BAG returned an invalid FeatureCollection'), {
@@ -2380,6 +2724,7 @@ export const createSourceAdapters = ({
         }
         const records = [];
         for (const feature of payload.features) {
+          signal?.throwIfAborted();
           const record = normalizePdokBagFeature(feature, shard.source.name);
           if (!record || processed.has(record.source_record_id)) continue;
           processed.add(record.source_record_id);
@@ -2407,7 +2752,15 @@ export const createSourceAdapters = ({
       await persistCheckpoint();
     }
     if (!checkpoint.complete) throw Object.assign(new Error('PDOK BAG initialization paused at its request budget'), {
-      code: 'SOURCE_PARTIAL'
+      code: 'SOURCE_PARTIAL',
+      sourceComplete: false,
+      checkpointToken: createHash('sha256').update(JSON.stringify({
+        seedIndex: checkpoint.seedIndex,
+        round: checkpoint.round,
+        nextBySeed: checkpoint.nextBySeed,
+        processedCount: processed.size,
+        acceptedCount
+      })).digest('hex')
     });
     if (acceptedCount < minimumRecords) throw Object.assign(
       new Error(`PDOK BAG produced ${acceptedCount} qualifying records; ${minimumRecords} required`), {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const MAX_INLINE_RATE_LIMIT_WAIT_MS = 5_000;
 
 const retryAtFrom = (response) => {
   const value = response.headers.get('retry-after');
@@ -34,15 +35,17 @@ const send = (response, status, body) => {
 
 export const createGeoapifyCredentialBridge = ({
   credentialPool,
+  brokerClient,
   fetchImpl = fetch,
   signal,
   wait = delay,
   pacingAttempts = 20
 }) => {
-  if (!credentialPool) throw new Error('A Geoapify credential pool is required');
+  if (!credentialPool && !brokerClient) throw new Error('A Geoapify credential pool or broker client is required');
   const token = randomUUID();
   let acquireTail = Promise.resolve();
   let unavailable = false;
+  let nextAvailableAt = null;
   const inFlight = new Set();
 
   const acquire = async (options) => {
@@ -63,11 +66,43 @@ export const createGeoapifyCredentialBridge = ({
   };
 
   const reverseGeocode = async ({ latitude, longitude }) => {
+    if (brokerClient) {
+      for (let attempt = 0; attempt < pacingAttempts; attempt += 1) {
+        try {
+          const body = await brokerClient.request('geoapify.reverse', { latitude, longitude, language: 'ko' }, { signal });
+          unavailable = false;
+          nextAvailableAt = null;
+          return body;
+        } catch (error) {
+          const retryAt = Date.parse(error?.retryAt || '');
+          const waitMilliseconds = retryAt - Date.now();
+          if (error?.code === 'SOURCE_RATE_LIMITED' && attempt + 1 < pacingAttempts
+              && Number.isFinite(waitMilliseconds) && waitMilliseconds >= 0
+              && waitMilliseconds <= MAX_INLINE_RATE_LIMIT_WAIT_MS) {
+            await wait(Math.max(1, waitMilliseconds + 25));
+            continue;
+          }
+          unavailable = ['SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED',
+            'BROKER_TEST_POLICY_BLOCKED', 'BROKER_UNAVAILABLE'].includes(error?.code);
+          nextAvailableAt = unavailable && error?.retryAt ? error.retryAt : null;
+          if (unavailable) throw Object.assign(new Error('No Geoapify credential is currently available', { cause: error }), {
+            code: 'SOURCE_CREDENTIAL_UNAVAILABLE', retryAt: nextAvailableAt
+          });
+          throw error;
+        }
+      }
+    }
     const attempted = new Set();
-    for (let pacingAttempt = 0; pacingAttempt < pacingAttempts; pacingAttempt += 1) {
+    let availabilityAttempts = 0;
+    while (availabilityAttempts < pacingAttempts) {
       const credential = await acquire({ excludeIds: attempted });
       if (!credential) {
-        if (pacingAttempt + 1 < pacingAttempts) await wait(100);
+        if (inFlight.size) {
+          await wait(100);
+          continue;
+        }
+        availabilityAttempts += 1;
+        if (availabilityAttempts < pacingAttempts) await wait(100);
         continue;
       }
       attempted.add(credential.id);
@@ -116,12 +151,14 @@ export const createGeoapifyCredentialBridge = ({
         }
         await credentialPool.report(credential.id, 'success');
         unavailable = false;
+        nextAvailableAt = null;
         return body;
       } finally {
         inFlight.delete(credential.id);
       }
     }
     unavailable = true;
+    nextAvailableAt = null;
     throw Object.assign(new Error('No Geoapify credential is currently available'), {
       code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
     });
@@ -144,7 +181,8 @@ export const createGeoapifyCredentialBridge = ({
       send(response, 200, await reverseGeocode({ latitude, longitude }));
     } catch (error) {
       send(response, error?.code === 'SOURCE_CREDENTIAL_UNAVAILABLE' ? 503 : Number(error?.status || 502), {
-        code: error?.code || 'GEOAPIFY_BRIDGE_FAILED'
+        code: error?.code || 'GEOAPIFY_BRIDGE_FAILED',
+        ...(error?.retryAt ? { nextAvailableAt: error.retryAt } : {})
       });
     }
   });
@@ -162,6 +200,7 @@ export const createGeoapifyCredentialBridge = ({
       if (!server.listening) return;
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },
-    unavailable: () => unavailable
+    unavailable: () => unavailable,
+    nextAvailableAt: () => nextAvailableAt
   };
 };

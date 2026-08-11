@@ -33,6 +33,21 @@ class GeocodeUnavailable(RuntimeError):
     pass
 
 
+class BridgeUnavailable(RuntimeError):
+    pass
+
+
+MAX_CONSECUTIVE_BRIDGE_FAILURES = 12
+
+
+class PostcodeBatch(list):
+    def __init__(self, values, source_complete=True, checkpoint_token=None, resolved_count=0):
+        super().__init__(values)
+        self.source_complete = source_complete
+        self.checkpoint_token = checkpoint_token
+        self.resolved_count = resolved_count
+
+
 @contextmanager
 def exclusive_cache_lock(path):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -213,6 +228,77 @@ def balanced(values):
         queues = remaining
 
 
+def candidate_fingerprint(value):
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def collect_candidates(rows, transformer):
+    candidates = {}
+    for row in rows:
+        value = candidate(row, transformer)
+        if value:
+            candidates[value["source_record_id"]] = value
+    return [candidates[key] for key in sorted(candidates)]
+
+
+def load_catalog(path):
+    candidates = {}
+    with open(path, encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+                record_id = clean(value["source_record_id"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"Invalid K-apt catalog record at line {line_number}") from error
+            if not record_id or not isinstance(value, dict):
+                raise RuntimeError(f"Invalid K-apt catalog record at line {line_number}")
+            candidates[record_id] = value
+    return [candidates[key] for key in sorted(candidates)]
+
+
+def write_json_atomic(path, value):
+    absolute = os.path.abspath(path)
+    os.makedirs(os.path.dirname(absolute), exist_ok=True)
+    temporary = f"{absolute}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as output:
+            json.dump(value, output, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            output.write("\n")
+        os.replace(temporary, absolute)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def write_catalog(path, values):
+    absolute = os.path.abspath(path)
+    os.makedirs(os.path.dirname(absolute), exist_ok=True)
+    temporary = f"{absolute}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as output:
+            for value in sorted(values, key=lambda item: item["source_record_id"]):
+                output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        os.replace(temporary, absolute)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def catalog_fingerprint(values):
+    digest = hashlib.sha256()
+    for value in sorted(values, key=lambda item: item["source_record_id"]):
+        digest.update(json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def load_postcode_cache(path):
     cached = {}
     if not path or not os.path.exists(path):
@@ -226,6 +312,8 @@ def load_postcode_cache(path):
                 cached[record_id] = {
                     "postcode": value.get("postcode"),
                     "requested_on": requested_on,
+                    "result": value.get("result"),
+                    "candidate_fingerprint": value.get("candidate_fingerprint"),
                 }
             except (KeyError, TypeError, ValueError):
                 continue
@@ -256,23 +344,37 @@ def reverse_postcode(value, bridge_url):
         headers={"Accept": "application/json", "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.load(response)
-        result = (payload.get("results") or [{}])[0]
-        postcode = clean(result.get("postcode"))
-        hierarchy = value["address_levels"]
-        return postcode if POSTCODE_PATTERN.fullmatch(postcode) and geoapify_matches_hierarchy(result, hierarchy) else None
-    except urllib.error.HTTPError as error:
+    for attempt in range(3):
         try:
-            payload = json.load(error)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            payload = {}
-        if payload.get("code") == "SOURCE_CREDENTIAL_UNAVAILABLE":
-            raise GeocodeUnavailable("No Geoapify credential is currently available") from None
-        raise RuntimeError(f"Geoapify bridge stopped with HTTP {error.code}") from None
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        raise GeocodeUnavailable("Geoapify bridge is temporarily unavailable") from None
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+            result = (payload.get("results") or [{}])[0]
+            postcode = clean(result.get("postcode"))
+            hierarchy = value["address_levels"]
+            return postcode if POSTCODE_PATTERN.fullmatch(postcode) and geoapify_matches_hierarchy(result, hierarchy) else None
+        except urllib.error.HTTPError as error:
+            try:
+                payload = json.load(error)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = {}
+            if payload.get("code") == "SOURCE_CREDENTIAL_UNAVAILABLE":
+                raise GeocodeUnavailable("No Geoapify credential is currently available") from None
+            raise RuntimeError(f"Geoapify bridge stopped with HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            if attempt == 2:
+                raise BridgeUnavailable("Geoapify bridge is temporarily unavailable") from None
+            time.sleep(0.25 * (2 ** attempt))
+
+
+def postcode_checkpoint_token(values, cached):
+    state = []
+    for value in values:
+        entry = cached.get(value["source_record_id"]) or {}
+        state.append((value["source_record_id"], entry.get("result"), entry.get("postcode"),
+                      entry.get("candidate_fingerprint")))
+    return hashlib.sha256(json.dumps(
+        sorted(set(state)), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
 
 
 def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
@@ -290,14 +392,24 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
             for value in values:
                 record_id = value["source_record_id"]
                 cached_entry = cached.get(record_id) or {}
+                fingerprint = candidate_fingerprint(value)
+                validated_postcode = (POSTCODE_PATTERN.fullmatch(clean(cached_entry.get("postcode")))
+                                      and cached_entry.get("candidate_fingerprint") == fingerprint)
+                definitive_negative = (cached_entry.get("result") == "not_found"
+                                       and cached_entry.get("candidate_fingerprint") == fingerprint)
+                legacy_daily_negative = (not cached_entry.get("candidate_fingerprint")
+                                         and cached_entry.get("requested_on") == today)
                 should_request = (record_id not in scheduled
-                                  and not POSTCODE_PATTERN.fullmatch(clean(cached_entry.get("postcode")))
-                                  and cached_entry.get("requested_on") != today)
+                                  and not validated_postcode
+                                  and not definitive_negative
+                                  and not legacy_daily_negative)
                 if should_request:
                     pending.append(value)
                     scheduled.add(record_id)
             unavailable = False
             fatal_error = None
+            consecutive_bridge_failures = 0
+            transient_failures = 0
             last_started = 0.0
             cursor = 0
             active = {}
@@ -317,30 +429,68 @@ def add_postcodes(values, cache_path, minimum_interval, concurrency=3):
                         postcode = None
                         try:
                             postcode = future.result()
+                            consecutive_bridge_failures = 0
                         except GeocodeUnavailable as error:
                             unavailable = True
                             fatal_error = fatal_error or error
+                        except BridgeUnavailable as error:
+                            transient_failures += 1
+                            consecutive_bridge_failures += 1
+                            if consecutive_bridge_failures >= MAX_CONSECUTIVE_BRIDGE_FAILURES:
+                                unavailable = True
+                                fatal_error = fatal_error or error
                         except RuntimeError as error:
                             unavailable = True
                             fatal_error = fatal_error or error
                         record_id = value["source_record_id"]
                         if future.exception() is not None:
                             continue
-                        cached[record_id] = {"postcode": postcode, "requested_on": today}
+                        fingerprint = candidate_fingerprint(value)
+                        result = "found" if POSTCODE_PATTERN.fullmatch(clean(postcode)) else "not_found"
+                        cached[record_id] = {
+                            "postcode": postcode,
+                            "requested_on": today,
+                            "result": result,
+                            "candidate_fingerprint": fingerprint,
+                        }
                         cache_output.write(json.dumps({
                             "id": record_id,
                             "postcode": postcode,
                             "requested_on": today,
                             "event": "result",
+                            "result": result,
+                            "candidate_fingerprint": fingerprint,
                         }, ensure_ascii=False, separators=(",", ":")) + "\n")
                         cache_output.flush()
-            if fatal_error:
+            resolved = 0
+            for value in {item["source_record_id"]: item for item in values}.values():
+                entry = cached.get(value["source_record_id"]) or {}
+                if ((POSTCODE_PATTERN.fullmatch(clean(entry.get("postcode")))
+                     and entry.get("candidate_fingerprint") == candidate_fingerprint(value))
+                        or (entry.get("result") == "not_found"
+                            and entry.get("candidate_fingerprint") == candidate_fingerprint(value))):
+                    resolved += 1
+            if fatal_error and not isinstance(fatal_error, GeocodeUnavailable):
                 raise fatal_error
+            if fatal_error and not resolved:
+                fatal_error.checkpoint_token = postcode_checkpoint_token(values, cached)
+                fatal_error.resolved_count = resolved
+                raise fatal_error
+        output = []
         for value in values:
             record_id = value["source_record_id"]
-            postcode = (cached.get(record_id) or {}).get("postcode")
-            if POSTCODE_PATTERN.fullmatch(clean(postcode)):
-                yield {**value, "postcode": postcode}
+            entry = cached.get(record_id) or {}
+            postcode = entry.get("postcode")
+            if (POSTCODE_PATTERN.fullmatch(clean(postcode))
+                    and entry.get("candidate_fingerprint") == candidate_fingerprint(value)):
+                output.append({**value, "postcode": postcode})
+        source_complete = resolved == len({value["source_record_id"] for value in values})
+        if transient_failures:
+            source_complete = False
+        checkpoint_token = None
+        if not source_complete:
+            checkpoint_token = postcode_checkpoint_token(values, cached)
+        return PostcodeBatch(output, source_complete, checkpoint_token, resolved)
 
 
 def select(values, maximum, per_locality):
@@ -359,35 +509,54 @@ def select(values, maximum, per_locality):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--postcode-cache", required=True)
-    parser.add_argument("--max-records", type=int, required=True)
-    parser.add_argument("--per-locality", type=int, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--output")
+    mode.add_argument("--catalog-output")
+    parser.add_argument("--catalog-input")
+    parser.add_argument("--state-output")
+    parser.add_argument("--postcode-cache")
+    parser.add_argument("--max-records", type=int)
+    parser.add_argument("--per-locality", type=int)
     parser.add_argument("--minimum-interval", type=float, default=0.25)
     parser.add_argument("--geocode-concurrency", type=int, default=3)
     args = parser.parse_args()
-    if (args.max_records < 1 or args.per_locality < 1 or args.minimum_interval < 0
-            or not 1 <= args.geocode_concurrency <= 4):
+    if (args.minimum_interval < 0 or not 1 <= args.geocode_concurrency <= 4):
         raise ValueError("Invalid export limits")
-    transformer = Transformer.from_crs("EPSG:5174", "EPSG:4326", always_xy=True)
-    candidates = []
-    seen = set()
-    for row in KaptClient().apartments():
-        value = candidate(row, transformer)
-        if not value or value["source_record_id"] in seen:
-            continue
-        seen.add(value["source_record_id"])
-        candidates.append(value)
+    if args.catalog_output and args.catalog_input:
+        parser.error("--catalog-output cannot be combined with --catalog-input")
+    if args.output and (not args.postcode_cache or not args.max_records or not args.per_locality):
+        parser.error("full export requires --postcode-cache, --max-records, and --per-locality")
+    if args.output and (args.max_records < 1 or args.per_locality < 1):
+        raise ValueError("Invalid export limits")
+    if args.catalog_input:
+        candidates = load_catalog(args.catalog_input)
+    else:
+        transformer = Transformer.from_crs("EPSG:5174", "EPSG:4326", always_xy=True)
+        candidates = collect_candidates(KaptClient().apartments(), transformer)
+    if args.catalog_output:
+        write_catalog(args.catalog_output, candidates)
+        return
     ordered = balanced(candidates)
-    selected = select(
-        add_postcodes(ordered, args.postcode_cache, args.minimum_interval, args.geocode_concurrency),
-        args.max_records,
-        args.per_locality,
-    )
+    try:
+        batch = add_postcodes(ordered, args.postcode_cache, args.minimum_interval, args.geocode_concurrency)
+    except GeocodeUnavailable as error:
+        batch = PostcodeBatch([], False, error.checkpoint_token, error.resolved_count)
+    selected = select(batch, args.max_records, args.per_locality)
     with open(args.output, "w", encoding="utf-8", newline="\n") as output:
         for value in selected:
             value.pop("source_rank", None)
             output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+    if args.state_output:
+        write_json_atomic(args.state_output, {
+            "version": 1,
+            "source_complete": batch.source_complete,
+            "checkpoint_token": batch.checkpoint_token,
+            "catalog_fingerprint": catalog_fingerprint(candidates),
+            "candidate_count": len(candidates),
+            "resolved_count": batch.resolved_count,
+            "publishable_count": len(batch),
+            "selected_count": len(selected),
+        })
 
 
 if __name__ == "__main__":

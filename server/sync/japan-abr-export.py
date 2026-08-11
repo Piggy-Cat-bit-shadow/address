@@ -1,23 +1,26 @@
 import argparse
 import csv
 import hashlib
+import heapq
 import io
 import json
 import math
+import os
 import pathlib
 import re
 import sys
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import osmium
 from osmium.filter import KeyFilter
-from shapely import from_wkb, intersects_xy, prepare
+from shapely import Polygon, STRtree, from_wkb, points
 
 
 RESIDENTIAL_BUILDINGS = {
@@ -32,6 +35,39 @@ CHOME_PATTERN = re.compile(r"^(.+?)([一二三四五六七八九十百〇0-9]+�
 POSTAL_RANGE_PATTERN = re.compile(r"(\d+)[~〜～-](\d+)丁目")
 POSTAL_SINGLE_PATTERN = re.compile(r"(?:^|[^\d])(\d+)丁目")
 USER_AGENT = "address-sync/1.0 (+https://github.com/daimon3332/address)"
+DUCKDB_MEMORY_LIMIT = os.environ.get("JAPAN_DUCKDB_MEMORY_LIMIT", "4GB").strip() or "4GB"
+LAND_LOT_INSERT_BATCH = 500
+ABR_INSERT_BATCH = 2_000
+
+
+def load_checkpoint(path):
+    checkpoint_path = pathlib.Path(path)
+    if not checkpoint_path.exists():
+        return {"version": 1, "abr_complete": False, "abr_completed_cities": [], "plateau_completed": [],
+                "osm_scanned_ways": 0, "osm_complete": False, "final_complete": False}
+    with checkpoint_path.open(encoding="utf-8") as source:
+        checkpoint = json.load(source)
+    if checkpoint.get("version") != 1:
+        raise RuntimeError("Japan materialization checkpoint version is unsupported")
+    checkpoint.setdefault("plateau_completed", [])
+    checkpoint.setdefault("plateau_building_completed", [])
+    checkpoint.setdefault("abr_completed_cities", [])
+    checkpoint.setdefault("osm_scanned_ways", 0)
+    checkpoint.setdefault("osm_complete", False)
+    checkpoint.setdefault("final_complete", False)
+    return checkpoint
+
+
+def write_checkpoint(path, checkpoint):
+    checkpoint_path = pathlib.Path(path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = checkpoint_path.with_name(f"{checkpoint_path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        json.dump(checkpoint, output, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(checkpoint_path)
 
 
 def clean(value):
@@ -151,6 +187,8 @@ def parse_city(args):
         return []
     text = payload.decode("utf-8")
     candidates = []
+    seen_source_ids = set()
+    candidate_index = 0
     for section in text.split("住居表示,")[1:]:
         lines = section.splitlines()
         if len(lines) < 3:
@@ -179,7 +217,7 @@ def parse_city(args):
                 continue
             number = f"{block}番{residence}{f'-{residence2}' if residence2 else ''}号"
             identity = f"{prefecture}\x1f{city}\x1f{street}\x1f{number}\x1f{longitude:.9f}\x1f{latitude:.9f}"
-            candidates.append({
+            candidate = {
                 "source_id": f"abr/{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:32]}",
                 "prefecture": prefecture,
                 "city": city,
@@ -190,9 +228,23 @@ def parse_city(args):
                 "longitude": longitude,
                 "latitude": latitude,
                 "source_rank": rank(identity)
-            })
-    candidates.sort(key=lambda candidate: (candidate["source_rank"], candidate["source_id"]))
-    return candidates if city_limit is None else candidates[:city_limit]
+            }
+            if candidate["source_id"] in seen_source_ids:
+                continue
+            seen_source_ids.add(candidate["source_id"])
+            if city_limit is None:
+                candidates.append(candidate)
+                continue
+            candidate_index += 1
+            source_order = int(candidate["source_id"].split("/", 1)[1], 16)
+            item = (-candidate["source_rank"], -source_order, -candidate_index, candidate)
+            if len(candidates) < city_limit:
+                heapq.heappush(candidates, item)
+            elif item > candidates[0]:
+                heapq.heapreplace(candidates, item)
+    selected = candidates if city_limit is None else [item[3] for item in candidates]
+    selected.sort(key=lambda candidate: (candidate["source_rank"], candidate["source_id"]))
+    return selected
 
 
 def lot_city_matches(plateau_code, city_code, has_ward):
@@ -258,9 +310,23 @@ def parse_lot_sections(text, prefecture, city, postcodes):
     return lots
 
 
+def duckdb_spill_path(path):
+    if str(path) == ":memory:":
+        return pathlib.Path(tempfile.gettempdir()) / f"japan-{os.getpid()}.duckdb.tmp"
+    return pathlib.Path(f"{path}.tmp")
+
+
+def configure_duckdb(connection, spill_path):
+    connection.execute("SET threads=2")
+    connection.execute("SET preserve_insertion_order=false")
+    connection.execute("SET memory_limit=?", [DUCKDB_MEMORY_LIMIT])
+    connection.execute("SET temp_directory=?", [str(spill_path)])
+
+
 def iter_parquet_buildings(parquet_path):
     database = duckdb.connect()
     try:
+        configure_duckdb(database, duckdb_spill_path(parquet_path))
         cursor = database.execute(
             "SELECT building_uid,usage,geometry FROM read_parquet(?)", [str(parquet_path)]
         )
@@ -270,57 +336,81 @@ def iter_parquet_buildings(parquet_path):
         database.close()
 
 
-def match_city_lots(connection, lots, buildings, claimed_buildings):
-    store = duckdb.connect()
-    store.execute("""
-        CREATE TABLE lots (
-            id INTEGER PRIMARY KEY, residential_matches INTEGER NOT NULL DEFAULT 0,
-            blocked_matches INTEGER NOT NULL DEFAULT 0, building_uid TEXT,
-            longitude REAL NOT NULL, latitude REAL NOT NULL
-        )
-    """)
+def insert_land_lot_candidates(connection, candidates, batch_size=LAND_LOT_INSERT_BATCH, progress=None):
+    existing_ids = {row[0] for row in connection.execute(
+        "SELECT source_id FROM candidates WHERE source_id LIKE 'chiban/%'"
+    ).fetchall()}
+    seen_ids = set(existing_ids)
+    pending = []
+    for candidate in candidates:
+        if candidate[0] in seen_ids:
+            continue
+        seen_ids.add(candidate[0])
+        pending.append(candidate)
+    committed_count = len(existing_ids)
+    for offset in range(0, len(pending), batch_size):
+        batch = pending[offset:offset + batch_size]
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.executemany("""
+                INSERT INTO candidates(source_id,prefecture,city,district,street,number,postcode,
+                  longitude,latitude,source_rank,building_id,building_class,building_name)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, batch)
+            connection.commit()
+            committed_count += len(batch)
+            if progress:
+                progress(committed_count)
+        except Exception:
+            connection.rollback()
+            raise
+    return len(pending)
+
+
+def match_city_lots(connection, lots, buildings, claimed_buildings, progress=None):
     counts = {"lots": len(lots), "in_unique_building": 0, "building_unique": 0,
               "unclaimed": 0, "inserted": 0}
+    if not lots:
+        return counts
+    tree = STRtree(points([lot["longitude"] for lot in lots], [lot["latitude"] for lot in lots]))
+    residential_matches = [0] * len(lots)
+    blocked_matches = [0] * len(lots)
+    lot_buildings = [None] * len(lots)
     building_lot_counts = {}
-    try:
-        for index, lot in enumerate(lots):
-            store.execute("INSERT INTO lots(id,longitude,latitude) VALUES (?,?,?)", (
-                index, lot["longitude"], lot["latitude"]
-            ))
-        for building_uid, usage, geometry_wkb in buildings:
-            if not building_uid or not geometry_wkb:
-                continue
-            try:
-                geometry = from_wkb(geometry_wkb)
-            except Exception:
-                continue
-            if geometry.is_empty:
-                continue
-            minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = geometry.bounds
-            rows = store.execute("""
-                SELECT id FROM lots WHERE longitude BETWEEN ? AND ? AND latitude BETWEEN ? AND ?
-            """, (minimum_longitude, maximum_longitude, minimum_latitude, maximum_latitude)).fetchall()
-            if not rows:
-                continue
-            residential = clean(usage).casefold() == "residential"
-            prepare(geometry)
-            for (lot_id,) in rows:
-                lot = lots[lot_id]
-                if not intersects_xy(geometry, lot["longitude"], lot["latitude"]):
-                    continue
-                if residential:
-                    building_lot_counts[building_uid] = building_lot_counts.get(building_uid, 0) + 1
-                    store.execute(
-                        "UPDATE lots SET residential_matches=residential_matches+1, building_uid=? WHERE id=?",
-                        (building_uid, lot_id))
-                else:
-                    store.execute("UPDATE lots SET blocked_matches=blocked_matches+1 WHERE id=?", (lot_id,))
-        matched = store.execute(
-            "SELECT id, building_uid FROM lots WHERE residential_matches=1 AND blocked_matches=0 ORDER BY id"
-        ).fetchall()
-    finally:
-        store.close()
+    batch = []
+
+    def match_batch():
+        if not batch:
+            return
+        geometries = [entry[2] for entry in batch]
+        pairs = tree.query(geometries, predicate="contains")
+        for building_index, lot_id in zip(pairs[0].tolist(), pairs[1].tolist()):
+            building_uid, residential, _ = batch[building_index]
+            if residential:
+                residential_matches[lot_id] += 1
+                lot_buildings[lot_id] = building_uid
+                building_lot_counts[building_uid] = building_lot_counts.get(building_uid, 0) + 1
+            else:
+                blocked_matches[lot_id] += 1
+        batch.clear()
+
+    for building_uid, usage, geometry_wkb in buildings:
+        if not building_uid or not geometry_wkb:
+            continue
+        try:
+            geometry = from_wkb(geometry_wkb)
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        batch.append((building_uid, clean(usage).casefold() == "residential", geometry))
+        if len(batch) >= 5_000:
+            match_batch()
+    match_batch()
+    matched = [(lot_id, lot_buildings[lot_id]) for lot_id in range(len(lots))
+               if residential_matches[lot_id] == 1 and blocked_matches[lot_id] == 0]
     counts["in_unique_building"] = len(matched)
+    candidates = []
     for lot_id, building_uid in matched:
         if building_lot_counts.get(building_uid) != 1:
             continue
@@ -333,18 +423,16 @@ def match_city_lots(connection, lots, buildings, claimed_buildings):
         if not lot["postcode"]:
             continue
         claimed_buildings.add(building_id)
-        connection.execute("""
-            INSERT INTO candidates(source_id,prefecture,city,district,street,number,postcode,
-              longitude,latitude,source_rank,building_id,building_class,building_name)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (lot["source_id"], lot["prefecture"], lot["city"], lot["district"], lot["street"],
-              lot["number"], lot["postcode"], lot["longitude"], lot["latitude"], lot["source_rank"],
-              building_id, "residential", ""))
-        counts["inserted"] += 1
+        candidates.append((
+            lot["source_id"], lot["prefecture"], lot["city"], lot["district"], lot["street"],
+            lot["number"], lot["postcode"], lot["longitude"], lot["latitude"], lot["source_rank"],
+            building_id, "residential", ""
+        ))
+    counts["inserted"] = insert_land_lot_candidates(connection, candidates, progress=progress)
     return counts
 
 
-def export_land_lots(connection, cities, plateau_bundles, base_url, postcodes):
+def export_land_lots(connection, cities, plateau_bundles, base_url, postcodes, progress=None):
     claimed = {row[0] for row in connection.execute(
         "SELECT DISTINCT building_id FROM candidates WHERE building_id LIKE 'plateau/%'"
     ).fetchall()}
@@ -362,7 +450,7 @@ def export_land_lots(connection, cities, plateau_bundles, base_url, postcodes):
             lots.extend(parse_lot_sections(payload.decode("utf-8"), prefecture, city, postcodes))
         if not lots:
             continue
-        counts = match_city_lots(connection, lots, iter_parquet_buildings(parquet_path), claimed)
+        counts = match_city_lots(connection, lots, iter_parquet_buildings(parquet_path), claimed, progress)
         inserted_total += counts["inserted"]
         print("Japan land-lot " + city_code + ": "
               + " ".join(f"{key}={value}" for key, value in counts.items()),
@@ -370,25 +458,12 @@ def export_land_lots(connection, cities, plateau_bundles, base_url, postcodes):
     return inserted_total
 
 
-def point_in_ring(longitude, latitude, ring):
-    inside = False
-    previous = ring[-1]
-    for current in ring:
-        x1, y1 = previous
-        x2, y2 = current
-        if (y1 > latitude) != (y2 > latitude):
-            crossing = (x2 - x1) * (latitude - y1) / (y2 - y1) + x1
-            if longitude < crossing:
-                inside = not inside
-        previous = current
-    return inside
-
-
 def open_candidate_store(path):
     connection = duckdb.connect(str(path))
-    connection.execute("CREATE SEQUENCE candidate_id START 1")
+    configure_duckdb(connection, duckdb_spill_path(path))
+    connection.execute("CREATE SEQUENCE IF NOT EXISTS candidate_id START 1")
     connection.execute("""
-        CREATE TABLE candidates (
+        CREATE TABLE IF NOT EXISTS candidates (
             id BIGINT PRIMARY KEY DEFAULT nextval('candidate_id'), source_id TEXT NOT NULL, prefecture TEXT NOT NULL,
             city TEXT NOT NULL, district TEXT NOT NULL, street TEXT NOT NULL,
             number TEXT NOT NULL, postcode TEXT NOT NULL, longitude REAL NOT NULL,
@@ -396,22 +471,72 @@ def open_candidate_store(path):
             building_id TEXT, building_class TEXT, building_name TEXT
         )
     """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS abr_city_commits (
+            city_key TEXT PRIMARY KEY
+        )
+    """)
     return connection
 
 
 def insert_candidates(connection, candidates):
-    rows = [tuple(candidate[field] for field in (
+    fields = (
         "source_id", "prefecture", "city", "district", "street", "number", "postcode",
         "longitude", "latitude", "source_rank"
-    )) for candidate in candidates]
-    for offset in range(0, len(rows), 5000):
+    )
+    for offset in range(0, len(candidates), ABR_INSERT_BATCH):
         connection.executemany("""
             INSERT INTO candidates(source_id,prefecture,city,district,street,number,postcode,
               longitude,latitude,source_rank) VALUES (?,?,?,?,?,?,?,?,?,?)
-        """, rows[offset:offset + 5000])
+        """, [tuple(candidate[field] for field in fields)
+              for candidate in candidates[offset:offset + ABR_INSERT_BATCH]])
 
 
-def match_residential_buildings(connection, osm_path, output_path):
+def insert_city_candidates(connection, identity, candidates):
+    prefecture, city, city_code = identity
+    connection.execute(
+        "DELETE FROM candidates WHERE source_id LIKE 'abr/%' AND prefecture=? AND city=?",
+        [prefecture, city]
+    )
+    insert_candidates(connection, candidates)
+    connection.execute(
+        "INSERT INTO abr_city_commits(city_key) VALUES (?) ON CONFLICT(city_key) DO NOTHING",
+        [f"{city_code}\x1f{prefecture}\x1f{city}"]
+    )
+
+
+class CandidatePointIndex:
+    def __init__(self, connection):
+        rows = connection.execute(
+            "SELECT id,longitude,latitude FROM candidates WHERE building_id IS NULL ORDER BY id"
+        ).fetchall()
+        self.candidate_ids = [row[0] for row in rows]
+        self.tree = STRtree(points([row[1] for row in rows], [row[2] for row in rows])) if rows else None
+        self.claimed = set()
+
+    def match(self, geometries, building_ids, building_classes, building_names=None):
+        if self.tree is None or not geometries:
+            return []
+        pairs = self.tree.query(geometries, predicate="contains")
+        selected = {}
+        for geometry_index, candidate_index in zip(pairs[0].tolist(), pairs[1].tolist()):
+            if candidate_index in self.claimed:
+                continue
+            current = selected.get(candidate_index)
+            if current is None or geometry_index < current:
+                selected[candidate_index] = geometry_index
+        updates = []
+        for candidate_index, geometry_index in sorted(selected.items()):
+            self.claimed.add(candidate_index)
+            updates.append((
+                building_ids[geometry_index], building_classes[geometry_index],
+                building_names[geometry_index] if building_names else "",
+                self.candidate_ids[candidate_index]
+            ))
+        return updates
+
+
+def match_residential_buildings(connection, osm_path, output_path, start_way=0, progress=None):
     location_index = None
     location_storage = "flex_mem"
     if pathlib.Path(osm_path).stat().st_size >= 1_000_000_000:
@@ -421,15 +546,34 @@ def match_residential_buildings(connection, osm_path, output_path):
     processor = osmium.FileProcessor(osm_path).with_locations(location_storage).with_filter(
         KeyFilter("building", *NON_RESIDENTIAL_KEYS)
     )
+    candidate_index = CandidatePointIndex(connection)
     processed_ways = 0
+    matched_total = 0
+    pending_updates = []
+
+    def flush(scanned_ways=None):
+        nonlocal matched_total, pending_updates
+        if pending_updates:
+            connection.executemany(
+                "UPDATE candidates SET building_id=?,building_class=?,building_name=? "
+                "WHERE id=? AND building_id IS NULL", pending_updates)
+            matched_total += len(pending_updates)
+            pending_updates = []
+        connection.commit()
+        if progress:
+            progress(processed_ways if scanned_ways is None else scanned_ways, matched_total)
+
     try:
         for entity in processor:
             if not entity.is_way():
                 continue
             processed_ways += 1
-            if processed_ways % 1_000_000 == 0:
-                matched = connection.execute("SELECT COUNT(*) FROM candidates WHERE building_id IS NOT NULL").fetchone()[0]
-                print(f"Japan OSM residential scan: {processed_ways} ways, {matched} matches", file=sys.stderr, flush=True)
+            if processed_ways <= start_way:
+                continue
+            if processed_ways % 100_000 == 0:
+                flush(processed_ways - 1)
+                print(f"Japan OSM residential scan: {processed_ways} ways, {matched_total} new matches",
+                      file=sys.stderr, flush=True)
             tags = {tag.k: tag.v for tag in entity.tags}
             building_class = clean(tags.get("building")).casefold()
             if building_class not in RESIDENTIAL_BUILDINGS or any(clean(tags.get(key)) not in {"", "no", "none"}
@@ -441,67 +585,64 @@ def match_residential_buildings(connection, osm_path, output_path):
             ring = [(location.lon, location.lat) for location in locations]
             if ring[0] != ring[-1]:
                 continue
-            longitudes = [point[0] for point in ring]
-            latitudes = [point[1] for point in ring]
-            rows = connection.execute("""
-                SELECT id,longitude,latitude FROM candidates
-                WHERE building_id IS NULL AND longitude BETWEEN ? AND ? AND latitude BETWEEN ? AND ?
-            """, (min(longitudes), max(longitudes), min(latitudes), max(latitudes))).fetchall()
-            for candidate_id, longitude, latitude in rows:
-                if point_in_ring(longitude, latitude, ring):
-                    connection.execute(
-                        "UPDATE candidates SET building_id=?,building_class=?,building_name=? "
-                        "WHERE id=? AND building_id IS NULL",
-                        (f"way/{entity.id}", building_class, clean(tags.get("name")), candidate_id)
-                    )
+            geometry = Polygon(ring)
+            if geometry.is_empty or not geometry.is_valid:
+                continue
+            pending_updates.extend(candidate_index.match(
+                [geometry], [f"way/{entity.id}"], [building_class], [clean(tags.get("name"))]
+            ))
+            if len(pending_updates) >= 5_000:
+                flush()
+        flush()
     finally:
         del processor
         if location_index:
             location_index.unlink(missing_ok=True)
+    return matched_total, processed_ways
 
 
-def match_plateau_buildings(connection, parquet_paths):
+def match_plateau_buildings(connection, parquet_path, start_offset=0, progress=None):
+    candidate_index = CandidatePointIndex(connection)
     matched_total = 0
-    for parquet_path in parquet_paths:
-        database = duckdb.connect()
-        try:
-            cursor = database.execute(
-                "SELECT building_uid,geometry FROM read_parquet(?) WHERE usage='residential'",
-                [str(parquet_path)]
+    processed = start_offset
+    database = duckdb.connect()
+    try:
+        configure_duckdb(database, duckdb_spill_path(parquet_path))
+        cursor = database.execute(
+            "SELECT building_uid,geometry FROM read_parquet(?) WHERE usage='residential' OFFSET ?",
+            [str(parquet_path), start_offset]
+        )
+        while rows := cursor.fetchmany(10_000):
+            geometries = []
+            building_ids = []
+            for building_uid, geometry_wkb in rows:
+                processed += 1
+                if not building_uid or not geometry_wkb:
+                    continue
+                try:
+                    geometry = from_wkb(geometry_wkb)
+                except Exception:
+                    continue
+                if geometry.is_empty:
+                    continue
+                geometries.append(geometry)
+                building_ids.append(f"plateau/{building_uid}")
+            updates = candidate_index.match(
+                geometries, building_ids, ["residential"] * len(building_ids)
             )
-            processed = 0
-            while rows := cursor.fetchmany(2_000):
-                for building_uid, geometry_wkb in rows:
-                    processed += 1
-                    if not building_uid or not geometry_wkb:
-                        continue
-                    try:
-                        geometry = from_wkb(geometry_wkb)
-                    except Exception:
-                        continue
-                    if geometry.is_empty:
-                        continue
-                    minimum_longitude, minimum_latitude, maximum_longitude, maximum_latitude = geometry.bounds
-                    candidates = connection.execute("""
-                        SELECT id,longitude,latitude FROM candidates
-                        WHERE building_id IS NULL AND longitude BETWEEN ? AND ? AND latitude BETWEEN ? AND ?
-                    """, (minimum_longitude, maximum_longitude, minimum_latitude, maximum_latitude)).fetchall()
-                    if not candidates:
-                        continue
-                    prepare(geometry)
-                    for candidate_id, longitude, latitude in candidates:
-                        if intersects_xy(geometry, longitude, latitude):
-                            connection.execute(
-                                "UPDATE candidates SET building_id=?,building_class=? "
-                                "WHERE id=? AND building_id IS NULL",
-                                (f"plateau/{building_uid}", "residential", candidate_id)
-                            )
-                            matched_total += 1
-                if processed % 100_000 == 0:
-                    print(f"Japan PLATEAU residential scan: {processed} buildings, {matched_total} matches",
-                          file=sys.stderr, flush=True)
-        finally:
-            database.close()
+            if updates:
+                connection.executemany(
+                    "UPDATE candidates SET building_id=?,building_class=?,building_name=? "
+                    "WHERE id=? AND building_id IS NULL", updates)
+                matched_total += len(updates)
+            connection.commit()
+            if progress:
+                progress(processed, matched_total)
+            if processed % 100_000 < len(rows):
+                print(f"Japan PLATEAU residential scan: {processed} buildings, {matched_total} matches",
+                      file=sys.stderr, flush=True)
+    finally:
+        database.close()
     return matched_total
 
 
@@ -568,97 +709,191 @@ def write_records(path, rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--abr-url", required=True)
-    parser.add_argument("--postal-zip", required=True)
+    parser.add_argument("--stage", required=True, choices=("abr", "plateau", "osm", "final"))
+    parser.add_argument("--abr-url")
+    parser.add_argument("--postal-zip")
     parser.add_argument("--osm-pbf")
     parser.add_argument("--plateau-parquet", action="append", default=[])
     parser.add_argument("--plateau-city-code", action="append", default=[])
     parser.add_argument("--land-lot", action="store_true")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--checkpoint-file", required=True)
+    parser.add_argument("--store-file", required=True)
     parser.add_argument("--max-records", required=True, type=int)
+    parser.add_argument("--candidate-budget", required=True, type=int)
     parser.add_argument("--per-locality", required=True, type=int)
-    parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
-    root = request_json(args.abr_url)
-    if not isinstance(root, dict) or not isinstance(root.get("data"), list):
-        raise RuntimeError("Geolonia ABR root response is invalid")
-    cities = [(prefecture["pref"], city_name(city), str(city.get("code", "")).zfill(6)[:5],
-               bool(clean(city.get("ward"))))
-              for prefecture in root["data"] for city in prefecture.get("cities", [])]
-    cities = [entry for entry in cities if entry[0] and entry[1]]
-    if not cities:
-        raise RuntimeError("Geolonia ABR root contains no cities")
-    postcodes = load_postcodes(args.postal_zip)
-    city_limit = max(200, math.ceil(args.max_records * 48 / len(cities)))
-    base_url = f"{args.abr_url.rsplit('/', 1)[0]}/ja"
-    store_path = pathlib.Path(args.output).with_suffix(pathlib.Path(args.output).suffix + ".candidates.duckdb")
-    store_path.unlink(missing_ok=True)
+    checkpoint = load_checkpoint(args.checkpoint_file)
+    store_path = pathlib.Path(args.store_file)
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    if checkpoint.get("abr_complete") and not store_path.exists():
+        checkpoint = {"version": 1, "abr_complete": False, "abr_completed_cities": [], "plateau_completed": [],
+                      "plateau_building_completed": [],
+                      "osm_scanned_ways": 0, "osm_complete": False, "final_complete": False}
+        write_checkpoint(args.checkpoint_file, checkpoint)
+    if args.stage != "abr" and not checkpoint.get("abr_complete"):
+        raise RuntimeError("Japan ABR candidate checkpoint must complete before this stage")
     connection = open_candidate_store(store_path)
     try:
-        connection.execute("BEGIN TRANSACTION")
-        with ThreadPoolExecutor(max_workers=max(1, min(args.workers, 32))) as executor:
-            priority_codes = set(args.plateau_city_code)
-            city_iterator = iter(cities)
-            worker_count = max(1, min(args.workers, 32))
-            pending = set()
-
-            def submit_next():
-                try:
-                    prefecture, city, code, has_ward = next(city_iterator)
-                except StopIteration:
-                    return False
-                pending.add(executor.submit(parse_city, (
-                    base_url, prefecture, city, postcodes,
-                    None if any(lot_city_matches(priority, code, has_ward) for priority in priority_codes)
-                    else city_limit
-                )))
-                return True
-
-            for _ in range(min(len(cities), worker_count * 2)):
-                submit_next()
-            failures = 0
-            completed = 0
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    completed += 1
-                    try:
-                        insert_candidates(connection, future.result())
-                    except RuntimeError as error:
-                        failures += 1
-                        print(str(error), file=sys.stderr, flush=True)
-                    submit_next()
-                    if completed % 100 == 0 or completed == len(cities):
-                        count = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-                        print(f"Japan ABR preparation: {completed}/{len(cities)} cities, {count} candidates",
-                              file=sys.stderr, flush=True)
-            if failures > max(10, math.floor(len(cities) * 0.1)):
-                raise RuntimeError(f"ABR city preparation failed for {failures}/{len(cities)} cities")
-        connection.commit()
+        if args.stage == "abr" and not checkpoint.get("abr_complete"):
+            if not args.abr_url or not args.postal_zip:
+                raise RuntimeError("Japan ABR preparation requires the ABR catalog and Japan Post archive")
+            root = request_json(args.abr_url)
+            if not isinstance(root, dict) or not isinstance(root.get("data"), list):
+                raise RuntimeError("Geolonia ABR root response is invalid")
+            cities = [(prefecture["pref"], city_name(city), str(city.get("code", "")).zfill(6)[:5],
+                       bool(clean(city.get("ward"))))
+                      for prefecture in root["data"] for city in prefecture.get("cities", [])]
+            cities = [entry for entry in cities if entry[0] and entry[1]]
+            if not cities:
+                raise RuntimeError("Geolonia ABR root contains no cities")
+            postcodes = load_postcodes(args.postal_zip)
+            city_limit = max(200, math.ceil(args.candidate_budget * 48 / len(cities)))
+            base_url = f"{args.abr_url.rsplit('/', 1)[0]}/ja"
+            committed_cities = {row[0] for row in connection.execute(
+                "SELECT city_key FROM abr_city_commits"
+            ).fetchall()}
+            completed_cities = set(checkpoint.get("abr_completed_cities", [])) | committed_cities
+            attempts = {key: int(value) for key, value in checkpoint.get("abr_attempts", {}).items()}
+            pending_cities = [entry for entry in cities
+                              if f"{entry[2]}\x1f{entry[0]}\x1f{entry[1]}" not in completed_cities]
+            terminal = [entry for entry in pending_cities
+                        if attempts.get(f"{entry[2]}\x1f{entry[0]}\x1f{entry[1]}", 0) >= 3]
+            if terminal:
+                raise RuntimeError(f"ABR city preparation stopped after three failures for {len(terminal)} cities")
+            worker_count = max(1, min(args.workers, 8))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                priority_codes = set(args.plateau_city_code)
+                for offset in range(0, len(pending_cities), worker_count):
+                    batch = pending_cities[offset:offset + worker_count]
+                    futures = []
+                    for prefecture, city, code, has_ward in batch:
+                        futures.append((
+                            (prefecture, city, code),
+                            executor.submit(parse_city, (
+                                base_url, prefecture, city, postcodes,
+                                max(city_limit, 2_000)
+                                if any(lot_city_matches(priority, code, has_ward) for priority in priority_codes)
+                                else city_limit
+                            ))
+                        ))
+                    results = []
+                    for (prefecture, city, code), future in futures:
+                        identity = f"{code}\x1f{prefecture}\x1f{city}"
+                        try:
+                            results.append((identity, future.result()))
+                            attempts.pop(identity, None)
+                        except RuntimeError as error:
+                            attempts[identity] = attempts.get(identity, 0) + 1
+                            print(str(error), file=sys.stderr, flush=True)
+                    for identity, result in results:
+                        city_code, prefecture, city = identity.split("\x1f")
+                        insert_city_candidates(connection, (prefecture, city, city_code), result)
+                        completed_cities.add(identity)
+                        checkpoint["abr_completed_cities"] = sorted(completed_cities)
+                        checkpoint["abr_attempts"] = attempts
+                        checkpoint["candidate_count"] = connection.execute(
+                            "SELECT COUNT(*) FROM candidates"
+                        ).fetchone()[0]
+                        write_checkpoint(args.checkpoint_file, checkpoint)
+                    print(f"Japan ABR preparation: {len(completed_cities)}/{len(cities)} cities, "
+                          f"{checkpoint['candidate_count']} candidates", file=sys.stderr, flush=True)
+            if len(completed_cities) != len(cities):
+                return
+            checkpoint["abr_complete"] = True
+            write_checkpoint(args.checkpoint_file, checkpoint)
+            return
         candidate_count = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         if candidate_count == 0:
             raise RuntimeError("ABR and Japan Post produced no strict address candidates")
-        connection.execute("CREATE INDEX candidate_coordinates ON candidates(longitude, latitude)")
-        if args.plateau_parquet:
-            matched = match_plateau_buildings(connection, args.plateau_parquet)
-            print(f"Japan PLATEAU residential matches: {matched}", file=sys.stderr, flush=True)
-        if args.osm_pbf:
-            match_residential_buildings(connection, args.osm_pbf, args.output)
-        connection.commit()
-        if args.land_lot and args.plateau_parquet:
-            land_lot_bundles = list(zip(args.plateau_city_code, args.plateau_parquet))
-            inserted = export_land_lots(connection, cities, land_lot_bundles, base_url, postcodes)
-            print(f"Japan land-lot residential additions: {inserted}", file=sys.stderr, flush=True)
-            connection.commit()
+        if args.stage == "plateau":
+            if len(args.plateau_city_code) != 1 or len(args.plateau_parquet) != 1:
+                raise RuntimeError("Japan PLATEAU stage requires exactly one city bundle")
+            city_code, parquet_path = args.plateau_city_code[0], args.plateau_parquet[0]
+            completed_bundles = set(checkpoint.get("plateau_completed", []))
+            if city_code in completed_bundles:
+                return
+            if not args.abr_url or not args.postal_zip:
+                raise RuntimeError("Japan land-lot matching requires the ABR catalog and Japan Post archive")
+            root = request_json(args.abr_url)
+            cities = [(prefecture["pref"], city_name(city), str(city.get("code", "")).zfill(6)[:5],
+                       bool(clean(city.get("ward"))))
+                      for prefecture in root.get("data", []) for city in prefecture.get("cities", [])]
+            postcodes = load_postcodes(args.postal_zip)
+            base_url = f"{args.abr_url.rsplit('/', 1)[0]}/ja"
+            plateau_offsets = checkpoint.setdefault("plateau_offsets", {})
+            plateau_match_totals = checkpoint.setdefault("plateau_match_totals", {})
+            plateau_building_completed = set(checkpoint.setdefault("plateau_building_completed", []))
+            start_offset = int(plateau_offsets.get(city_code, 0))
+            match_base = int(plateau_match_totals.get(city_code, 0))
+
+            def plateau_progress(offset, matched_count):
+                plateau_offsets[city_code] = offset
+                plateau_match_totals[city_code] = match_base + matched_count
+                write_checkpoint(args.checkpoint_file, checkpoint)
+
+            def land_lot_progress(candidate_count):
+                checkpoint["land_lot_candidate_count"] = candidate_count
+                write_checkpoint(args.checkpoint_file, checkpoint)
+
+            matched = 0
+            if city_code not in plateau_building_completed:
+                matched = match_plateau_buildings(
+                    connection, parquet_path, start_offset, plateau_progress
+                )
+                plateau_match_totals[city_code] = match_base + matched
+                plateau_building_completed.add(city_code)
+                checkpoint["plateau_building_completed"] = sorted(plateau_building_completed)
+                checkpoint["plateau_matches"] = sum(int(value) for value in plateau_match_totals.values())
+                write_checkpoint(args.checkpoint_file, checkpoint)
+            inserted = export_land_lots(
+                connection, cities, [(city_code, parquet_path)], base_url, postcodes, land_lot_progress
+            ) if args.land_lot else 0
+            completed_bundles.add(city_code)
+            checkpoint["plateau_completed"] = sorted(completed_bundles)
+            plateau_match_totals[city_code] = match_base + matched
+            checkpoint["plateau_matches"] = sum(int(value) for value in plateau_match_totals.values())
+            checkpoint["land_lot_additions"] = connection.execute(
+                "SELECT COUNT(*) FROM candidates WHERE source_id LIKE 'chiban/%'"
+            ).fetchone()[0]
+            write_checkpoint(args.checkpoint_file, checkpoint)
+            print(f"Japan PLATEAU {city_code}: residential={matched} land_lot={inserted}",
+                  file=sys.stderr, flush=True)
+            return
+        if args.stage == "osm" and args.osm_pbf and not checkpoint.get("osm_complete"):
+            osm_match_base = int(checkpoint.get("osm_matches", 0))
+
+            def osm_progress(scanned_ways, matched):
+                checkpoint["osm_scanned_ways"] = scanned_ways
+                checkpoint["osm_matches"] = osm_match_base + matched
+                write_checkpoint(args.checkpoint_file, checkpoint)
+
+            matched, scanned = match_residential_buildings(
+                connection, args.osm_pbf, args.output,
+                int(checkpoint.get("osm_scanned_ways", 0)), osm_progress
+            )
+            checkpoint["osm_scanned_ways"] = scanned
+            checkpoint["osm_matches"] = osm_match_base + matched
+            checkpoint["osm_complete"] = True
+            write_checkpoint(args.checkpoint_file, checkpoint)
+            return
+        if args.stage == "osm" and not args.osm_pbf:
+            checkpoint["osm_complete"] = True
+            write_checkpoint(args.checkpoint_file, checkpoint)
+            return
+        if args.stage != "final":
+            return
         selected = select_records(connection, args.max_records, args.per_locality)
         if not selected:
             raise RuntimeError("No ABR address point intersects an explicit residential building")
         write_records(args.output, selected)
+        checkpoint["final_complete"] = True
+        checkpoint["selected_count"] = len(selected)
+        write_checkpoint(args.checkpoint_file, checkpoint)
     finally:
         connection.close()
-        store_path.unlink(missing_ok=True)
-        pathlib.Path(f"{store_path}.wal").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

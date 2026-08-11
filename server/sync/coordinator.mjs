@@ -9,7 +9,21 @@ class SyncBusyError extends Error {
   }
 }
 
-const errorText = (error) => error instanceof Error ? error.message : String(error);
+const sanitizeErrorText = (value) => String(value || '')
+  .replace(/((?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s&]+/giu, '$1[REDACTED]')
+  .replace(/(authorization:\s*bearer\s+)[^\s]+/giu, '$1[REDACTED]');
+const boundedErrorText = (value, limit = 1000) => {
+  const sanitized = sanitizeErrorText(value);
+  if (sanitized.length <= limit) return sanitized;
+  const marker = '\n...[truncated]...\n';
+  const headLength = Math.min(240, limit - marker.length);
+  return `${sanitized.slice(0, headLength)}${marker}${sanitized.slice(-(limit - headLength - marker.length))}`;
+};
+const errorText = (error) => boundedErrorText(error instanceof Error ? error.message : String(error));
+const sanitizeOutcomes = (outcomes) => (outcomes || []).map((outcome) => ({
+  ...outcome,
+  ...(outcome?.error ? { error: boundedErrorText(outcome.error) } : {})
+}));
 const errorCode = (error) => error?.code || (error instanceof AggregateError
   ? error.errors.map((entry) => errorCode(entry)).find(Boolean)
   : null);
@@ -23,6 +37,11 @@ export class SyncCoordinator {
     idFactory = randomUUID,
     lockStaleMs = 5 * 60 * 1000,
     jobTimeoutMs = 90 * 60_000,
+    cancelGraceMs = 30_000,
+    fatal = (error) => {
+      console.error('[address-sync] worker did not stop after cancellation; restarting sync service', error);
+      process.exit(1);
+    },
     history = null,
     processIsAlive = (pid) => {
       try {
@@ -41,6 +60,8 @@ export class SyncCoordinator {
     this.idFactory = idFactory;
     this.lockStaleMs = lockStaleMs;
     this.jobTimeoutMs = jobTimeoutMs;
+    this.cancelGraceMs = cancelGraceMs;
+    this.fatal = fatal;
     this.history = history;
     this.processIsAlive = processIsAlive;
     this.currentJob = null;
@@ -57,7 +78,7 @@ export class SyncCoordinator {
     this.initialized = true;
   }
 
-  async trigger(trigger = 'manual', { shards = ['all'] } = {}) {
+  async trigger(trigger = 'manual', { shards = ['all'], sourceFingerprints = {}, sourceInputs = {} } = {}) {
     await this.initialize();
     if (this.currentJob) return { accepted: false, job: this.currentJob };
 
@@ -74,6 +95,8 @@ export class SyncCoordinator {
       heartbeatAt: null,
       deadlineAt: null,
       shards: [...new Set(shards)],
+      sourceFingerprints,
+      sourceInputs,
       error: null,
       errorCode: null
     };
@@ -148,25 +171,49 @@ export class SyncCoordinator {
         completedAt: this.now().toISOString(),
         releaseId: result?.releaseId || job.id,
         actualShards: result?.etl?.selectedShards || job.shards,
-        sourceOutcomes: result?.etl?.reports || []
+        sourceOutcomes: sanitizeOutcomes(result?.etl?.reports)
       });
     } catch (error) {
+      const failurePhase = job.phase;
       if (errorCode(error) === 'SYNC_JOB_TIMEOUT' && runTask) {
         job.phase = 'cancelling';
         job.heartbeatAt = this.now().toISOString();
         abort.abort();
         await Promise.all([this.writeJob(job), this.history?.heartbeat(job)])
           .catch((historyError) => console.error('[address-sync] timeout state persistence failed', historyError));
-        await runTask.catch(() => {});
+        let stopped = false;
+        let graceTimer;
+        await Promise.race([
+          runTask.then(() => { stopped = true; }, () => { stopped = true; }),
+          new Promise((resolveGrace) => {
+            graceTimer = setTimeout(resolveGrace, this.cancelGraceMs);
+            graceTimer.unref?.();
+          })
+        ]);
+        clearTimeout(graceTimer);
+        if (!stopped) {
+          const stuck = Object.assign(
+            new Error(`Synchronization worker did not stop within ${this.cancelGraceMs}ms after cancellation`),
+            { code: 'SYNC_WORKER_STUCK' }
+          );
+          Object.assign(job, {
+            status: 'failed', phase: 'failed', completedAt: this.now().toISOString(),
+            error: errorText(stuck), errorCode: stuck.code, failurePhase
+          });
+          await this.writeJob(job).catch(() => {});
+          try { this.fatal(stuck); } catch {}
+          return;
+        }
       }
       Object.assign(job, {
         status: 'failed',
         phase: 'failed',
         completedAt: this.now().toISOString(),
-        error: errorText(error).slice(0, 1000),
+        error: errorText(error),
         errorCode: errorCode(error),
+        failurePhase,
         actualShards: error?.selectedShards || job.actualShards || job.shards,
-        sourceOutcomes: error?.reports || job.sourceOutcomes || []
+        sourceOutcomes: sanitizeOutcomes(error?.reports || job.sourceOutcomes)
       });
     } finally {
       clearInterval(heartbeat);
@@ -262,8 +309,14 @@ export class SyncCoordinator {
   }
 
   async recoverLock() {
-    const lock = await this.readLock();
+    let lock = await this.readLock();
     if (!lock) return null;
+    if (lock.invalid) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      lock = await this.readLock();
+      if (!lock) return null;
+      if (lock.invalid && await this.removeLockFile()) return null;
+    }
     const ownerAlive = lock.pid === process.pid
       ? false
       : Number.isSafeInteger(lock.pid) && lock.pid > 0
@@ -291,7 +344,8 @@ export class SyncCoordinator {
         phase: 'interrupted',
         completedAt: this.now().toISOString(),
         error: 'Synchronization interrupted before completion',
-        errorCode: 'SYNC_JOB_INTERRUPTED'
+        errorCode: 'SYNC_JOB_INTERRUPTED',
+        failurePhase: 'interrupted'
       });
       await this.writeJob(job);
       await this.history?.completed(job).catch((error) => {

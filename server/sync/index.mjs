@@ -9,7 +9,8 @@ import { SyncHistoryStore } from './history-store.mjs';
 import { createSyncQueue } from './queue.mjs';
 import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync.mjs';
 import { startDailyScheduler } from './scheduler.mjs';
-import { loadSourceCatalog } from './source-adapters.mjs';
+import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
+import { ensureAddressPolicies } from './address-policy.mjs';
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -50,9 +51,20 @@ export const createSyncRuntime = async ({
   if (postgresPool) await initializePostgres(postgresPool);
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
+  await ensureAddressPolicies(database);
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;
-  const catalogShards = () => (catalogPromise ||= loadSourceCatalog(undefined, environment).then((catalog) => catalog.shards));
+  const catalogShards = () => {
+    if (!catalogPromise) {
+      catalogPromise = loadSourceCatalog(undefined, environment)
+        .then((catalog) => catalog.shards)
+        .catch((error) => {
+          catalogPromise = null;
+          throw error;
+        });
+    }
+    return catalogPromise;
+  };
   const history = new SyncHistoryStore(queueDatabase, { catalogShards, now });
   await history.repairInterruptedRuns();
   await history.repairLegacyProjections();
@@ -61,6 +73,7 @@ export const createSyncRuntime = async ({
     now,
     history,
     jobTimeoutMs: integer(environment.SYNC_JOB_TIMEOUT_MS, 90 * 60_000, 60_000, 24 * 60 * 60_000),
+    cancelGraceMs: integer(environment.SYNC_CANCEL_GRACE_MS, 30_000, 5_000, 10 * 60_000),
     runSync: ({ id, trigger, shards, signal, onProgress }) => runSync({
       releaseId: id,
       signal,
@@ -91,7 +104,14 @@ export const createSyncRuntime = async ({
     addressDatabase: queueDatabase,
     controlDatabase: queueDatabase,
     history,
-    loadCatalog: async () => ({ shards: await catalogShards() })
+    loadCatalog: async () => ({ shards: await catalogShards() }),
+    probeSource: async (shard) => createSourceAdapters({ environment, processConcurrency: 1 })
+      .discover(shard, {
+        includeAssetSizes: false,
+        syncMode: 'probe',
+        cacheDir: environment.ADDRESS_SYNC_CACHE_DIR
+      }),
+    onIdle: () => artifactCleanup?.runOnce()
   });
   const handler = createSyncApi({
     coordinator,

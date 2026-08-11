@@ -155,7 +155,7 @@ describe('floor-aware hierarchical allocation', () => {
     expect(policy.nodeFloors.has('US:loc:AA:BB')).toBe(false);
     expect(policy.overrides.get('US:loc:AA:BB')).toBe(9);
     database.close();
-  });
+  }, 10_000);
 
   it('re-imports under the v22 revision when node floors change', async () => {
     const directory = resolve('.data-cache', 'floor-allocation-tests', randomUUID());

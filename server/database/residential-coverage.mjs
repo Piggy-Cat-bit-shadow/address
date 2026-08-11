@@ -58,7 +58,9 @@ const chooseCity = (row, region, cityAliases, regionsById) => {
   return (scoped.length ? scoped : unique).sort((left, right) => Number(right.population || 0) - Number(left.population || 0))[0] || null;
 };
 
-export const refreshResidentialCoverage = async (database, countryCode, now = new Date().toISOString()) => {
+export const refreshResidentialCoverage = async (database, countryCode, now = new Date().toISOString(), signal) => {
+  const checkpoint = () => signal?.throwIfAborted();
+  checkpoint();
   const country = String(countryCode || '').trim().toUpperCase();
   const [regionsResult, citiesResult, groupsResult] = await Promise.all([
     database.prepare(`SELECT id,parent_id,code,name,native_name,zh_name,path FROM catalog_regions
@@ -78,6 +80,7 @@ export const refreshResidentialCoverage = async (database, countryCode, now = ne
       GROUP BY address.admin1,address.admin1_code,COALESCE(NULLIF(address.postal_locality,''),address.locality)`)
       .bind(country).all()
   ]);
+  checkpoint();
   const regions = regionsResult.results || [];
   const cities = citiesResult.results || [];
   const groups = groupsResult.results || [];
@@ -89,17 +92,21 @@ export const refreshResidentialCoverage = async (database, countryCode, now = ne
   const regionsByCode = new Map();
   const regionsByName = new Map();
   for (const region of regions) {
+    checkpoint();
     addAlias(regionsByCode, normalize(region.code), region);
     for (const key of aliases(region.name, region.native_name, region.zh_name)) addAlias(regionsByName, key, region);
   }
   const cityAliases = new Map();
   for (const city of cities) {
+    checkpoint();
     for (const key of aliases(city.name, city.native_name, city.zh_name)) addAlias(cityAliases, key, city);
   }
 
   const coverage = new Map();
   let matchedAddresses = 0;
+  const residentialCount = groups.reduce((total, row) => total + Number(row.address_count || 0), 0);
   for (const row of groups) {
+    checkpoint();
     let region = chooseRegion(row, regionsByCode, regionsByName);
     const city = chooseCity(row, region, cityAliases, regionsById);
     if (city?.region_id) region = regionsById.get(Number(city.region_id)) || region;
@@ -118,9 +125,11 @@ export const refreshResidentialCoverage = async (database, countryCode, now = ne
   }
 
   await database.transaction(async (transaction) => {
+    checkpoint();
     await transaction.prepare('DELETE FROM residential_coverage WHERE country_code=?').bind(country).run();
     const rows = [...coverage.values()];
     for (let offset = 0; offset < rows.length; offset += 500) {
+      checkpoint();
       await transaction.batch(rows.slice(offset, offset + 500).map((row) => transaction.prepare(`
         INSERT INTO residential_coverage(
           country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id
@@ -128,12 +137,16 @@ export const refreshResidentialCoverage = async (database, countryCode, now = ne
         row.country, row.regionName, row.cityName, row.addressCount, now, row.regionId, row.cityId
       )));
     }
+    await transaction.prepare(`UPDATE admin_coverage_stats SET residential_count=?,
+      total_count=ordinary_count+?,updated_at=? WHERE node_key=? AND level=0`)
+      .bind(residentialCount, residentialCount, now, country).run();
+    checkpoint();
   });
   return {
     countryCode: country,
     groups: groups.length,
     mappedGroups: coverage.size,
     matchedAddresses,
-    unmatchedAddresses: groups.reduce((total, row) => total + Number(row.address_count || 0), 0) - matchedAddresses
+    unmatchedAddresses: residentialCount - matchedAddresses
   };
 };

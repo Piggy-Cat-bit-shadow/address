@@ -11,9 +11,12 @@ x-app: &app
     ADDRESS_SYNC_CACHE_DIR: /srv/address/data/staging
     STATIC_ROOT: /srv/address/app/dist
     SYNC_STATE_DIR: /srv/address/runtime/sync-control
+    CREDENTIAL_BROKER_URL: http://credential-broker:8792
+    CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_production_token
     PYTHON_BIN: /srv/address/venv/bin/python
     HOME: /srv/address/runtime/home
     XDG_CACHE_HOME: /srv/address/runtime/cache
+    LOCATION_CATALOG_CACHE_DIR: /srv/address/runtime/cache/location-catalog
     PIP_CACHE_DIR: /srv/address/runtime/pip-cache
     POSTGRES_HOST: postgres
     POSTGRES_DB: ${POSTGRES_DB:-address}
@@ -31,6 +34,7 @@ x-app: &app
     - config_master_key
     - admin_bootstrap_password
     - sync_admin_token
+    - credential_broker_production_token
   volumes: &app-volumes
     - ./data/address:/srv/address/data
     - ./runtime:/srv/address/runtime
@@ -68,7 +72,7 @@ services:
 
   migrate:
     <<: *app
-    restart: "no"
+    restart: "on-failure:3"
     command: [node, node_modules/tsx/dist/cli.mjs, server/database/migrate.ts]
     depends_on:
       postgres:
@@ -90,6 +94,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      credential-broker:
+        condition: service_healthy
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
@@ -111,8 +117,40 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      credential-broker:
+        condition: service_healthy
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:8791/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+  credential-broker:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      CREDENTIAL_BROKER_HOST: 0.0.0.0
+      CREDENTIAL_BROKER_PORT: 8792
+      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
+      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
+    secrets:
+      - postgres_password
+      - config_master_key
+      - admin_bootstrap_password
+      - sync_admin_token
+      - credential_broker_production_token
+      - credential_broker_test_token
+    command: [node, server/credential-broker/index.mjs]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8792/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 8
@@ -133,3 +171,7 @@ secrets:
     file: ./config/secrets/admin_bootstrap_password
   sync_admin_token:
     file: ./config/secrets/sync_admin_token
+  credential_broker_production_token:
+    file: ./config/secrets/credential_broker_production_token
+  credential_broker_test_token:
+    file: ./config/secrets/credential_broker_test_token

@@ -86,6 +86,7 @@ interface GenerationRequestSpec {
 }
 type Mode = GenerationMode;
 type LocationField = 'region' | 'city' | 'district' | 'postcode';
+type LocationLoadState = 'idle' | 'loading' | 'ready' | 'error';
 const emptyLocationMeta: Record<LocationField, LocationMeta> = {
   region: { total: 0, availableTotal: 0 }, city: { total: 0, availableTotal: 0 },
   district: { total: 0, availableTotal: 0 }, postcode: { total: 0, availableTotal: 0 }
@@ -115,6 +116,9 @@ export const readStoredDisplayLanguage = <T extends AddressDisplayLanguage | Pro
   } catch {
     return 'en';
   }
+};
+const emptyLocationLoadState: Record<LocationField, LocationLoadState> = {
+  region: 'idle', city: 'idle', district: 'idle', postcode: 'idle'
 };
 
 export const storeDisplayLanguage = (key: string, value: AddressDisplayLanguage | ProfileLanguage, storage?: LanguageStorage): void => {
@@ -326,6 +330,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [postcodeId, setPostcodeId] = useState('');
   const [locations, setLocations] = useState<Locations>(emptyLocations);
   const [locationMeta, setLocationMeta] = useState<Record<LocationField, LocationMeta>>(emptyLocationMeta);
+  const [locationLoadState, setLocationLoadState] = useState<Record<LocationField, LocationLoadState>>(emptyLocationLoadState);
   const [result, setResult] = useState<GeneratedBundle | null>(null);
   const [addressLanguage, setAddressLanguage] = useState<AddressDisplayLanguage>(() => readStoredDisplayLanguage<AddressDisplayLanguage>(addressLanguageStorageKey));
   const [addressTranslations, setAddressTranslations] = useState<Record<string, AddressTranslation>>({});
@@ -440,7 +445,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     prefetchController.current = controller;
     prefetchingKey.current = key;
     const existing = prefetchedResults.current.get(key) || [];
-    const needed = Math.max(0, 5 - existing.length);
+    const needed = Math.max(0, 2 - existing.length);
     try {
       const responses = await Promise.allSettled(Array.from({ length: needed }, async () => {
         const requestId = createRequestId();
@@ -470,7 +475,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         prefetchedResults.current.delete(prefetchedResults.current.keys().next().value as string);
       }
       prefetchedResults.current.delete(key);
-      prefetchedResults.current.set(key, queued.slice(0, 5));
+      prefetchedResults.current.set(key, queued.slice(0, 2));
     } finally {
       if (prefetchController.current === controller) {
         prefetchController.current = null;
@@ -514,6 +519,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         setLocations((current) => ({ ...current, [optionKey]: cached.values }));
         setLocationMeta((current) => ({ ...current, [field]: cached.meta }));
         setLocationErrors((current) => ({ ...current, [field]: '' }));
+        setLocationLoadState((current) => ({ ...current, [field]: 'ready' }));
         return;
       }
       if (cached) locationCache.current.delete(requestKey);
@@ -530,6 +536,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     if (parentRegionId) params.set('regionId', parentRegionId);
     if (parentCityId) params.set('cityId', parentCityId);
     if (overrides.cursor) params.set('cursor', overrides.cursor);
+    setLocationLoadState((current) => ({ ...current, [field]: 'loading' }));
     try {
       const response = await fetchWithTimeout(`${endpoint}/v1/locations/search?${params}`, { signal: controller.signal }, LOCATION_REQUEST_TIMEOUT_MS);
       if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
@@ -545,11 +552,13 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       setLocationMeta((current) => ({ ...current, [field]: meta }));
       if (!overrides.append) locationCache.current.set(requestKey, { expiresAt: Date.now() + LOCATION_CACHE_TTL_MS, values: values || [], meta });
       setLocationErrors((current) => ({ ...current, [field]: '' }));
+      setLocationLoadState((current) => ({ ...current, [field]: 'ready' }));
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
       if (locationControllers.current[field] !== controller || locationRequestKeys.current[field] !== requestKey) return;
       setLocations((current) => ({ ...current, [optionKey]: [] }));
       setLocationErrors((current) => ({ ...current, [field]: t.locationLoadFailed }));
+      setLocationLoadState((current) => ({ ...current, [field]: 'error' }));
     }
   };
 
@@ -559,7 +568,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     activeRequest.current = null;
     selectionRef.current = { country: nextCountry, mode: nextMode };
     setCountryCode(nextCountry); setMode(nextMode); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
-    setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setError(''); setLocationErrors({}); setLoading(false); setFallbackNotice('');
+    setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setLocationLoadState(emptyLocationLoadState); setError(''); setLocationErrors({}); setLoading(false); setFallbackNotice('');
     setResult(null); setIpRegionResult(null);
     if (history !== 'none') updateUrl(nextCountry, history);
     void generate({
@@ -999,27 +1008,31 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
           <section className="generator-card panel">
             <header className="generator-heading"><h1>{generatorTitle(selectedCountryName, locale, t.residentialMode)}</h1></header>
             <form className={`filter-grid filters-${filterFields.length}`} onSubmit={submit}>
-              {filterFields.includes('region') && <Combobox locale={locale} label={selectedCountry.searchLabels.region[textLocale]} value={region} options={locations.regions} placeholder={t.allRegions} unavailableLabel={t.noAddressOption} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onOpen={() => void loadOptions('region')} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
+              {filterFields.includes('region') && <Combobox locale={locale} label={selectedCountry.searchLabels.region[textLocale]} value={region} options={locations.regions} placeholder={t.allRegions} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.region} state={locationLoadState.region} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onOpen={() => void loadOptions('region')} onRetry={() => void loadOptions('region', locationQueries.current.region)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
                 abortPrefetch();
                 setRegion(value); setRegionId(option.id || ''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
                 setLocations((current) => ({ ...current, cities: [], districts: [], postcodes: [] }));
                 setLocationMeta((current) => ({ ...current, city: emptyLocationMeta.city, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
+                setLocationLoadState((current) => ({ ...current, city: 'idle', district: 'idle', postcode: 'idle' }));
+                setLocationErrors((current) => ({ ...current, city: '', district: '', postcode: '' }));
                 void loadOptions('city', '', { region: value, regionId: option.id || '' });
               }}/>}
-              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
+              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
                 abortPrefetch();
                 setCity(value); setCityId(option.id || ''); setDistrict(''); setPostcode(''); setPostcodeId('');
                 setLocations((current) => ({ ...current, districts: [], postcodes: [] }));
                 setLocationMeta((current) => ({ ...current, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
+                setLocationLoadState((current) => ({ ...current, district: 'idle', postcode: 'idle' }));
+                setLocationErrors((current) => ({ ...current, district: '', postcode: '' }));
                 if (value && option.regionId && option.regionValue) { setRegion(option.regionValue); setRegionId(option.regionId); }
                 if (filterFields.includes('district')) void loadOptions('district', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
                 if (filterFields.includes('postcode')) void loadOptions('postcode', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
               }}/>}
-              {filterFields.includes('district') && <Combobox locale={locale} label={(selectedCountry.searchLabels.district || selectedCountry.searchLabels.city)[textLocale]} value={district} options={locations.districts} placeholder={t.allCities} unavailableLabel={t.noAddressOption} total={locationMeta.district.total} hasMore={Boolean(locationMeta.district.nextCursor)} onOpen={() => void loadOptions('district')} onLoadMore={() => loadOptions('district', locationQueries.current.district, { cursor: locationMeta.district.nextCursor, append: true })} onSearch={(query) => loadOptions('district', query)} onChange={(value) => {
+              {filterFields.includes('district') && <Combobox locale={locale} label={(selectedCountry.searchLabels.district || selectedCountry.searchLabels.city)[textLocale]} value={district} options={locations.districts} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.district} state={locationLoadState.district} total={locationMeta.district.total} hasMore={Boolean(locationMeta.district.nextCursor)} onOpen={() => void loadOptions('district')} onRetry={() => void loadOptions('district', locationQueries.current.district)} onLoadMore={() => loadOptions('district', locationQueries.current.district, { cursor: locationMeta.district.nextCursor, append: true })} onSearch={(query) => loadOptions('district', query)} onChange={(value) => {
                 abortPrefetch();
                 setDistrict(value);
               }}/>}
-              {filterFields.includes('postcode') && <Combobox locale={locale} label={selectedCountry.searchLabels.postcode[textLocale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} unavailableLabel={t.noAddressOption} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onOpen={() => void loadOptions('postcode')} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
+              {filterFields.includes('postcode') && <Combobox locale={locale} label={selectedCountry.searchLabels.postcode[textLocale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.postcode} state={locationLoadState.postcode} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onOpen={() => void loadOptions('postcode')} onRetry={() => void loadOptions('postcode', locationQueries.current.postcode)} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
                 abortPrefetch();
                 setPostcode(value); setPostcodeId(option.id || '');
                 if (value && option.parentId && option.parentValue) { setCity(option.parentValue); setCityId(option.parentId); }
@@ -1090,9 +1103,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         </div>
 
         <aside className="quick-sidebar">
-          <ShortcutSection title={selectedShortcuts.specialAreaTitle[textLocale] || t.specialAreas} items={selectedShortcuts.specialAreas} locale={locale} apply={applyShortcut}/>
-          <ShortcutSection title={t.adminShortcuts} items={selectedShortcuts.adminShortcuts} locale={locale} apply={applyShortcut}/>
-          <ShortcutSection title={t.popularCities} items={selectedShortcuts.popularCities} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="special" title={selectedShortcuts.specialAreaTitle[textLocale] || t.specialAreas} items={selectedShortcuts.specialAreas} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="admin" title={t.adminShortcuts} items={selectedShortcuts.adminShortcuts} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="cities" title={t.popularCities} items={selectedShortcuts.popularCities} locale={locale} apply={applyShortcut}/>
         </aside>
       </div>
       </>}
@@ -1102,9 +1115,15 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   </div>;
 }
 
-function Combobox({ locale, label, value, options, placeholder, unavailableLabel, total, hasMore = false, clientFilter = false, onOpen, onLoadMore, onChange, onSearch }: {
+const filterRetryLabel: Record<Locale, string> = {
+  en: 'Retry', 'zh-CN': '重试', 'zh-TW': '重試', ja: '再試行', ko: '다시 시도',
+  de: 'Erneut versuchen', fr: 'Réessayer', es: 'Reintentar', pt: 'Tentar novamente'
+};
+
+function Combobox({ locale, label, value, options, placeholder, unavailableLabel, loadingLabel, errorLabel, state, total, hasMore = false, clientFilter = false, onOpen, onRetry, onLoadMore, onChange, onSearch }: {
   locale: Locale; label: string; value: string; options: LocationOption[]; placeholder: string; unavailableLabel: string;
-  total: number; hasMore?: boolean; clientFilter?: boolean; onOpen?: () => void | Promise<void>; onLoadMore?: () => void | Promise<void>;
+  loadingLabel: string; errorLabel?: string; state: LocationLoadState; total: number; hasMore?: boolean; clientFilter?: boolean;
+  onOpen?: () => void | Promise<void>; onRetry?: () => void | Promise<void>; onLoadMore?: () => void | Promise<void>;
   onChange: (value: string, option: LocationOption) => void; onSearch?: (query: string) => void | Promise<void>;
 }) {
   const id = useId();
@@ -1159,7 +1178,7 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
   return <div className="filter custom-combobox" ref={root}>
     <label htmlFor={id}>{label}</label>
     <div className={`combobox-control ${open ? 'open' : ''}`}>
-      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-autocomplete="list" value={query} placeholder={placeholder} onFocus={openMenu} onChange={(event) => {
+      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-activedescendant={open ? `${id}-option-${activeIndex}` : undefined} aria-autocomplete="list" aria-busy={state === 'loading'} value={query} placeholder={placeholder} onFocus={openMenu} onChange={(event) => {
         const nextQuery = event.target.value;
         if (value && nextQuery !== selectedLabel) {
           skipValueSync.current = true;
@@ -1170,8 +1189,13 @@ function Combobox({ locale, label, value, options, placeholder, unavailableLabel
       <button type="button" aria-label={label} onClick={() => open ? setOpen(false) : openMenu()}>▾</button>
     </div>
     {open && <div className="combobox-popup" id={`${id}-list`} role="listbox">
-      {values.map((option, index) => <button type="button" role="option" aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} disabled={option.disabled} key={`${option.value}-${index}`} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{option.availableCount > 0 ? new Intl.NumberFormat().format(option.availableCount) : unavailableLabel}</small>}</button>)}
-      <div className="combobox-status"><span>{visibleOptions.length}/{clientFilter ? options.length : total}</span>{hasMore && onLoadMore && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>+100</button>}</div>
+      {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} disabled={option.disabled} key={`${option.value}-${index}`} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{option.availableCount > 0 ? new Intl.NumberFormat(locale).format(option.availableCount) : unavailableLabel}</small>}</button>)}
+      <div className="combobox-status" role="status" aria-live="polite">
+        {state === 'loading' ? <span>{loadingLabel}</span>
+          : state === 'error' ? <><span>{errorLabel}</span>{onRetry && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onRetry()}>{filterRetryLabel[locale]}</button>}</>
+            : <span>{visibleOptions.length}/{clientFilter ? options.length : total}</span>}
+        {state !== 'error' && hasMore && onLoadMore && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>+100</button>}
+      </div>
     </div>}
   </div>;
 }
@@ -1213,7 +1237,7 @@ function ResultRow({ id, label, value, copy, copied, copyLabel }: { id: string; 
 function AddressBlock({ title, copyLabel, onCopy, children }: { title: string; copyLabel: string; onCopy: () => void; children: ReactNode }) {
   return <section className="address-block"><header><h3>{title}</h3><button type="button" onClick={onCopy}>{copyLabel}</button></header>{children}</section>;
 }
-function ShortcutSection({ title, items, locale, apply }: { title: string; items: LocationShortcut[]; locale: Locale; apply: (item: LocationShortcut) => void }) {
+function ShortcutSection({ tone, title, items, locale, apply }: { tone: 'special' | 'admin' | 'cities'; title: string; items: LocationShortcut[]; locale: Locale; apply: (item: LocationShortcut) => void }) {
   if (!items.length) return null;
-  return <section className="shortcut-card panel"><header><h2>{title}</h2></header><div>{items.map((item) => <button type="button" key={`${item.type}-${item.value}`} onClick={() => apply(item)}>{item.label[uiTextLocale(locale)]}</button>)}</div></section>;
+  return <section className={`shortcut-card shortcut-card-${tone} panel`}><header><h2>{title}</h2></header><div>{items.map((item) => <button type="button" key={`${item.type}-${item.value}`} onClick={() => apply(item)}>{item.label[uiTextLocale(locale)]}</button>)}</div></section>;
 }

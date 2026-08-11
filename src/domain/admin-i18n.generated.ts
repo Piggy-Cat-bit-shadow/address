@@ -232,7 +232,7 @@ export const generatedAdminText = {
     "translationTitle": "線上翻譯",
     "googleTranslationToggle": "啟用 Google 翻譯",
     "translationSaved": "線上翻譯設定已儲存",
-    "geoapifyWorkerHint": "韓國同步程序啟動時讀取伺服器環境變數 GEOAPIFY_API_KEY；此處儲存的金鑰目前用於 API 即時查詢。",
+    "geoapifyWorkerHint": "此處儲存的 Geoapify 金鑰會用於韓國住宅地址同步與 API 查詢，並依配額與冷卻狀態自動輪替。",
     "status": {
       "healthy": "健康",
       "expired": "已過期",
@@ -477,7 +477,7 @@ export const generatedAdminText = {
     "translationTitle": "オンライン翻訳",
     "googleTranslationToggle": "Google翻訳を有効化",
     "translationSaved": "翻訳設定を保存しました",
-    "geoapifyWorkerHint": "韓国の同期ワーカーは起動時にサーバー環境変数 GEOAPIFY_API_KEY を読み取ります。ここで保存したキーは現在、API側の検索に使用されます。",
+    "geoapifyWorkerHint": "ここで保存した Geoapify キーは韓国の住宅住所同期と API 検索に使用され、クォータとクールダウンに応じて自動的に切り替わります。",
     "status": {
       "healthy": "正常",
       "expired": "期限切れ",
@@ -722,7 +722,7 @@ export const generatedAdminText = {
     "translationTitle": "온라인 번역",
     "googleTranslationToggle": "Google 번역 사용",
     "translationSaved": "번역 설정을 저장했습니다",
-    "geoapifyWorkerHint": "한국 동기화 워커는 시작 시 서버 환경 변수 GEOAPIFY_API_KEY를 읽습니다. 여기에 저장된 키는 현재 API 측 조회에 사용됩니다.",
+    "geoapifyWorkerHint": "여기에 저장한 Geoapify 키는 한국 주거 주소 동기화와 API 조회에 사용되며 할당량과 대기 상태에 따라 자동 전환됩니다.",
     "status": {
       "healthy": "정상",
       "expired": "만료됨",
@@ -967,7 +967,7 @@ export const generatedAdminText = {
     "translationTitle": "Online-Übersetzung",
     "googleTranslationToggle": "Google-Übersetzung aktivieren",
     "translationSaved": "Übersetzungseinstellungen gespeichert",
-    "geoapifyWorkerHint": "Der Korea-Sync-Worker liest GEOAPIFY_API_KEY beim Start aus der Serverumgebung; der hier gespeicherte Schlüssel dient derzeit den API-Abfragen.",
+    "geoapifyWorkerHint": "Hier gespeicherte Geoapify-Schlüssel werden für die Synchronisierung koreanischer Wohnadressen und API-Abfragen verwendet und nach Kontingent und Abkühlzeit automatisch gewechselt.",
     "status": {
       "healthy": "Gesund",
       "expired": "Abgelaufen",
@@ -1212,7 +1212,7 @@ export const generatedAdminText = {
     "translationTitle": "Traduction en ligne",
     "googleTranslationToggle": "Activer la traduction Google",
     "translationSaved": "Paramètres de traduction enregistrés",
-    "geoapifyWorkerHint": "Le worker de synchronisation Corée lit GEOAPIFY_API_KEY dans l'environnement du serveur au démarrage ; la clé enregistrée ici sert actuellement aux requêtes côté API.",
+    "geoapifyWorkerHint": "Les clés Geoapify enregistrées ici servent à la synchronisation des adresses résidentielles coréennes et aux requêtes API, avec rotation automatique selon les quotas et temporisations.",
     "status": {
       "healthy": "Sain",
       "expired": "Expiré",
@@ -1457,7 +1457,7 @@ export const generatedAdminText = {
     "translationTitle": "Traducción en línea",
     "googleTranslationToggle": "Activar la traducción de Google",
     "translationSaved": "Ajustes de traducción guardados",
-    "geoapifyWorkerHint": "El worker de sincronización de Corea lee GEOAPIFY_API_KEY del entorno del servidor al iniciarse; la clave guardada aquí sirve actualmente para las consultas del lado de la API.",
+    "geoapifyWorkerHint": "Las claves de Geoapify guardadas aquí se usan para sincronizar direcciones residenciales de Corea y para consultas API, con rotación automática según cuota y espera.",
     "status": {
       "healthy": "Saludable",
       "expired": "Expirado",
@@ -1702,7 +1702,7 @@ export const generatedAdminText = {
     "translationTitle": "Tradução online",
     "googleTranslationToggle": "Ativar a tradução do Google",
     "translationSaved": "Configurações de tradução salvas",
-    "geoapifyWorkerHint": "O worker de sincronização da Coreia lê GEOAPIFY_API_KEY do ambiente do servidor na inicialização; a chave salva aqui atende atualmente às consultas do lado da API.",
+    "geoapifyWorkerHint": "As chaves Geoapify salvas aqui são usadas na sincronização de endereços residenciais da Coreia e em consultas API, com rotação automática por cota e espera.",
     "status": {
       "healthy": "Saudável",
       "expired": "Expirado",

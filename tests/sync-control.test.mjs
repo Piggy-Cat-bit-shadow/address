@@ -14,6 +14,29 @@ import {
 } from '../server/sync/scheduler.mjs';
 import { initializeTestDatabase, openTestDatabase } from './helpers/postgres-test-database.mjs';
 
+describe('production deployment artifact', () => {
+  it('packages the actual worktree and verifies an immutable image manifest', async () => {
+    const deploy = await readFile(new URL('../ops/deploy.sh', import.meta.url), 'utf8');
+    const status = await readFile(new URL('../ops/status.sh', import.meta.url), 'utf8');
+    const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
+    expect(deploy).not.toContain('git archive');
+    expect(deploy).toContain('git ls-files -co --exclude-standard');
+    expect(deploy).toContain('.release-manifest.sha256');
+    expect(deploy).toContain('.image-manifest.sha256');
+    expect(deploy).toContain("! -path './.github/*'");
+    expect(deploy).toContain("! -name '.env.example'");
+    expect(deploy).toContain('IMAGE="address-local:$REL"');
+    expect(deploy).toContain("bash ./ops/activate-production-release.sh '$REL' '$IMAGE'");
+    expect(deploy).toContain('sha256sum --quiet -c .release-manifest.sha256');
+    expect(deploy).toContain('sha256sum --quiet -c .image-manifest.sha256');
+    expect(deploy).toContain('docker run --rm --entrypoint sh');
+    expect(status).toContain('http://127.0.0.1:20022/api/v1/ready');
+    expect(status).toContain('exec -T sync node -e');
+    expect(status).not.toContain('/api/v1/health" || true');
+    expect(dockerfile).toMatch(/apt-get install[^\n]+\bzstd\b/u);
+  });
+});
+
 const testDirectories = [];
 const testStateDir = () => {
   const directory = resolve('.data-cache', 'sync-control-tests', randomUUID());
@@ -52,7 +75,12 @@ describe('address sync coordinator', () => {
       stateDir: testStateDir(), history,
       now: () => new Date('2026-08-05T06:00:00Z'),
       idFactory: () => 'history-job',
-      runSync: async () => ({ releaseId: 'history-release' })
+      runSync: async () => {
+        await database.prepare(`INSERT INTO sync_country_state(
+          country_code,status,address_count,residential_count,failure_count,updated_at
+        ) VALUES ('US','ready',50,50,0,'2026-08-05T06:00:00Z')`).run();
+        return { releaseId: 'history-release' };
+      }
     });
     const result = await coordinator.trigger('manual', { shards: ['oa-us'] });
     await coordinator.waitForIdle();
@@ -60,7 +88,7 @@ describe('address sync coordinator', () => {
       .toMatchObject({ status: 'succeeded', completed_at: '2026-08-05T06:00:00.000Z' });
     expect(await database.prepare(`SELECT country_code,source_id,status,before_count,after_count,net_growth
       FROM sync_run_countries WHERE run_id=?`).bind(result.job.id).first()).toEqual({
-      country_code: 'US', source_id: 'oa-us', status: 'succeeded', before_count: 0, after_count: 0, net_growth: 0
+      country_code: 'US', source_id: 'oa-us', status: 'succeeded', before_count: 0, after_count: 50, net_growth: 50
     });
     await history.schedulerHeartbeat();
     expect(await database.prepare(`SELECT heartbeat_at,active_run_id FROM sync_scheduler_state
@@ -83,6 +111,7 @@ describe('address sync coordinator', () => {
       status: 'failed', phase: 'failed', startedAt: '2026-08-06T00:00:00Z',
       heartbeatAt: '2026-08-06T00:09:00Z', deadlineAt: '2026-08-06T01:00:00Z',
       completedAt: '2026-08-06T00:09:00Z', errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE',
+      failurePhase: 'materialize',
       error: 'All Geoapify credentials are unavailable', actualShards: ['korea-kapt-residential'],
       sourceOutcomes: [{ shardId: 'korea-kapt-residential', status: 'failed', errorCode: 'SOURCE_CREDENTIAL_UNAVAILABLE' }]
     });
@@ -91,13 +120,39 @@ describe('address sync coordinator', () => {
     await history.pauseForQuota({
       runId: job.id, countryCode: 'KR', sourceId: 'korea-kapt-residential'
     });
-    expect(await database.prepare(`SELECT status,error_code,error_message,started_at,completed_at,net_growth
+    expect(await database.prepare(`SELECT status,error_code,error_message,failure_phase,started_at,completed_at,net_growth
       FROM sync_run_countries WHERE run_id=? AND country_code=? AND source_id=?`)
       .bind(job.id, 'KR', 'korea-kapt-residential').first()).toEqual({
       status: 'paused_quota', error_code: 'SOURCE_CREDENTIAL_UNAVAILABLE',
       error_message: 'All Geoapify credentials are unavailable',
+      failure_phase: 'materialize',
       started_at: '2026-08-06T00:00:00Z', completed_at: '2026-08-06T00:09:00Z', net_growth: 0
     });
+    database.close();
+  });
+
+  it('keeps terminal queue outcomes pending until source state is applied exactly once', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const history = new SyncHistoryStore(database, {
+      catalogShards: async () => [{ id: 'oa-us', countryCode: 'US' }],
+      now: () => new Date('2026-08-06T01:00:00Z')
+    });
+    const job = { id: 'sync-pending-outcome', trigger: 'queue', shards: ['oa-us'], status: 'queued', phase: 'queued' };
+    await history.queued(job);
+    Object.assign(job, {
+      status: 'succeeded', phase: 'published', completedAt: '2026-08-06T01:00:00Z',
+      actualShards: ['oa-us'], sourceOutcomes: [{ shardId: 'oa-us', status: 'succeeded', sourceComplete: false }]
+    });
+    await history.completed(job);
+
+    expect(await history.pendingSourceStateApplications()).toMatchObject([{
+      run_id: job.id, country_code: 'US', source_id: 'oa-us', status: 'succeeded', source_complete: 0
+    }]);
+    await history.markSourceStateApplied({
+      runId: job.id, countryCode: 'US', sourceId: 'oa-us', appliedAt: '2026-08-06T01:00:01Z'
+    });
+    expect(await history.pendingSourceStateApplications()).toEqual([]);
     database.close();
   });
 
@@ -163,9 +218,27 @@ describe('address sync coordinator', () => {
     await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
       status: 'failed',
       phase: 'failed',
+      failurePhase: 'build-and-publish',
       trigger: 'scheduled',
       error: 'candidate validation failed'
     });
+  });
+
+  it('redacts credentials from persisted process diagnostics', async () => {
+    const failure = Object.assign(new Error(`provider failed apiKey=fixture-secret token:another-secret ${'stack '.repeat(250)}ROOT_CAUSE`), {
+      reports: [{ shardId: 'fixture', status: 'failed', error: 'password=source-secret' }]
+    });
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(), idFactory: () => 'job-redacted',
+      runSync: async () => { throw failure; }
+    });
+    const result = await coordinator.trigger('scheduled');
+    await coordinator.waitForIdle();
+    const error = (await coordinator.getJob(result.job.id)).error;
+    expect(error).toContain('apiKey=[REDACTED] token:[REDACTED]');
+    expect(error).toContain('ROOT_CAUSE');
+    expect(error).toHaveLength(1000);
+    expect((await coordinator.getJob(result.job.id)).sourceOutcomes[0].error).toBe('password=[REDACTED]');
   });
 
   it('aborts and fails a job that exceeds its hard deadline', async () => {
@@ -212,6 +285,28 @@ describe('address sync coordinator', () => {
     expect(next.accepted).toBe(true);
     worker.resolve({});
     await coordinator.waitForIdle();
+  });
+
+  it('escalates a worker that ignores cancellation instead of hanging forever', async () => {
+    const fatal = vi.fn(() => { throw new Error('fixture supervisor restart'); });
+    const coordinator = new SyncCoordinator({
+      stateDir: testStateDir(),
+      idFactory: () => 'job-stuck',
+      jobTimeoutMs: 20,
+      cancelGraceMs: 20,
+      fatal,
+      runSync: async () => new Promise(() => {})
+    });
+    const result = await coordinator.trigger('manual');
+    const completed = await Promise.race([
+      coordinator.waitForIdle().then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 150))
+    ]);
+    expect(completed).toBe(true);
+    expect(fatal).toHaveBeenCalledOnce();
+    await expect(coordinator.getJob(result.job.id)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'SYNC_WORKER_STUCK'
+    });
   });
 
   it('attributes an all-mode history run only to sources that actually executed', async () => {
@@ -403,6 +498,31 @@ describe('address sync coordinator', () => {
     });
     await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('quarantines a malformed lock and reconciles its interrupted job', async () => {
+    const stateDir = testStateDir();
+    const jobsDir = resolve(stateDir, 'jobs');
+    const job = {
+      id: 'sync-malformed-lock', trigger: 'queue', status: 'running', phase: 'materialize',
+      createdAt: '2026-07-16T03:00:00.000Z', startedAt: '2026-07-16T03:00:01.000Z',
+      completedAt: null, shards: ['JP']
+    };
+    await mkdir(jobsDir, { recursive: true });
+    await writeFile(resolve(jobsDir, `${job.id}.json`), JSON.stringify(job));
+    await writeFile(resolve(stateDir, 'sync.lock'), '{invalid');
+    const coordinator = new SyncCoordinator({
+      stateDir,
+      runSync: async () => ({}),
+      now: () => new Date('2026-07-17T03:00:00.000Z')
+    });
+
+    await coordinator.initialize();
+
+    await expect(coordinator.getJob(job.id)).resolves.toMatchObject({
+      status: 'failed', phase: 'interrupted', errorCode: 'SYNC_JOB_INTERRUPTED'
+    });
+    await expect(readFile(resolve(stateDir, 'sync.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 describe('sync management API', () => {
@@ -417,6 +537,30 @@ describe('sync management API', () => {
     });
     const response = await runtime.api(new Request('http://localhost/sync-control/healthz'));
     expect(response.status).toBe(200);
+    expect(Number(await database.prepare('SELECT COUNT(*) AS total FROM sync_country_policies').first('total')))
+      .toBeGreaterThan(0);
+    await runtime.close();
+    await database.close();
+  });
+
+  it('seeds an empty database and dispatches international work without China runtime state', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const runSync = vi.fn(async ({ releaseId }) => ({ releaseId, changed: false }));
+    const runtime = await createSyncRuntime({
+      environment: { SYNC_ADMIN_TOKEN: 'fixture-token' },
+      database,
+      stateDir: testStateDir(),
+      now: () => new Date('2026-08-07T03:00:00.000Z'),
+      runSync
+    });
+
+    await runtime.queue.tick();
+
+    expect(Number(await database.prepare('SELECT COUNT(*) AS total FROM sync_country_policies').first('total')))
+      .toBeGreaterThan(0);
+    expect(runSync).toHaveBeenCalledOnce();
+    expect(runSync.mock.calls[0][0].environment.ADDRESS_SYNC_SHARDS).not.toBe('CN');
     await runtime.close();
     await database.close();
   });
