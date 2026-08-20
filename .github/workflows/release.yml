@@ -140,6 +140,6 @@ jobs:
             "release/address-$version.zip" \
             release/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Address $version" \
+            --title "$version" \
             --notes-file release/RELEASE_NOTES.md \
             --verify-tag
