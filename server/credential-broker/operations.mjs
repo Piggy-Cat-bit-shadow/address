@@ -22,6 +22,16 @@ const geoapifyReverse = (value) => {
   return { latitude: value.latitude, longitude: value.longitude, language };
 };
 
+const googleReverse = (value) => {
+  if (!exactKeys(value, new Set(['latitude', 'longitude', 'language', 'regionCode']))
+    || !finite(value.latitude, -90, 90) || !finite(value.longitude, -180, 180)) return null;
+  const language = String(value.language || 'en');
+  if (!/^[a-z]{2,3}(?:-[A-Z]{2})?$/u.test(language)) return null;
+  const regionCode = value.regionCode === undefined ? '' : String(value.regionCode).toUpperCase();
+  if (regionCode && !/^[A-Z]{2}$/u.test(regionCode)) return null;
+  return { latitude: value.latitude, longitude: value.longitude, language, regionCode };
+};
+
 const mapplsNearby = (value) => {
   if (!exactKeys(value, new Set(['latitude', 'longitude', 'categoryCode', 'radius', 'page']))
     || !finite(value.latitude, 6, 38) || !finite(value.longitude, 67, 98)
@@ -82,6 +92,12 @@ const classifyBaidu = (body) => {
     : [101, 102, 200, 201].includes(status) ? 'auth' : 'invalid';
   return providerFailure(outcome, outcome === 'quota' ? nextPeriod('day')
     : outcome === 'qps' ? new Date(Date.now() + 2_000).toISOString() : null);
+};
+
+const classifyGoogle = (body) => {
+  if (body && typeof body === 'object' && !Array.isArray(body)
+    && (body.results === undefined || Array.isArray(body.results))) return null;
+  return providerFailure('invalid');
 };
 
 export const operationDefinitions = {
@@ -148,6 +164,23 @@ export const operationDefinitions = {
       }).forEach(([name, value]) => url.searchParams.set(name, value));
       return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
     }
+  },
+  'google-geocoding.reverse': {
+    provider: 'google-geocoding',
+    validate: googleReverse,
+    request(parameters, secret) {
+      const url = new URL('https://geocode.googleapis.com/v4/geocode/location');
+      url.searchParams.set('location.latitude', String(parameters.latitude));
+      url.searchParams.set('location.longitude', String(parameters.longitude));
+      url.searchParams.set('languageCode', parameters.language);
+      if (parameters.regionCode) url.searchParams.set('regionCode', parameters.regionCode);
+      return new Request(url, { headers: {
+        Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0',
+        'X-Goog-Api-Key': secret,
+        'X-Goog-FieldMask': 'results.placeId,results.types,results.addressComponents,results.postalAddress,results.location,results.granularity'
+      } });
+    },
+    classify: classifyGoogle
   },
   'mappls.nearby': {
     provider: 'mappls',

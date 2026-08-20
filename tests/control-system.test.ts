@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openTestDatabase, initializeTestDatabase, type PostgresDatabase } from './helpers/postgres-test-database.mjs';
 import {
   AMAP_PERSONAL_MONTHLY_LIMIT, ControlStore, createServiceCredentialResolver, credentialsFromEnvironment,
+  GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT, GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET,
   credentialProviderDefaults, DEFAULT_MAP_DISPLAY_CONFIG, mapDisplayConfigFromEnvironment, parseYoudaoSecret
 } from '../server/control/store';
 import { decryptSecret, encryptSecret, hashPassword, masterKeyFrom, verifyPassword } from '../server/control/security';
@@ -680,6 +681,27 @@ describe('control database security', () => {
     expect(credentialProviderDefaults.amap).toMatchObject({ period: 'month', limit: AMAP_PERSONAL_MONTHLY_LIMIT });
     expect(credentialProviderDefaults.baidu).toMatchObject({ period: 'day', limit: 100 });
     expect(credentialProviderDefaults.tencent).toMatchObject({ period: 'day', limit: 10_000 });
+    expect(credentialProviderDefaults['google-geocoding']).toMatchObject({
+      qps: 5, period: 'month', limit: GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, timezoneOffset: -480
+    });
+    expect(GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT).toBe(10_000);
+  });
+
+  it('adds pre-existing Google usage to shared local usage without granting extra quota per key', async () => {
+    const first = await store.addCredential({
+      provider: 'google-geocoding', label: 'Google A', secret: 'google-a', quotaLimit: 10, quotaUsedBaseline: 7
+    });
+    await store.addCredential({
+      provider: 'google-geocoding', label: 'Google B', secret: 'google-b', quotaLimit: 10, quotaUsedBaseline: 7
+    });
+    await store.reportCredential(first, 'success');
+    const listed = await store.listCredentials();
+    expect(listed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ quotaBaseline: 7, quotaUsed: 8, quotaRemaining: 2, officialQuotaLimit: 10_000 })
+    ]));
+    await store.reportCredential(first, 'success');
+    await store.reportCredential(first, 'success');
+    expect(await store.acquireCredential('google-geocoding')).toBeNull();
   });
 
   it('extracts only non-empty provider credentials from environment variables', () => {
@@ -833,7 +855,17 @@ describe('control database security', () => {
     expect(geoapify).toEqual({ success: true, resultCount: 1 });
     await expect(testServiceCredential('youdao', 'not-json'))
       .rejects.toMatchObject({ outcome: 'invalid' });
-    await expect(testServiceCredential('google-geocoding', 'google-secret', (async () => Response.json({ status: 'REQUEST_DENIED' })) as typeof fetch))
+    const google = await testServiceCredential('google-geocoding', 'google-secret', (async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe('https://geocode.googleapis.com');
+      expect(url.pathname).toBe('/v4/geocode/location');
+      expect(url.searchParams.get('regionCode')).toBe('US');
+      expect(url.searchParams.getAll('types')).toEqual(['street_address', 'premise', 'subpremise']);
+      expect(new Headers(init?.headers).get('X-Goog-Api-Key')).toBe('google-secret');
+      return Response.json({ results: [{ placeId: 'fixture' }] });
+    }) as typeof fetch);
+    expect(google).toEqual({ success: true, resultCount: 1 });
+    await expect(testServiceCredential('google-geocoding', 'google-secret', (async () => new Response('{}', { status: 403 })) as typeof fetch))
       .rejects.toMatchObject({ outcome: 'auth' });
     await expect(testServiceCredential('geoapify', 'geo-secret', (async () => { throw new Error('offline geo-secret'); }) as unknown as typeof fetch))
       .rejects.toMatchObject({ outcome: 'network', message: 'NETWORK_ERROR' });
@@ -905,5 +937,48 @@ describe('control database security', () => {
     expect((await store.listCredentials()).filter((credential) => credential.provider === 'youdao')).toHaveLength(1);
     const status = await (await admin.request('/admin/api/settings/youdao', { headers: { Cookie: headers.Cookie } })).json();
     expect(JSON.stringify(status)).not.toContain('app-secret');
+  });
+
+  it('manages multiple Youdao credentials independently through provider endpoints', async () => {
+    const session = await store.createSession('admin');
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json'
+    };
+    const create = async (label: string, appKey: string, appSecret: string) => {
+      const response = await admin.request('/admin/api/providers', {
+        method: 'POST', headers, body: JSON.stringify({
+          provider: 'youdao', label, secret: JSON.stringify({ appKey, appSecret })
+        })
+      });
+      expect(response.status).toBe(201);
+      return (await response.json() as { data: { id: string } }).data.id;
+    };
+    const first = await create('Translation primary', 'first-app-key', 'first-app-secret');
+    const second = await create('Translation backup', 'second-app-key', 'second-app-secret');
+    const listed = await (await admin.request('/admin/api/providers', { headers: { Cookie: headers.Cookie } })).json() as {
+      data: Array<{ id: string; provider: string; fieldMasks?: { appKey: string; appSecret: string } }>;
+    };
+    expect(listed.data.filter(({ provider }) => provider === 'youdao')).toHaveLength(2);
+    expect(listed.data.find(({ id }) => id === first)?.fieldMasks).toEqual({ appKey: 'firs••••••••', appSecret: '••••••••cret' });
+    expect(JSON.stringify(listed)).not.toContain('first-app-secret');
+    expect(JSON.stringify(listed)).not.toContain('second-app-secret');
+
+    const revealed = await (await admin.request(`/admin/api/providers/${second}/reveal-fields`, {
+      method: 'POST', headers
+    })).json();
+    expect(revealed).toEqual({ data: { id: second, appKey: 'second-app-key', appSecret: 'second-app-secret' } });
+    expect(JSON.stringify(revealed)).not.toContain('"secret":"{');
+    expect(await (await admin.request(`/admin/api/providers/${second}/reveal`, { method: 'POST', headers })).json())
+      .toEqual({ data: { id: second, secret: JSON.stringify({ appKey: 'second-app-key', appSecret: 'second-app-secret' }) } });
+
+    expect((await admin.request(`/admin/api/providers/${first}`, {
+      method: 'PUT', headers, body: JSON.stringify({ enabled: false })
+    })).status).toBe(200);
+    expect((await store.acquireCredential('youdao'))?.id).toBe(second);
+    expect((await admin.request(`/admin/api/providers/${first}`, { method: 'DELETE', headers })).status).toBe(200);
+    expect((await store.listCredentials()).filter(({ provider }) => provider === 'youdao').map(({ id }) => id)).toEqual([second]);
   });
 });

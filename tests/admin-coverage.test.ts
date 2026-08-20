@@ -134,4 +134,28 @@ describe('admin address coverage', () => {
     expect(goal?.unmetRules).toEqual(['total', 'administrative_coverage', 'regional_minimums']);
     expect(goal?.complete).toBe(false);
   });
+
+  it('counts catalog cities from mixed-depth branches in one lowest-level denominator', async () => {
+    const now = new Date().toISOString();
+    await database.batch([
+      database.prepare(`INSERT INTO sync_country_policies(
+        country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,min_per_node,coverage_ratio,level1_min,level2_min,updated_at
+      ) VALUES ('PH',1,1,10,10,10,10,1,1,0,0,?)`).bind(now),
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (31,'PH','A','Region A','Region A','甲区','region',NULL,'/31')`),
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (32,'PH','A1','Province A','Province A','甲省','province',31,'/31/32')`),
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (33,'PH','B','Region B','Region B','乙区','region',NULL,'/33')`),
+      database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (311,'PH',32,'Deep City','Deep City','深层市','city',100)`),
+      database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (312,'PH',33,'Shallow City','Shallow City','浅层市','city',100)`),
+      database.prepare(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id)
+        VALUES ('PH','Province A','Deep City',1,?,32,311)`).bind(now)
+    ]);
+    const goal = (await evaluateCountryGoals(database)).get('PH');
+    expect(goal?.rules.administrativeCoverage).toMatchObject({ covered: 1, total: 2, met: false });
+    expect(goal?.rules.regionalMinimums.lowest).toMatchObject({ total: 2, qualified: 1 });
+  });
 });

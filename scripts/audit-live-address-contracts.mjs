@@ -1,0 +1,167 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
+import { validateAddressContract } from '../src/domain/address-contracts.mjs';
+
+const base = process.env.API_BASE_URL || 'https://address.333186.xyz/api/v1';
+const token = process.env.API_TOKEN || '';
+const samples = Math.max(500, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '500', 10) || 500);
+const concurrency = Math.max(1, Math.min(24, Number.parseInt(process.env.AUDIT_CONCURRENCY || '12', 10) || 12));
+const headers = token ? { Authorization: `Bearer ${token}` } : {};
+headers['Content-Type'] = 'application/json';
+const codes = (process.env.AUDIT_COUNTRIES || 'US,CA,MX,GB,DE,FR,IT,ES,NL,RU,JP,HK,SG,TW,KR,MY,CN,TH,PH,VN,TR,SA,IN,AU,BR,NG,ZA').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
+const unavailable = new Set(['NG']);
+const nativePatterns = { CN: /\p{Script=Han}/u, HK: /\p{Script=Han}/u, TW: /\p{Script=Han}/u, JP: /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u, KR: /\p{Script=Hangul}/u, TH: /\p{Script=Thai}/u, SA: /\p{Script=Arabic}/u, RU: /\p{Script=Cyrillic}/u };
+const latin = /\p{Script=Latin}/u;
+const forbiddenNativeLatin = new Set(['HK', 'TW', 'JP', 'KR', 'TH', 'SA', 'RU', 'CN']);
+const adminCodes = new Set(['US', 'CA', 'MX', 'IT', 'AU', 'BR']);
+const postcodePatterns = {
+  US: /^\d{5}(?:-\d{4})?$/u, CA: /^[A-Z]\d[A-Z][ -]?\d[A-Z]\d$/iu,
+  MX: /^\d{5}$/u, GB: /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/iu,
+  DE: /^\d{5}$/u, FR: /^\d{5}$/u, IT: /^\d{5}$/u, ES: /^\d{5}$/u,
+  NL: /^\d{4} ?[A-Z]{2}$/iu, RU: /^\d{6}$/u, JP: /^\d{3}-?\d{4}$/u,
+  TW: /^\d{3,6}$/u, KR: /^\d{5}$/u, SG: /^\d{6}$/u, MY: /^\d{5}$/u,
+  TH: /^\d{5}$/u, PH: /^\d{4}$/u, VN: /^\d{5,6}$/u, TR: /^\d{5}$/u,
+  SA: /^\d{5}$/u, IN: /^\d{6}$/u, AU: /^\d{4}$/u,
+  BR: /^\d{5}-?\d{3}$/u, ZA: /^\d{4}$/u
+};
+const minimumUniqueRatio = Math.max(0, Math.min(1, Number(process.env.MIN_UNIQUE_RATIO || '0.9')));
+const toTraditional = {
+  HK: createTraditionalizer({ from: 'cn', to: 'hk' }),
+  TW: createTraditionalizer({ from: 'cn', to: 'tw' })
+};
+// Script checks apply to human-readable address text only; codes and numeric fields
+// are validated separately and may legitimately use Latin characters.
+const semanticFields = ['buildingName', 'street', 'locality', 'postalLocality', 'dependentLocality', 'district', 'admin1'];
+const nativeCoreFields = ['street', 'locality', 'postalLocality', 'dependentLocality', 'district', 'admin1'];
+const foreignEnglishScript = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Arabic}\p{Script=Cyrillic}]/u;
+const foreignChineseScript = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Arabic}\p{Script=Cyrillic}]/u;
+const semanticValues = (components = {}) => semanticFields.map((field) => components[field]).filter((value) => typeof value === 'string' && value.trim());
+const nativeCoreValues = (components = {}) => nativeCoreFields.map((field) => components[field]).filter((value) => typeof value === 'string' && value.trim() && /\p{L}/u.test(value));
+const hasNonIdentifierLatin = (value) => /\p{Script=Latin}/u.test(String(value)
+  .replace(/[A-Za-z]+\d[A-Za-z\d/-]*/gu, '')
+  .replace(/\d+[A-Za-z][A-Za-z\d/-]*/gu, '')
+  .replace(/[A-Za-z]+(?=(?:区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))/gu, ''));
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const fetchEligibleCount = async (code) => {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const url = new URL(`${base}/generate`);
+      url.searchParams.set('country', code);
+      url.searchParams.set('seed', `contract-audit-eligibility-${code}`);
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+      const payload = await response.json();
+      const eligibleCount = Number(payload.data?.eligibleCount);
+      if (response.ok && Number.isInteger(eligibleCount) && eligibleCount > 0) return eligibleCount;
+      if (response.status < 500) throw new Error(payload.error?.code || `http_${response.status}`);
+      lastError = new Error(`http_${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(500 * 2 ** attempt);
+  }
+  throw lastError;
+};
+const fetchBatch = async (code, batch, count) => {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(`${base}/generate/batch`, {
+        method: 'POST', headers, signal: AbortSignal.timeout(30_000),
+        body: JSON.stringify({ count, filters: { country: code }, options: { unique: false, seed: `contract-audit-${code}-${batch}` } })
+      });
+      const payload = await response.json();
+      if (response.ok || response.status < 500) return { response, payload };
+      lastError = new Error(`http_${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(500 * 2 ** attempt);
+  }
+  throw lastError;
+};
+
+const issueFor = (code, address) => {
+  const issues = [];
+  const components = address.components || {};
+  const nativeVariant = address.componentVariants?.native || {};
+  const en = address.addressVariants?.en || '';
+  const zh = address.addressVariants?.['zh-CN'] || '';
+  const nativeComponents = nativeCoreValues(nativeVariant);
+  const englishComponents = semanticValues(address.componentVariants?.en);
+  const chineseComponents = semanticValues(address.componentVariants?.['zh-CN']);
+  if (address.countryCode !== code) issues.push('country_mismatch');
+  if (address.addressStatus !== 'verified') issues.push('not_verified');
+  if (!String(components.houseNumber || '').trim()) issues.push('missing_house_number');
+  if (!String(components.street || '').trim()) issues.push('missing_street');
+  for (const reason of validateAddressContract(code, nativeVariant, { strict: true }).reasons) issues.push(`contract_${reason}`);
+  const postcode = String(components.postcode || '').trim();
+  if (postcodePatterns[code] && !postcodePatterns[code].test(postcode)) issues.push('invalid_postcode');
+  const latitude = Number(address.coordinates?.latitude);
+  const longitude = Number(address.coordinates?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+    || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) issues.push('invalid_coordinates');
+  const evidenceTypes = new Set((address.evidence || []).map((entry) => entry.type));
+  if (!evidenceTypes.has('address_existence')) issues.push('missing_address_evidence');
+  if (!evidenceTypes.has('coordinate')) issues.push('missing_coordinate_evidence');
+  if (!evidenceTypes.has('residential_use')) issues.push('missing_residential_evidence');
+  if (!address.addressVariants?.native || !en || !zh) issues.push('missing_language_variant');
+  if (nativePatterns[code] && (!nativeComponents.length || nativeComponents.some((value) => !nativePatterns[code].test(value)))) issues.push('native_script');
+  if (forbiddenNativeLatin.has(code) && nativeComponents.some(hasNonIdentifierLatin)) issues.push('native_latin_mixed');
+  if (toTraditional[code] && nativeComponents.some((value) => toTraditional[code](value) !== value)) issues.push('native_not_traditional');
+  if (!latin.test(en)) issues.push('english_missing_latin');
+  if (englishComponents.some((value) => foreignEnglishScript.test(value))) issues.push('english_source_script');
+  if (!/\p{Script=Han}/u.test(zh) || !chineseComponents.some((value) => /\p{Script=Han}/u.test(value))) issues.push('zh_missing_han');
+  if (chineseComponents.some((value) => foreignChineseScript.test(value))) issues.push('zh_source_script');
+  if (adminCodes.has(code) && !components.admin1Code) issues.push('missing_admin_code');
+  return issues;
+};
+
+const result = {};
+for (const code of codes) {
+  if (unavailable.has(code)) { result[code] = { skipped: true, reason: 'no published pool' }; continue; }
+  const eligibleCount = await fetchEligibleCount(code);
+  const rows = [];
+  const batches = Math.ceil(samples / 50);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, batches) }, async () => {
+    while (cursor < batches) {
+      const batch = cursor++;
+      const count = Math.min(50, samples - batch * 50);
+      const { response, payload } = await fetchBatch(code, batch, count);
+      const addresses = payload.data?.results?.map(({ address }) => address) || [];
+      if (!response.ok || addresses.length !== count) {
+        for (let index = 0; index < count; index += 1) rows[batch * 50 + index] = { issues: [payload.error?.code || `http_${response.status}`] };
+        continue;
+      }
+      addresses.forEach((address, index) => {
+        rows[batch * 50 + index] = { id: address.id, admin1: address.components?.admin1 || '', locality: address.components?.locality || '', issues: issueFor(code, address) };
+      });
+    }
+  });
+  await Promise.all(workers);
+  const issueCounts = {};
+  for (const row of rows) for (const issue of row.issues) issueCounts[issue] = (issueCounts[issue] || 0) + 1;
+  const uniqueAddresses = new Set(rows.map(({ id }) => id).filter(Boolean)).size;
+  const expectedUniqueAddresses = eligibleCount * (1 - ((eligibleCount - 1) / eligibleCount) ** samples);
+  const minimumUniqueAddresses = Math.max(1, Math.floor(expectedUniqueAddresses * minimumUniqueRatio));
+  if (uniqueAddresses < minimumUniqueAddresses) issueCounts.low_unique_ratio = minimumUniqueAddresses - uniqueAddresses;
+  result[code] = {
+    requested: samples,
+    returned: rows.length,
+    eligibleCount,
+    uniqueAddresses,
+    expectedUniqueAddresses: Number(expectedUniqueAddresses.toFixed(1)),
+    minimumUniqueAddresses,
+    admin1Covered: new Set(rows.map(({ admin1 }) => admin1).filter(Boolean)).size,
+    localitiesCovered: new Set(rows.map(({ locality }) => locality).filter(Boolean)).size,
+    issueCounts
+  };
+  process.stdout.write(`${code} ${JSON.stringify(result[code])}\n`);
+}
+const output = { auditedAt: new Date().toISOString(), base, samplesPerCountry: samples, result };
+const outputPath = process.env.AUDIT_OUTPUT || 'runtime/address-contract-audit.json';
+await mkdir(dirname(outputPath), { recursive: true });
+await writeFile(outputPath, JSON.stringify(output, null, 2));
+if (Object.values(result).some((value) => value.issueCounts && Object.keys(value.issueCounts).length)) process.exitCode = 1;

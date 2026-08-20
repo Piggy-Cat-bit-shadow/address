@@ -126,6 +126,48 @@ describe('synchronization artifact cleanup', () => {
     expect(await exists(abandoned)).toBe(true);
   });
 
+  it('retains durable Thailand DPT checkpoints until the adapter replaces their source version', async () => {
+    const root = testRoot();
+    const current = new Date('2026-08-13T12:00:00Z');
+    const old = new Date(current.getTime() - 8 * 60 * 60_000);
+    const state = resolve(root, 'raw', 'thailand-dpt-residential-state-0123456789abcdefabcd');
+    await Promise.all([
+      createFile(resolve(state, 'checkpoint.json'), old),
+      createFile(resolve(state, 'checkpoint.json.candidates.jsonl'), old)
+    ]);
+    await utimes(state, old, old);
+    const cleanup = createSyncArtifactCleanup({
+      cacheDir: root, now: () => current.getTime(), staleMs: 6 * 60 * 60_000,
+      log: { log: () => {}, error: () => {} }
+    });
+
+    await cleanup.runOnce();
+
+    expect(await exists(resolve(state, 'checkpoint.json'))).toBe(true);
+    expect(await exists(resolve(state, 'checkpoint.json.candidates.jsonl'))).toBe(true);
+  });
+
+  it('retains durable Statistics Canada NAR province checkpoints until the adapter replaces their release', async () => {
+    const root = testRoot();
+    const current = new Date('2026-08-13T12:00:00Z');
+    const old = new Date(current.getTime() - 8 * 60 * 60_000);
+    const state = resolve(root, 'raw', 'canada-statcan-nar-residential-state-0123456789abcdefabcd');
+    await Promise.all([
+      createFile(resolve(state, 'checkpoint.json'), old),
+      createFile(resolve(state, '62.jsonl'), old)
+    ]);
+    await utimes(state, old, old);
+    const cleanup = createSyncArtifactCleanup({
+      cacheDir: root, now: () => current.getTime(), staleMs: 6 * 60 * 60_000,
+      log: { log: () => {}, error: () => {} }
+    });
+
+    await cleanup.runOnce();
+
+    expect(await exists(resolve(state, 'checkpoint.json'))).toBe(true);
+    expect(await exists(resolve(state, '62.jsonl'))).toBe(true);
+  });
+
   it('stops before removal when a synchronization job starts during a pass', async () => {
     const root = testRoot();
     const file = resolve(root, 'raw', 'source.zip.part');

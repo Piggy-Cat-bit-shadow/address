@@ -1,11 +1,11 @@
 import { applyHierarchicalQuota } from './address-policy.mjs';
 import { validateAddressQuality } from '../../src/domain/address-quality.mjs';
-import { validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
+import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
+import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
 const randomKey = (hash) => Number.parseInt(hash.slice(0, 8), 16) & 0x7fffffff;
-const expiry = (date) => new Date(date.getTime() + 180 * 24 * 60 * 60 * 1000).toISOString();
 const DEFAULT_MINIMUM_RATIO = 0.7;
 
 // Minimum administrative completeness per country. A record must carry at least
@@ -205,6 +205,14 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
       if (rebuildFormattedAddress) record.formattedAddress = rebuildFormattedAddress(components, countryCode);
     }
   }
+  if (requiresAdminCode(countryCode) && !String(components.admin1Code || '').trim()) {
+    if (countryCode === 'US') components.admin1Code = canonicalUsSubdivisionCode(components.admin1 || '');
+    if (!components.admin1Code && geocoder?.nearestRegion) {
+      const region = geocoder.nearestRegion(Number(record.latitude), Number(record.longitude), 10);
+      if (region?.code) components.admin1Code = region.code;
+    }
+    record.admin1Code = components.admin1Code || '';
+  }
   const policy = requiredAdminFields[countryCode] || { region: false, city: false };
   if (policy.region && !hasRegion(components)) return false;
   if (policy.city && !hasCity(components)) return false;
@@ -218,13 +226,16 @@ const enrichAndValidate = (record, geocoder, countryCode, rebuildFormattedAddres
 };
 const applyQualityGate = (record, countryCode, rebuildFormattedAddress) => {
   const hierarchy = validateAdministrativeHierarchy({
-    countryCode, admin1: record.components.admin1, admin1Code: record.components.admin1Code
+    countryCode, admin1: record.components.admin1, admin1Code: record.components.admin1Code,
+    locality: record.components.locality
   });
   if (!hierarchy.valid) return { valid: false, reasons: [hierarchy.reason], components: record.components };
   const quality = validateAddressQuality({
     countryCode, components: record.components, latitude: record.latitude, longitude: record.longitude
   });
   if (!quality.valid) return quality;
+  const contract = validateAddressContract(countryCode, record.components, { strict: true });
+  if (!contract.valid) return { valid: false, reasons: contract.reasons, components: record.components };
   record.components = quality.components;
   for (const field of ['admin1', 'admin1Code', 'locality', 'postalLocality', 'district', 'postcode', 'street', 'houseNumber', 'buildingName', 'unit']) {
     record[field] = quality.components[field] || '';
@@ -291,18 +302,19 @@ const datasetStatement = (database, { datasetId, datasetVersion, shard, discover
   INSERT INTO address_datasets(
     id,source_id,country_code,version,published_at,retrieved_at,imported_at,input_checksum,format,
     license_code,license_name,license_url,attribution_text,attribution_url,terms_url,
-    share_alike,notice_required,redistribution_allowed,accepted_count,rejected_count,active_count,status
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending')
+    share_alike,notice_required,redistribution_allowed,accepted_count,rejected_count,active_count,source_complete,status
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending')
   ON CONFLICT(id) DO UPDATE SET version=excluded.version,published_at=excluded.published_at,
     retrieved_at=excluded.retrieved_at,imported_at=excluded.imported_at,input_checksum=excluded.input_checksum,
-    format=excluded.format,status='pending'
+    format=excluded.format,source_complete=excluded.source_complete,status='pending'
 `).bind(
   datasetId, shard.source.id, shard.countryCode, datasetVersion, discovery.publishedAt || null,
   observedAt, observedAt, materialized.checksum, materialized.format,
   shard.source.licenseCode, shard.source.licenseName, shard.source.licenseUrl,
   shard.source.attributionText, shard.source.attributionUrl, shard.source.termsUrl,
   Number(Boolean(shard.source.shareAlike)), Number(Boolean(shard.source.noticeRequired)),
-  Number(shard.source.redistributionAllowed !== false), 0, 0, 0
+  Number(shard.source.redistributionAllowed !== false), 0, 0, 0,
+  Number(materialized.sourceComplete !== false)
 );
 
 const addressStatements = (database, records, context) => {
@@ -384,7 +396,6 @@ export class PostgresAddressImporter {
       overrides: new Map()
     };
     const policyHash = this.hash(JSON.stringify({
-      targetCount: activePolicy.targetCount,
       levelLimits: activePolicy.levelLimits,
       sourceMaxRecords,
       overrides: [...activePolicy.overrides].sort(([left], [right]) => left.localeCompare(right)),
@@ -395,17 +406,19 @@ export class PostgresAddressImporter {
         nodes: [...(activePolicy.nodeFloors || new Map())].sort(([left], [right]) => left.localeCompare(right))
       }
     })).slice(0, 8);
+    const sourceComplete = materialized.sourceComplete !== false;
     const generatedDatasetId = `${shard.id}-${String(discovery.version).replace(/[^a-zA-Z0-9._-]/gu, '_')}-${materialized.checksum.slice(0, 12)}-${ADDRESS_IMPORT_REVISION}-${policyHash}`;
     const datasetVersion = `${String(discovery.version)}-${ADDRESS_IMPORT_REVISION}-${policyHash}`;
-    const existingIdentity = await this.database.prepare(`SELECT id,status,active_count,rejected_count
+    const existingIdentity = await this.database.prepare(`SELECT id,status,active_count,rejected_count,source_complete
       FROM address_datasets WHERE source_id=? AND country_code=? AND version LIKE ? AND input_checksum=?
       ORDER BY imported_at DESC LIMIT 1`).bind(
       shard.source.id, shard.countryCode, `${String(discovery.version)}-%`, materialized.checksum
     ).first();
     checkpoint();
     const datasetId = existingIdentity?.id ? String(existingIdentity.id) : generatedDatasetId;
-    const existing = await this.database.prepare("SELECT status,active_count,rejected_count FROM address_datasets WHERE id=?").bind(datasetId).first();
-    if (existing?.status === 'active' && datasetId === generatedDatasetId) {
+    const existing = await this.database.prepare("SELECT status,active_count,rejected_count,source_complete FROM address_datasets WHERE id=?").bind(datasetId).first();
+    if (existing?.status === 'active' && datasetId === generatedDatasetId
+      && Number(existing.source_complete) === Number(sourceComplete)) {
       return {
         datasetId,
         acceptedCount: Number(existing.active_count),
@@ -455,7 +468,7 @@ export class PostgresAddressImporter {
       || left.canonicalHash.localeCompare(right.canonicalHash));
     const records = applyHierarchicalQuota(candidates, {
       ...activePolicy,
-      targetCount: Math.min(activePolicy.targetCount, sourceMaxRecords),
+      targetCount: sourceMaxRecords,
       maxRecords: sourceMaxRecords
     });
     if (!records.length) {
@@ -490,19 +503,21 @@ export class PostgresAddressImporter {
         AND evidence.evidence_type='address_existence' AND evidence.is_current=1
       LEFT JOIN address_pool pool ON pool.id=evidence.address_id AND pool.active=1
       WHERE dataset.source_id=? AND dataset.country_code=? AND dataset.status='active'
+        AND dataset.source_complete=?
+        AND (?=1 OR dataset.version=?)
       GROUP BY dataset.id,dataset.version,dataset.active_count,dataset.imported_at
       ORDER BY dataset.imported_at DESC LIMIT 1`
-    ).bind(shard.source.id, shard.countryCode).first();
+    ).bind(shard.source.id, shard.countryCode, Number(sourceComplete), Number(sourceComplete), datasetVersion).first();
     const configuredGate = shard.qualityGate || {};
-    const effectiveMaxRecords = Math.min(activePolicy.targetCount, sourceMaxRecords);
+    const effectiveMaxRecords = sourceMaxRecords;
     const compactMinimum = shard.countryCode === 'SG' ? 50 : shard.countryCode === 'HK' ? 500 : 1_000;
     const defaultMinimumRecords = effectiveMaxRecords >= 1_000
       ? Math.max(10, Math.min(compactMinimum, Math.ceil(effectiveMaxRecords * 0.01))) : 1;
     const defaultMinimumAdmin1 = shard.countryCode === 'SG'
       ? 0 : effectiveMaxRecords >= 1_000 && shard.countryCode !== 'HK' ? 2 : 1;
-    const minimumRecords = configuredGate.minimumRecords
+    const minimumRecords = !sourceComplete ? 1 : configuredGate.minimumRecords
       ?? (previous ? Math.min(defaultMinimumRecords, Number(previous.active_count || 0) || 1) : 1);
-    const minimumAdmin1 = configuredGate.minimumAdmin1
+    const minimumAdmin1 = !sourceComplete ? 0 : configuredGate.minimumAdmin1
       ?? (previous ? Math.min(defaultMinimumAdmin1, Number(previous.admin1_count || 0)) : Math.min(defaultMinimumAdmin1, 1));
     const minimumCountRatio = configuredGate.minimumCountRatio ?? DEFAULT_MINIMUM_RATIO;
     const minimumAdmin1Ratio = configuredGate.minimumAdmin1Ratio ?? DEFAULT_MINIMUM_RATIO;
@@ -526,8 +541,9 @@ export class PostgresAddressImporter {
     // change intentionally replaces the sampling/enrichment rules, so the old counts are not a baseline.
     const sameRevision = Boolean(
       previous?.id
-      && (String(previous.version || '').endsWith(`-${ADDRESS_IMPORT_REVISION}`)
-        || String(previous.version || '').includes(`-${ADDRESS_IMPORT_REVISION}-`))
+      && (sourceComplete
+        ? String(previous.version || '').includes(`-${ADDRESS_IMPORT_REVISION}-`)
+        : String(previous.version || '') === datasetVersion)
       && String(previous.id).endsWith(`-${ADDRESS_IMPORT_REVISION}-${policyHash}`)
     );
     if (sameRevision) {
@@ -545,7 +561,7 @@ export class PostgresAddressImporter {
     if (failures.length) throw new SnapshotQualityError(shard.id, failures, metrics, discovery.failureSignature || '');
     checkpoint();
     const observedAt = new Date().toISOString();
-    const context = { datasetId, discovery, observedAt, expiresAt: expiry(new Date(observedAt)), hash: this.hash };
+    const context = { datasetId, discovery, observedAt, expiresAt: null, hash: this.hash };
     await this.database.exec('BEGIN');
     try {
       checkpoint();
@@ -570,11 +586,14 @@ export class PostgresAddressImporter {
         this.database.prepare(`UPDATE address_pool_evidence SET is_primary=0,is_current=0
           WHERE dataset_id IN (
             SELECT id FROM address_datasets WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')
-          )`).bind(shard.source.id, shard.countryCode, datasetId),
-        this.database.prepare("UPDATE address_datasets SET status='retired',active_count=0 WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')")
-          .bind(shard.source.id, shard.countryCode, datasetId),
-        this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=? WHERE id=?")
-          .bind(localized.length, rejectedCount, datasetId),
+              AND (?=1 OR (source_complete=0 AND version=?))
+          )`).bind(shard.source.id, shard.countryCode, datasetId, Number(sourceComplete), datasetVersion),
+        this.database.prepare(`UPDATE address_datasets SET status='retired',active_count=0
+          WHERE source_id=? AND country_code=? AND id<>? AND status IN ('pending','active')
+            AND (?=1 OR (source_complete=0 AND version=?))`)
+          .bind(shard.source.id, shard.countryCode, datasetId, Number(sourceComplete), datasetVersion),
+        this.database.prepare("UPDATE address_datasets SET status='active',accepted_count=?,rejected_count=?,source_complete=? WHERE id=?")
+          .bind(localized.length, rejectedCount, Number(sourceComplete), datasetId),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=? WHERE id IN (
           SELECT target.id FROM address_pool target
           LEFT JOIN (
@@ -589,7 +608,9 @@ export class PostgresAddressImporter {
             SELECT id FROM address_pool WHERE country_code=?
           )`).bind(shard.countryCode),
         this.database.prepare(`UPDATE address_pool SET active=0,retired_at=?
-          WHERE country_code=? AND id IN (
+          WHERE country_code=?
+            AND (active=1 OR retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%')
+            AND id IN (
             SELECT evidence.address_id FROM address_pool_evidence evidence
             JOIN address_datasets dataset ON dataset.id=evidence.dataset_id
             WHERE evidence.is_current=1 AND dataset.status='active'
@@ -626,21 +647,12 @@ export class PostgresAddressImporter {
           WHERE evidence.is_current=1 AND dataset.status='active'
         ) ORDER BY quality_score DESC,random_key,id`).bind(shard.countryCode).all()).results;
       checkpoint();
-      const published = applyHierarchicalQuota(countryCandidates.map((row) => ({
-        id: String(row.id),
-        countryCode: String(row.country_code),
-        components: {
-          admin1: String(row.admin1 || ''),
-          locality: String(row.locality || ''),
-          postalLocality: String(row.postal_locality || ''),
-          district: String(row.district || '')
-        }
-      })), activePolicy);
-      for (let offset = 0; offset < published.length; offset += batchSize) {
+      for (let offset = 0; offset < countryCandidates.length; offset += batchSize) {
         checkpoint();
-        const ids = published.slice(offset, offset + batchSize).map(({ id }) => id);
+        const ids = countryCandidates.slice(offset, offset + batchSize).map(({ id }) => String(id));
         await this.database.prepare(`UPDATE address_pool SET active=1,retired_at=NULL
-          WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+          WHERE (retired_at IS NULL OR retired_at NOT LIKE 'publication-validation:%')
+            AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
       }
       const activeDatasets = (await this.database.prepare(`SELECT id FROM address_datasets
         WHERE country_code=? AND status='active'`).bind(shard.countryCode).all()).results;

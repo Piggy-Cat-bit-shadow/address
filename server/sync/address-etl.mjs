@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { pinyin } from 'pinyin-pro';
-import { createSourceAdapters, loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
+import { createSourceAdapters, loadSourceCatalog, sourceCapabilityRevision } from './source-adapters.mjs';
 import { CatalogReverseGeocoder } from './catalog-reverse-geocoder.mjs';
+import { loadGoogleCoverageTargets } from './google-coverage-targets.mjs';
 import { isCountryDue, planCountryShards } from './country-plan.mjs';
 import { ADDRESS_IMPORT_REVISION, PostgresAddressImporter } from './postgres-address-importer.mjs';
 import { refreshResidentialCoverage } from '../database/residential-coverage.mjs';
@@ -58,7 +59,7 @@ const sourceQualityFailureSignature = (shard, discovery, policy) => {
   return [
     shard.id,
     discovery.adapter,
-    sourceAdapterRevisions[discovery.adapter] || 'external',
+    sourceCapabilityRevision(shard) || 'external',
     discovery.version,
     `residential-buildings=${Number(Boolean(residentialBuildingAvailable))}`,
     `building-assets=${buildingAssets}`,
@@ -112,8 +113,9 @@ const usableTranslation = (value, target) => {
 const hongKongBilingualComponent = (value) => {
   const source = clean(value);
   if (!/[\p{Script=Han}]/u.test(source) || !/[A-Za-z]/u.test(source)) return null;
-  const native = clean(source.replace(/[A-Za-z][A-Za-z0-9 .,'’()\/-]*/gu, ' '));
-  const en = clean(source.replace(/[\p{Script=Han}]+/gu, ' ').replace(/[，。；：、]/gu, ' '));
+  const trimSeparator = (part) => clean(part).replace(/^(?:&\s*)+|(?:\s*&)+$/gu, '').trim();
+  const native = trimSeparator(source.replace(/[A-Za-z][A-Za-z0-9 .,'’()\/-]*/gu, ' '));
+  const en = trimSeparator(source.replace(/[\p{Script=Han}]+/gu, ' ').replace(/[，。；：、]/gu, ' '));
   return native && en ? { native, en } : null;
 };
 
@@ -511,7 +513,7 @@ export const normalizeSourceRecord = (value, shard, format) => {
     sourceDataset,
     countryCode: shard.countryCode,
     admin1,
-    admin1Code: '',
+    admin1Code: clean(value.admin1_code),
     locality,
     postalLocality,
     district,
@@ -523,8 +525,14 @@ export const normalizeSourceRecord = (value, shard, format) => {
     propertyType,
     residentialSourceRecordId,
     residentialSourceClass,
-    evidenceClass: format === 'overture-jsonl' ? 'official-address-point' : 'open-address-point',
-    qualityScore: format === 'overture-jsonl' ? 0.86 : 0.8,
+    evidenceClass: clean(value.residential_evidence).startsWith('BU_USE=')
+      ? 'official-residential-address-register'
+      : clean(value.residential_evidence).startsWith('OSM_BUILDING_GOOGLE=')
+        ? 'open-residential-building-geocoded'
+      : format === 'overture-jsonl' ? 'official-address-point' : 'open-address-point',
+    qualityScore: clean(value.residential_evidence).startsWith('BU_USE=') ? 0.94
+      : clean(value.residential_evidence).startsWith('OSM_BUILDING_GOOGLE=') ? 0.9
+      : format === 'overture-jsonl' ? 0.86 : 0.8,
     nativeLanguage: nativeLanguage[shard.countryCode] || 'und',
     longitude,
     latitude,
@@ -651,13 +659,17 @@ export const runAddressEtl = async ({
       WHERE country_code=? AND latitude IS NOT NULL AND longitude IS NOT NULL
       ORDER BY latitude,longitude`).bind(countryCode, countryCode).all()).results;
   };
+  const loadCoverageTargets = async (countryCode) => database
+    ? loadGoogleCoverageTargets(database, countryCode)
+    : [];
   const adapters = providedAdapters || createSourceAdapters({
     processConcurrency: runtimePolicy.cpuConcurrency,
     signal,
     environment,
     credentialPool,
     credentialBrokerClient,
-    loadSeedLocations
+    loadSeedLocations,
+    loadGoogleCoverageTargets: loadCoverageTargets
   });
   const importer = activeRun ? providedImporter || new PostgresAddressImporter({
     database,
@@ -824,10 +836,11 @@ export const runAddressEtl = async ({
       const sourceTarget = integer(task.shard.maxRecords, maxRecords);
       const estimatedOutputBytes = sourceTarget * 2048;
       const estimatedDatabaseBytes = sourceTarget * 2048;
-      const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.version || ''}`;
-      const temporarySourceBytes = task.discovery.adapter === 'geofabrik' && !plannedRawArtifacts.has(rawKey)
+      const rawKey = `${task.discovery.dataUrl || ''}\u001f${task.discovery.rawVersion || task.discovery.version || ''}`;
+      const downloadsGeofabrik = ['geofabrik', 'google-residential-enrichment'].includes(task.discovery.adapter);
+      const temporarySourceBytes = downloadsGeofabrik && !plannedRawArtifacts.has(rawKey)
         ? task.discovery.sourceBytes || 0 : 0;
-      if (task.discovery.adapter === 'geofabrik') plannedRawArtifacts.add(rawKey);
+      if (downloadsGeofabrik) plannedRawArtifacts.add(rawKey);
       const projectedCacheBytes = plannedCacheBytes + estimatedOutputBytes + temporarySourceBytes;
       try {
         storageBudget = assertStorageBudget({
@@ -865,11 +878,11 @@ export const runAddressEtl = async ({
           cacheHit: task.materialized.cacheHit === true,
           checksumSha256: null,
           sourceChecksumSha256: task.previous?.sourceChecksumSha256 || null,
-          acceptedCount: task.previous?.acceptedCount ?? null,
-          rejectedCount: task.previous?.rejectedCount ?? null,
-          rejectionReasons: task.previous?.rejectionReasons || {},
+          acceptedCount: 0,
+          rejectedCount: null,
+          rejectionReasons: {},
           metrics: {
-            ...(task.previous?.metrics || {}),
+            ...(task.materialized.metrics || {}),
             checkpointStage: task.materialized.checkpointStage || null,
             nextAttemptAt: task.materialized.nextAttemptAt || null
           },
@@ -895,21 +908,29 @@ export const runAddressEtl = async ({
         checkpoint();
         const storageBytesAfterImport = await measureStorage([dataRoot]);
         storageBudget = assertStorageBudget({ currentBytes: storageBytesAfterImport, softLimitBytes, hardLimitBytes });
+        const sourceComplete = task.materialized.sourceComplete !== false;
         Object.assign(task.report, {
-          status: imported.skipped ? 'unchanged' : 'imported', checksumSha256: task.materialized.checksum,
+          status: sourceComplete ? (imported.skipped ? 'unchanged' : 'imported') : 'partial',
+          checksumSha256: task.materialized.checksum,
           sourceChecksumSha256: task.materialized.sourceChecksum || task.previous?.sourceChecksumSha256 || null,
           cacheBytes: task.materialized.cacheBytes, cacheHit: task.materialized.cacheHit, datasetId: imported.datasetId,
           acceptedCount: imported.acceptedCount, rejectedCount: imported.rejectedCount,
-          rejectionReasons: imported.rejectionReasons || {}, metrics: imported.metrics || null,
+          rejectionReasons: imported.rejectionReasons || {}, metrics: {
+            ...(imported.metrics || {}),
+            ...(task.materialized.metrics || {}),
+            checkpointStage: task.materialized.checkpointStage || null,
+            nextAttemptAt: task.materialized.nextAttemptAt || null
+          },
           localityCount: imported.localityCount || null, residentialCount: imported.residentialCount || 0,
-          sourceComplete: task.materialized.sourceComplete !== false,
+          sourceComplete,
           checkpointToken: task.materialized.checkpointToken || null,
           deficit: Math.max(0, task.report.targetCount - imported.acceptedCount), storageBytesAfterImport,
-          allowShadowExpansion: storageBudget.allowShadowExpansion, lastSuccessfulAt: checkedAt.toISOString()
+          allowShadowExpansion: storageBudget.allowShadowExpansion,
+          lastSuccessfulAt: sourceComplete ? checkedAt.toISOString() : task.previous?.lastSuccessfulAt || null
         });
         state.shards[task.shard.id] = task.report;
         await stateStore.save({ ...state, updatedAt: checkedAt.toISOString() });
-        await pruneShardCache(cacheDir, task.shard, task.materialized.file);
+        if (sourceComplete) await pruneShardCache(cacheDir, task.shard, task.materialized.file);
         plannedCacheBytes = await directorySize(cacheDir);
         plannedStorageBytes = await measureStorage([dataRoot]);
         changed ||= !imported.skipped;
@@ -924,8 +945,9 @@ export const runAddressEtl = async ({
       const wave = planned.slice(offset, offset + runtimePolicy.prepareConcurrency);
       const waveRaw = new Map();
       for (const task of wave) {
-        if (task.discovery.adapter === 'geofabrik') {
-          waveRaw.set(`${task.discovery.dataUrl}\u001f${task.discovery.version}`, Number(task.discovery.sourceBytes || 0));
+        if (['geofabrik', 'google-residential-enrichment'].includes(task.discovery.adapter)) {
+          waveRaw.set(`${task.discovery.dataUrl}\u001f${task.discovery.rawVersion || task.discovery.version}`,
+            Number(task.discovery.sourceBytes || 0));
         }
       }
       const currentStorage = await measureStorage([dataRoot]);

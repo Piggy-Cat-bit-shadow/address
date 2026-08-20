@@ -40,6 +40,73 @@ const boundedPolicy = (value) => {
 const observationCurrent = (row, now) => row?.observed_at
   && (!row.reset_at || Date.parse(row.reset_at) > now.getTime());
 
+const jwtExpiresAt = (token) => {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const exp = Number(payload?.exp);
+    return Number.isFinite(exp) && exp > 0 ? new Date(exp * 1000) : null;
+  } catch {
+    return null;
+  }
+};
+
+const inspectOneMapCredential = (row, masterKey, now) => {
+  if (row.provider !== 'onemap') return { invalid: false, expired: false };
+  let secret;
+  try { secret = decrypt(row, masterKey); } catch { return { invalid: true, expired: false }; }
+  // Keep opaque test fixtures compatible; OneMap production tokens are JWTs.
+  if (String(secret).split('.').length !== 3) return { invalid: false, expired: false };
+  const expiresAt = jwtExpiresAt(secret);
+  if (!expiresAt) return { invalid: true, expired: false };
+  return { invalid: false, expired: expiresAt.getTime() <= now.getTime() };
+};
+
+const ensureQuotaCounter = async (database, window, start, localUsed, nowIso) => {
+  await database.prepare(`INSERT INTO credential_broker_quota_counters(
+      scope_id,service,period,period_start,limit_count,dispatch_count,production_count,test_count,updated_at
+    ) VALUES (?,?,?,?,?,?,?,0,?) ON CONFLICT(scope_id,service,period,period_start) DO NOTHING`)
+    .bind(window.scope_id, window.service, window.period, start, window.limit_count,
+      localUsed, localUsed, nowIso).run();
+  // Counters predate provider_quota_windows and may retain an obsolete safety cap.
+  // The current window is the source of truth; usage counts are never reset here.
+  await database.prepare(`UPDATE credential_broker_quota_counters SET limit_count=?,updated_at=?
+    WHERE scope_id=? AND service=? AND period=? AND period_start=? AND limit_count<>?`)
+    .bind(window.limit_count, nowIso, window.scope_id, window.service, window.period, start, window.limit_count).run();
+  return await database.prepare(`SELECT * FROM credential_broker_quota_counters
+    WHERE scope_id=? AND service=? AND period=? AND period_start=?`)
+    .bind(window.scope_id, window.service, window.period, start).first();
+};
+
+const synchronizeProviderCounters = async (database, provider, now) => {
+  const rows = (await database.prepare(`SELECT credential.id,credential.quota_service,credential.quota_scope_id,
+      credential.quota_period,credential.quota_limit,credential.quota_timezone_offset,
+      quota_window.service AS window_service,quota_window.scope_id AS window_scope_id,quota_window.period AS window_period,
+      quota_window.limit_count AS window_limit_count,quota_window.timezone_offset AS window_timezone_offset
+    FROM provider_credentials credential LEFT JOIN provider_quota_windows quota_window
+      ON quota_window.credential_id=credential.id AND quota_window.enabled=1
+    WHERE credential.provider=? AND credential.enabled=1`).bind(provider).all()).results;
+  const nowIso = now.toISOString();
+  for (const row of rows) {
+    const window = row.window_service ? {
+      service: row.window_service, scope_id: row.window_scope_id, period: row.window_period,
+      limit_count: row.window_limit_count, timezone_offset: row.window_timezone_offset
+    } : {
+      service: row.quota_service, scope_id: row.quota_scope_id, period: row.quota_period,
+      limit_count: row.quota_limit, timezone_offset: row.quota_timezone_offset
+    };
+    const start = periodStart(window.period, Number(window.timezone_offset || 0), now);
+    const localUsed = Number(await database.prepare(`SELECT COALESCE(SUM(
+        usage.accepted_count+usage.rejected_count),0) AS total
+      FROM provider_credentials credential JOIN provider_usage_periods usage
+        ON usage.credential_id=credential.id
+      WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
+      .bind(window.scope_id, window.service, start).first('total') || 0);
+    await ensureQuotaCounter(database, window, start, localUsed, nowIso);
+  }
+};
+
 export class CredentialBrokerStore {
   constructor(database, masterKey, {
     now = () => new Date(),
@@ -84,9 +151,11 @@ export class CredentialBrokerStore {
         reason: `broker_test_policy_missing:${provider}`, revision: 'test-policy-missing'
       };
     }
-    const rows = (await this.database.prepare(`SELECT id,status,cooldown_until,provider_reported_reset_at,
-        enabled,weight,qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset,quota_scope_id,last_used_at
+    const rows = (await this.database.prepare(`SELECT id,provider,status,cooldown_until,provider_reported_reset_at,
+        enabled,weight,qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset,quota_scope_id,last_used_at,
+        secret_ciphertext,secret_iv,secret_tag
       FROM provider_credentials WHERE provider=? ORDER BY id`).bind(provider).all()).results;
+    await synchronizeProviderCounters(this.database, provider, now);
     const candidates = rows.filter((row) => Boolean(row.enabled) && String(row.status || '') !== 'disabled');
     if (!candidates.length) return {
       provider, known: rows.length > 0, available: false, nextResetAt: null, waitState: 'blocked',
@@ -96,10 +165,18 @@ export class CredentialBrokerStore {
     let available = false;
     let nextAvailable = 0;
     let waitState = 'blocked';
+    let credentialIssue = null;
     const revision = [];
     for (const row of candidates) {
       revision.push([row.id, row.enabled, row.weight, row.qps_limit, row.quota_service, row.quota_period,
         row.quota_limit, row.quota_timezone_offset, row.quota_scope_id]);
+      const inspection = inspectOneMapCredential(row, this.masterKey, now);
+      if (inspection.expired || inspection.invalid) {
+        credentialIssue = inspection.expired ? `api_key_expired:${provider}` : `api_key_needs_review:${provider}`;
+        await this.database.prepare(`UPDATE provider_credentials SET status='needs_review',cooldown_until=NULL,updated_at=?
+          WHERE id=? AND status NOT IN ('disabled','needs_review')`).bind(now.toISOString(), row.id).run();
+        continue;
+      }
       if (String(row.status || '') === 'needs_review') continue;
       let blockedUntil = Math.max(
         Date.parse(row.cooldown_until || '') || 0,
@@ -123,22 +200,22 @@ export class CredentialBrokerStore {
             ON usage.credential_id=credential.id
           WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
           .bind(window.scope_id, window.service, start).first('total') || 0);
-        const counter = await this.database.prepare(`SELECT dispatch_count,test_count,limit_count
-          FROM credential_broker_quota_counters
-          WHERE scope_id=? AND service=? AND period=? AND period_start=?`)
-          .bind(window.scope_id, window.service, window.period, start).first();
-        const observation = await this.database.prepare(`SELECT MAX(observation.used_count) AS used_count,
+        const counter = await ensureQuotaCounter(this.database, window, start, localUsed, now.toISOString());
+        const observation = await this.database.prepare(`SELECT
+            MAX(CASE WHEN observation.source='provider' THEN observation.used_count ELSE 0 END) AS provider_used,
+            MAX(CASE WHEN observation.source='local' THEN observation.used_count ELSE 0 END) AS baseline_used,
             MIN(observation.limit_count) AS limit_count,MAX(observation.reset_at) AS reset_at,
             MAX(observation.observed_at) AS observed_at
           FROM provider_quota_observations observation JOIN provider_credentials credential
             ON credential.id=observation.credential_id
           WHERE credential.quota_scope_id=? AND observation.service=? AND observation.period=?`)
           .bind(window.scope_id, window.service, window.period).first();
-        const observed = observationCurrent(observation, now) ? Number(observation.used_count || 0) : 0;
+        const providerUsed = observationCurrent(observation, now) ? Number(observation.provider_used || 0) : 0;
+        const baselineUsed = observationCurrent(observation, now) ? Number(observation.baseline_used || 0) : 0;
         const observedLimit = observationCurrent(observation, now) && Number(observation.limit_count) > 0
           ? Number(observation.limit_count) : Number.MAX_SAFE_INTEGER;
         const limit = Math.min(Number(window.limit_count), Number(counter?.limit_count || window.limit_count), observedLimit);
-        const used = Math.max(localUsed, Number(counter?.dispatch_count || 0), observed);
+        const used = Math.max(localUsed + baselineUsed, Number(counter?.dispatch_count || 0), providerUsed);
         const policy = this.testPolicies[provider];
         const testBlocked = clientId === 'test'
           && (Number(counter?.test_count || 0) >= policy.cap || used >= Math.max(0, limit - policy.reserve));
@@ -163,7 +240,7 @@ export class CredentialBrokerStore {
       provider, known: true, available,
       nextResetAt: available || !nextAvailable ? null : new Date(nextAvailable).toISOString(),
       waitState: available ? null : waitState,
-      reason: available || waitState !== 'blocked' ? null : `api_key_needs_review:${provider}`,
+      reason: available || waitState !== 'blocked' ? null : credentialIssue || `api_key_needs_review:${provider}`,
       revision: createHash('sha256').update(JSON.stringify(revision.sort())).digest('hex')
     };
   }
@@ -172,6 +249,7 @@ export class CredentialBrokerStore {
     return await this.database.transaction(async (database) => {
       const now = this.now();
       const nowIso = now.toISOString();
+      await synchronizeProviderCounters(database, provider, now);
       await database.prepare(`UPDATE provider_credentials SET status='healthy',cooldown_until=NULL,
         provider_reported_used=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_used END,
         provider_reported_limit=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_limit END,
@@ -180,13 +258,15 @@ export class CredentialBrokerStore {
         WHERE status IN ('cooldown','quota_exhausted') AND cooldown_until IS NOT NULL AND cooldown_until<=?`)
         .bind(nowIso, nowIso).run();
       const rows = (await database.prepare(`SELECT * FROM provider_credentials
-        WHERE provider=? AND enabled=1 AND status NOT IN ('disabled','needs_review')
+        WHERE provider=? AND enabled=1 AND status <> 'disabled'
         ORDER BY last_used_at IS NOT NULL,last_used_at,created_at,id FOR UPDATE`)
         .bind(provider).all()).results;
       const excluded = new Set(excludeIds);
       let nextAvailableAt = null;
       let blockedReason = 'unavailable';
       for (const row of rows) {
+        const inspection = inspectOneMapCredential(row, this.masterKey, now);
+        if (row.status === 'needs_review' && !inspection.expired) continue;
         const cooldownAt = Date.parse(row.cooldown_until || '');
         if (cooldownAt > now.getTime()) {
           const candidate = new Date(cooldownAt).toISOString();
@@ -195,6 +275,12 @@ export class CredentialBrokerStore {
           continue;
         }
         if (excluded.has(row.id)) continue;
+        if (inspection.expired || inspection.invalid) {
+          blockedReason = 'auth';
+          await database.prepare(`UPDATE provider_credentials SET status='needs_review',cooldown_until=NULL,updated_at=?
+            WHERE id=? AND status NOT IN ('disabled','needs_review')`).bind(nowIso, row.id).run();
+          continue;
+        }
         const pacingAt = row.last_used_at
           ? Date.parse(row.last_used_at) + 1000 / Number(row.qps_limit || 1) : 0;
         if (pacingAt > now.getTime()) {
@@ -233,28 +319,30 @@ export class CredentialBrokerStore {
               ON usage.credential_id=credential.id
             WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
             .bind(window.scope_id, window.service, start).first('total') || 0);
-          await database.prepare(`INSERT INTO credential_broker_quota_counters(
-              scope_id,service,period,period_start,limit_count,dispatch_count,production_count,test_count,updated_at
-            ) VALUES (?,?,?,?,?,?,?,0,?) ON CONFLICT(scope_id,service,period,period_start) DO NOTHING`)
-            .bind(window.scope_id, window.service, window.period, start, window.limit_count,
-              localUsed, localUsed, nowIso).run();
-          const counter = await database.prepare(`SELECT * FROM credential_broker_quota_counters
+          await ensureQuotaCounter(database, window, start, localUsed, nowIso);
+          await database.prepare(`SELECT 1 FROM credential_broker_quota_counters
             WHERE scope_id=? AND service=? AND period=? AND period_start=? FOR UPDATE`)
             .bind(window.scope_id, window.service, window.period, start).first();
-          const observation = await database.prepare(`SELECT MAX(observation.used_count) AS used_count,
+          const lockedCounter = await database.prepare(`SELECT * FROM credential_broker_quota_counters
+            WHERE scope_id=? AND service=? AND period=? AND period_start=?`)
+            .bind(window.scope_id, window.service, window.period, start).first();
+          const observation = await database.prepare(`SELECT
+              MAX(CASE WHEN observation.source='provider' THEN observation.used_count ELSE 0 END) AS provider_used,
+              MAX(CASE WHEN observation.source='local' THEN observation.used_count ELSE 0 END) AS baseline_used,
               MIN(observation.limit_count) AS limit_count,MAX(observation.reset_at) AS reset_at,
               MAX(observation.observed_at) AS observed_at
             FROM provider_quota_observations observation JOIN provider_credentials credential
               ON credential.id=observation.credential_id
             WHERE credential.quota_scope_id=? AND observation.service=? AND observation.period=?`)
             .bind(window.scope_id, window.service, window.period).first();
-          const observed = observationCurrent(observation, now) ? Number(observation.used_count || 0) : 0;
+          const providerUsed = observationCurrent(observation, now) ? Number(observation.provider_used || 0) : 0;
+          const baselineUsed = observationCurrent(observation, now) ? Number(observation.baseline_used || 0) : 0;
           const observedLimit = observationCurrent(observation, now) && Number(observation.limit_count) > 0
             ? Number(observation.limit_count) : Number.MAX_SAFE_INTEGER;
-          const limit = Math.min(Number(counter.limit_count), Number(window.limit_count), observedLimit);
-          const used = Math.max(Number(counter.dispatch_count), observed, localUsed);
-          const production = Number(counter.production_count) + Math.max(0, used - Number(counter.dispatch_count));
-          const test = Number(counter.test_count);
+          const limit = Math.min(Number(lockedCounter.limit_count), Number(window.limit_count), observedLimit);
+          const used = Math.max(Number(lockedCounter.dispatch_count), providerUsed, localUsed + baselineUsed);
+          const production = Number(lockedCounter.production_count) + Math.max(0, used - Number(lockedCounter.dispatch_count));
+          const test = Number(lockedCounter.test_count);
           const policy = clientId === 'test' ? this.testPolicies[provider] : null;
           const testBlocked = clientId === 'test' && (!policy
             || test + 1 > policy.cap || used + 1 > Math.max(0, limit - policy.reserve));
@@ -310,21 +398,25 @@ export class CredentialBrokerStore {
 
   async report({ dispatchId, outcome, retryAt = null }) {
     await this.database.transaction(async (database) => {
-      const dispatch = await database.prepare(`SELECT dispatch.*,credential.*,
-          dispatch.id AS dispatch_id,dispatch.status AS dispatch_status
-        FROM credential_broker_dispatches dispatch JOIN provider_credentials credential
-          ON credential.id=dispatch.credential_id WHERE dispatch.id=? FOR UPDATE`)
+      const reference = await database.prepare('SELECT credential_id FROM credential_broker_dispatches WHERE id=?')
         .bind(dispatchId).first();
+      const credential = reference?.credential_id
+        ? await database.prepare(`SELECT id,failure_count,quota_service,quota_period,quota_limit,quota_timezone_offset
+            FROM provider_credentials WHERE id=? FOR UPDATE`).bind(reference.credential_id).first()
+        : null;
+      const dispatch = await database.prepare(`SELECT id AS dispatch_id,credential_id,status AS dispatch_status,reserved_at
+          FROM credential_broker_dispatches WHERE id=? FOR UPDATE`).bind(dispatchId).first();
       if (!dispatch || dispatch.dispatch_status !== 'dispatched') return;
       const now = this.now();
       const nowIso = now.toISOString();
       const success = outcome === 'success';
       await database.prepare(`UPDATE credential_broker_dispatches SET status=?,outcome=?,completed_at=? WHERE id=?`)
         .bind(success ? 'success' : 'rejected', outcome, nowIso, dispatchId).run();
+      if (!credential) return;
       if (success) {
-        const day = periodStart('day', Number(dispatch.quota_timezone_offset || 0), new Date(dispatch.reserved_at));
+        const day = periodStart('day', Number(credential.quota_timezone_offset || 0), new Date(dispatch.reserved_at));
         const starts = new Set([day,
-          periodStart('month', Number(dispatch.quota_timezone_offset || 0), new Date(dispatch.reserved_at))]);
+          periodStart('month', Number(credential.quota_timezone_offset || 0), new Date(dispatch.reserved_at))]);
         await database.prepare(`UPDATE provider_usage_daily SET accepted_count=accepted_count+1,
           rejected_count=CASE WHEN rejected_count>0 THEN rejected_count - 1 ELSE 0 END
           WHERE credential_id=? AND usage_date=?`)
@@ -339,10 +431,10 @@ export class CredentialBrokerStore {
           last_success_at=?,updated_at=? WHERE id=?`).bind(nowIso, nowIso, dispatch.credential_id).run();
         return;
       }
-      const failures = Number(dispatch.failure_count || 0) + 1;
+      const failures = Number(credential.failure_count || 0) + 1;
       const reportedRetry = retryAt && Number.isFinite(Date.parse(retryAt)) ? new Date(retryAt) : null;
       const cooldown = reportedRetry && reportedRetry > now ? reportedRetry
-        : outcome === 'quota' ? nextReset(dispatch.quota_period, Number(dispatch.quota_timezone_offset || 0), now)
+        : outcome === 'quota' ? nextReset(credential.quota_period, Number(credential.quota_timezone_offset || 0), now)
           : new Date(now.getTime() + Math.min(300_000, 1000 * 2 ** Math.min(failures, 8)));
       const status = outcome === 'auth' ? 'needs_review'
         : outcome === 'quota' ? 'quota_exhausted' : outcome === 'request' ? 'healthy' : 'cooldown';
@@ -355,10 +447,10 @@ export class CredentialBrokerStore {
           FROM provider_quota_windows WHERE credential_id=? AND enabled=1`)
           .bind(dispatch.credential_id).all()).results;
         const effectiveWindows = windows.length ? windows : [{
-          service: dispatch.quota_service,
-          period: dispatch.quota_period,
-          limit_count: dispatch.quota_limit,
-          timezone_offset: dispatch.quota_timezone_offset
+          service: credential.quota_service,
+          period: credential.quota_period,
+          limit_count: credential.quota_limit,
+          timezone_offset: credential.quota_timezone_offset
         }];
         for (const window of effectiveWindows) {
           const resetAt = reportedRetry && reportedRetry > now

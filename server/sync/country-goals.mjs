@@ -61,6 +61,7 @@ const catalogCoverageSummaries = async (database) => {
     }
   }
   const summaries = new Map();
+  const lowestCityLevelByCountry = new Map();
   const summary = (countryCode, level) => {
     const country = summaries.get(countryCode) || new Map();
     const value = country.get(level) || {
@@ -76,6 +77,10 @@ const catalogCoverageSummaries = async (database) => {
     if (!policy) continue;
     const count = regionCounts.get(Number(region.id)) || 0;
     const value = summary(countryCode, regionDepth(region));
+    lowestCityLevelByCountry.set(countryCode, Math.max(
+      lowestCityLevelByCountry.get(countryCode) || 2,
+      regionDepth(region) + 1
+    ));
     value.total += 1;
     if (count > 0) value.covered += 1;
     if (count >= Number(policy.min_per_node || 0)) value.qualified_lowest += 1;
@@ -83,8 +88,8 @@ const catalogCoverageSummaries = async (database) => {
     if (count >= Number(policy.level2_min || 0)) value.qualified_level2 += 1;
   }
   for (const row of cityResult.results || []) {
-    const region = byId.get(Number(row.region_id));
-    const value = summary(String(row.country_code), Math.max(2, region ? regionDepth(region) + 1 : 1));
+    const countryCode = String(row.country_code);
+    const value = summary(countryCode, lowestCityLevelByCountry.get(countryCode) || 2);
     for (const key of ['total', 'covered', 'qualified_lowest', 'qualified_level1', 'qualified_level2']) {
       value[key] += Number(row[key] || 0);
     }

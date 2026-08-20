@@ -54,6 +54,30 @@ describe('credential broker', () => {
     provider: 'geoapify', label, secret, qpsLimit: 10_000, quotaLimit: 100, ...options
   });
 
+  it('dispatches Google v4 through the broker and enforces the pre-existing monthly usage baseline', async () => {
+    await control.addCredential({
+      provider: 'google-geocoding', label: 'Google', secret: 'google-secret', qpsLimit: 10_000,
+      quotaLimit: 3, quotaUsedBaseline: 2
+    });
+    let calls = 0;
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async (request) => {
+        calls += 1;
+        expect(new URL(request.url).pathname).toBe('/v4/geocode/location');
+        expect(request.headers.get('X-Goog-Api-Key')).toBe('google-secret');
+        return Response.json({ results: [] });
+      }
+    });
+    const input = (requestId) => ({
+      requestId, operation: 'google-geocoding.reverse',
+      parameters: { latitude: 37.422, longitude: -122.084, language: 'en', regionCode: 'US' }
+    });
+    expect((await call(broker, 'production', input('request-google-01'))).status).toBe(200);
+    expect((await call(broker, 'production', input('request-google-02'))).status).toBe(429);
+    expect(calls).toBe(1);
+  });
+
   it('requires authentication and rejects arbitrary proxy input before dispatch', async () => {
     const broker = await createCredentialBroker({ database, masterKey, tokens });
     const unauthorized = await broker.api(new Request('http://broker.internal/v1/requests', {
@@ -97,6 +121,47 @@ describe('credential broker', () => {
     expect(second.status).toBe(409);
     expect(await second.json()).toEqual({ code: 'REQUEST_ALREADY_COMPLETED' });
     expect(calls).toBe(1);
+  });
+
+  it('deletes a used credential without deleting its dispatch history', async () => {
+    const id = await addGeoapify('Used credential', 'used-credential-secret');
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async () => Response.json({ results: [] })
+    });
+    expect((await call(broker, 'production', reverse('request-delete-used-01'))).status).toBe(200);
+
+    await control.deleteCredential(id);
+
+    expect(await database.prepare('SELECT id FROM provider_credentials WHERE id=?').bind(id).first()).toBeNull();
+    expect(await database.prepare('SELECT credential_id,status FROM credential_broker_dispatches').first())
+      .toEqual({ credential_id: null, status: 'success' });
+    expect(await control.listCredentials()).toEqual([]);
+    await expect(control.deleteCredential(id)).rejects.toThrow('CREDENTIAL_NOT_FOUND');
+  });
+
+  it('finishes a dispatch report after its credential is deleted', async () => {
+    const id = await addGeoapify('In-flight credential', 'in-flight-credential-secret');
+    let release;
+    let started;
+    const requestStarted = new Promise((resolve) => { started = resolve; });
+    const pendingResponse = new Promise((resolve) => { release = resolve; });
+    const broker = await createCredentialBroker({
+      database, masterKey, tokens,
+      fetchImpl: async () => {
+        started();
+        await pendingResponse;
+        return Response.json({ results: [] });
+      }
+    });
+    const request = call(broker, 'production', reverse('request-delete-in-flight-01'));
+    await requestStarted;
+    await control.deleteCredential(id);
+    release();
+
+    expect((await request).status).toBe(200);
+    expect(await database.prepare('SELECT credential_id,status,outcome FROM credential_broker_dispatches').first())
+      .toEqual({ credential_id: null, status: 'success', outcome: 'success' });
   });
 
   it('rotates China provider keys after an official quota response without exposing either key', async () => {
@@ -255,6 +320,43 @@ describe('credential broker', () => {
     });
     expect(upstream.headers.get('authorization')).toBe('Bearer onemap-secret');
     expect(JSON.stringify(await response.json())).not.toContain('onemap-secret');
+  });
+
+  it('repairs stale broker counters from the current OneMap quota window', async () => {
+    const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const now = new Date('2026-08-18T12:00:00.000Z');
+    const token = `${encode({ alg: 'none' })}.${encode({ exp: Math.floor(now.getTime() / 1000) + 3600 })}.signature`;
+    await control.addCredential({
+      provider: 'onemap', label: 'OneMap stale counter', secret: token,
+      quotaLimit: 100_000_000, qpsLimit: 10_000
+    });
+    const row = await database.prepare(`SELECT quota_scope_id,quota_service FROM provider_credentials
+      WHERE provider='onemap'`).first();
+    await database.prepare(`INSERT INTO credential_broker_quota_counters(
+      scope_id,service,period,period_start,limit_count,dispatch_count,production_count,test_count,updated_at
+    ) VALUES (?,?,?, ?,100,0,0,0,?)`).bind(
+      row.quota_scope_id, row.quota_service, 'day', '2026-08-18', now.toISOString()
+    ).run();
+    const broker = await createCredentialBroker({ database, masterKey, tokens, now: () => now });
+    const result = await availability(broker, 'production', ['onemap']);
+    expect(await result.json()).toMatchObject({ providers: { onemap: { available: true } } });
+    expect(await database.prepare(`SELECT limit_count FROM credential_broker_quota_counters
+      WHERE scope_id=? AND service=? AND period='day' AND period_start='2026-08-18'`)
+      .bind(row.quota_scope_id, row.quota_service).first('limit_count')).toBe(100_000_000);
+  });
+
+  it('blocks expired OneMap tokens with an explicit credential reason', async () => {
+    const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const now = new Date('2026-08-18T12:00:00.000Z');
+    const token = `${encode({ alg: 'none' })}.${encode({ exp: Math.floor(now.getTime() / 1000) - 60 })}.signature`;
+    const id = await control.addCredential({ provider: 'onemap', label: 'Expired OneMap', secret: token });
+    const broker = await createCredentialBroker({ database, masterKey, tokens, now: () => now });
+    const result = await availability(broker, 'production', ['onemap']);
+    expect(await result.json()).toMatchObject({
+      providers: { onemap: { available: false, reason: 'api_key_expired:onemap' } }
+    });
+    expect(await database.prepare('SELECT status FROM provider_credentials WHERE id=?').bind(id).first('status'))
+      .toBe('needs_review');
   });
 
   it('keeps raw provider credentials out of the isolated application containers', async () => {

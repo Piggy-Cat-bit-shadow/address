@@ -173,17 +173,28 @@ export class SyncHistoryStore {
   }
 
   async schedulerHeartbeat(activeRunId = null, at = this.now().toISOString()) {
+    if (activeRunId) {
+      await this.database.prepare(`INSERT INTO sync_scheduler_state(
+        scheduler_id,heartbeat_at,last_planned_at,active_run_id,updated_at
+      ) VALUES ('address-sync',?,?,?,?) ON CONFLICT(scheduler_id) DO UPDATE SET
+        heartbeat_at=excluded.heartbeat_at,last_planned_at=excluded.last_planned_at,
+        active_run_id=excluded.active_run_id,updated_at=excluded.updated_at`).bind(at, at, activeRunId, at).run();
+      return;
+    }
     await this.database.prepare(`INSERT INTO sync_scheduler_state(
       scheduler_id,heartbeat_at,last_planned_at,active_run_id,updated_at
-    ) VALUES ('address-sync',?,?,?,?) ON CONFLICT(scheduler_id) DO UPDATE SET
+    ) VALUES ('address-sync',?,?,NULL,?) ON CONFLICT(scheduler_id) DO UPDATE SET
       heartbeat_at=excluded.heartbeat_at,last_planned_at=excluded.last_planned_at,
-      active_run_id=excluded.active_run_id,updated_at=excluded.updated_at`).bind(at, at, activeRunId, at).run();
+      updated_at=excluded.updated_at`).bind(at, at, at).run();
   }
 
   async repairInterruptedRuns() {
-    const now = this.now().toISOString();
+    const current = this.now();
+    const now = current.toISOString();
+    const staleBefore = new Date(current.getTime() - 2 * 60 * 60_000).toISOString();
     const runs = (await this.database.prepare(`SELECT id FROM sync_runs
-      WHERE kind='address-pool' AND status IN ('queued','running')`).all()).results;
+      WHERE status IN ('queued','running') AND updated_at<?`)
+      .bind(staleBefore).all()).results;
     for (const run of runs) {
       await this.database.prepare(`UPDATE sync_run_countries SET status='failed',completed_at=?,heartbeat_at=?,
         net_growth=NULL,error_code='SYNC_JOB_INTERRUPTED',error_message='Synchronization interrupted before completion',
@@ -192,10 +203,8 @@ export class SyncHistoryStore {
       await this.database.prepare(`UPDATE sync_runs SET status='failed',error_code='SYNC_JOB_INTERRUPTED',
         error_message='Synchronization interrupted before completion',failure_phase='interrupted',completed_at=?,updated_at=? WHERE id=?`)
         .bind(now, now, run.id).run();
-    }
-    if (runs.length) {
       await this.database.prepare(`UPDATE sync_scheduler_state SET active_run_id=NULL,heartbeat_at=?,updated_at=?
-        WHERE scheduler_id='address-sync'`).bind(now, now).run();
+        WHERE scheduler_id='address-sync' AND active_run_id=?`).bind(now, now, run.id).run();
     }
     return runs.length;
   }

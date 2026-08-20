@@ -95,14 +95,18 @@
 3. 在新加坡导入进程启动前设置 `ONEMAP_ACCESS_TOKEN`。
 
 OneMap 官方说明 Token 有效期为 3 天。到期前更新环境变量，并重启读取该变量的同步进程。
+凭据 Broker 会自动校验 JWT 过期时间。过期 Token 会显示为 `api_key_expired:onemap`，在替换前不会进入同步。旧的本地额度计数器会自动与当前配置窗口对齐，无需手动修改数据库。
+
+OneMap 只将 HTTP `429` 定义为 API limit exceeded，没有公布 Search 的每日额度或重置时刻。系统因此只执行 `1 QPS` 节流和有限退避，不再把 `429` 虚构成每日额度耗尽；管理员仍可自行配置本地安全预算。
 
 ### Google Geocoding
 
 1. 创建或选择 Google Cloud 项目、关联结算账户并启用 Geocoding API。
 2. 创建 API Key，限制可用 API 和服务器来源。
 3. 设置 `GOOGLE_GEOCODING_API_KEY`，或在后台添加。
+4. 只有书面授权明确覆盖衍生地址的长期保存与再分发时，才设置 `ADDRESS_SYNC_GOOGLE_GEOCODING_LICENSE_CONFIRMED=true` 和 `ADDRESS_SYNC_GOOGLE_GEOCODING_REDISTRIBUTION_ALLOWED=true`。
 
-按 Google [官方配置指南](https://developers.google.com/maps/documentation/geocoding/get-api-key)操作，并在[用量与结算页面](https://developers.google.com/maps/documentation/geocoding/usage-and-billing)检查当前价格、额度和告警设置。
+当前适配器只使用 Geocoding API v4，不需要 Places API。请求通过 `X-Goog-Api-Key` 发送密钥并使用字段掩码，只接受 `street_address`、`premise`、`subpremise` 的屋顶或几何中心结果。Google 当前列出的免费用量是每个结算账户每个日历月 `10,000` 个 Geocoding 计费事件，项目级限制为每分钟 `3,000` 次。Address 默认将自动同步限制为每月 `9,000` 次、`5 QPS`；首次添加 Key 时，应填写同一结算账户本月已经产生的 Geocoding 用量。Geocoding 响应不返回免费余额，单凭 API Key 也无法读取其他项目的用量，必须在 Google Cloud Console 核对并设置项目配额；Budget Alert 本身不会阻止收费。同一项目的多个 Key 共享一个额度范围，系统不会通过轮换规避额度。参见[官方配置指南](https://developers.google.com/maps/documentation/geocoding/get-api-key)、[v4 迁移指南](https://developers.google.com/maps/documentation/geocoding/geocoding-v4-migrate)、[用量与结算页面](https://developers.google.com/maps/documentation/geocoding/usage-and-billing)和[价格表](https://developers.google.com/maps/billing-and-pricing/pricing)。
 
 ### OS Data Hub
 
@@ -116,7 +120,7 @@ OneMap 官方说明 Token 有效期为 3 天。到期前更新环境变量，并
 
 1. 注册[有道智云](https://ai.youdao.com/)，创建应用并开通文本翻译。
 2. 获取应用 ID 与应用密钥。
-3. 设置 `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET`，或在“后台 → 服务凭据 → 在线翻译”保存。
+3. 设置 `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET`，或在“后台 → 地图密钥 → 在线翻译”添加一组或多组凭据；多组凭据会按额度和冷却状态自动轮换。
 4. `GOOGLE_TRANSLATION_ENABLED` 只控制 Google 在线翻译路径；关闭后，已配置的有道仍可作为翻译服务。
 
 [官方文本翻译 API](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html)说明了 v3 SHA-256 签名。应用密钥不得进入前端代码。

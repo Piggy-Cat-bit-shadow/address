@@ -5,7 +5,7 @@ import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../se
 describe('PostgreSQL database adapter', () => {
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 13, control_version: 16 }], fields: [], rowCount: 1
+      rows: [{ address_version: 17, control_version: 18 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -15,11 +15,14 @@ describe('PostgreSQL database adapter', () => {
 
   it('migrates a database that only has the previous schema versions', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 9, control_version: 11 }], fields: [], rowCount: 1
+      rows: [{ address_version: 16, control_version: 18 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
-    expect(query.mock.calls.map(([sql]) => sql)).toContain('COMMIT');
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements).toContain("SET LOCAL statement_timeout TO '30min'");
+    expect(statements).toContain("SET LOCAL lock_timeout TO '5min'");
+    expect(statements).toContain('COMMIT');
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -38,9 +41,9 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 13)");
+    expect(addressSchema).toContain("generate_series(1, 17)");
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
-    expect(controlSchema).toContain("generate_series(1, 16)");
+    expect(controlSchema).toContain("generate_series(1, 18)");
   });
 
   it('rewrites parameters without changing quoted question marks', async () => {

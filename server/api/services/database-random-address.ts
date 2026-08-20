@@ -5,7 +5,7 @@ import {
   chinaCommunityPublicationClause, loadChinaCommunityAddressById
 } from '../repositories/china-community';
 import {
-  completenessClause, loadAddressPoolV2AddressById
+  chineseVariantHasHanClause, completenessClause, loadAddressPoolV2AddressById
 } from '../repositories/address-pool-v2';
 import {
   RandomAddressIndex, type RandomAddressIndexRow, type RandomAddressReference
@@ -38,16 +38,33 @@ interface CommunityMetadataRow {
   canonical_name: string;
 }
 
-const loadRows = async (db: Database, countries: CountryCode[]): Promise<RandomAddressIndexRow[]> => {
+const mapConcurrent = async <T, R>(values: T[], concurrency: number, worker: (value: T) => Promise<R>): Promise<R[]> => {
+  const results = new Array<R>(values.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (next < values.length) {
+      const index = next++;
+      results[index] = await worker(values[index]);
+    }
+  }));
+  return results;
+};
+
+export const loadRandomAddressIndexRows = async (
+  db: Database,
+  countries: CountryCode[],
+  concurrency = 4
+): Promise<RandomAddressIndexRow[]> => {
   const selected = countries.filter((country) => country !== 'CN');
-  const poolRows = selected.length ? (await db.prepare(`SELECT id,country_code,admin1,admin1_code,locality,postal_locality,
+  const poolRows = (await mapConcurrent(selected, Math.max(1, concurrency), async (country) =>
+    (await db.prepare(`SELECT id,country_code,admin1,admin1_code,locality,postal_locality,
       district,postcode,street,house_number,building_name FROM address_pool_runtime
-    WHERE country_code IN (${selected.map(() => '?').join(',')}) AND quality_score>=0.7
+    WHERE country_code=? AND quality_score>=0.7
       AND property_type IN ('residential','apartment') AND residential_evidence=1
       AND ${completenessClause()}
-      AND (expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-        THEN expires_at::timestamptz>CURRENT_TIMESTAMP ELSE FALSE END)
-    ORDER BY country_code,id`).bind(...selected).all<PoolMetadataRow>()).results : [];
+      AND ${chineseVariantHasHanClause()}
+    ORDER BY id`).bind(country).all<PoolMetadataRow>()).results
+  )).flat();
   const communityRows = countries.includes('CN') ? (await db.prepare(`SELECT community.id,community.province,
       community.city,community.district,community.township,community.provider_address,community.canonical_name
     FROM cn_communities_v2 community WHERE ${chinaCommunityPublicationClause('community')}
@@ -78,6 +95,15 @@ const loadRows = async (db: Database, countries: CountryCode[]): Promise<RandomA
         row.provider_address, row.canonical_name].filter(Boolean).join(' ')
     }))
   ];
+};
+
+export const loadRandomAddressVersionToken = async (db: Database): Promise<string> => {
+  const row = await db.prepare(`SELECT
+    COALESCE((SELECT MAX(last_seen_at) FROM address_pool),'') AS address_version,
+    COALESCE((SELECT MAX(updated_at) FROM cn_communities_v2),'') AS china_version,
+    COALESCE((SELECT version FROM address_pool_revisions WHERE kind='translation'),'') AS translation_version`)
+    .first<{ address_version: string; china_version: string; translation_version: string }>();
+  return `${row?.address_version || ''}:${row?.china_version || ''}:${row?.translation_version || ''}`;
 };
 
 const loadAddress = async (
@@ -133,16 +159,11 @@ export class DatabaseRandomAddressService implements RandomAddressService {
   }
 
   private async token(): Promise<string> {
-    const row = await this.database.prepare(`SELECT
-      COALESCE((SELECT MAX(last_seen_at) FROM address_pool),'') AS address_version,
-      COALESCE((SELECT MAX(updated_at) FROM cn_communities_v2),'') AS china_version`).first<{
-        address_version: string; china_version: string;
-      }>();
-    return `${row?.address_version || ''}:${row?.china_version || ''}`;
+    return loadRandomAddressVersionToken(this.database);
   }
 
   private async refresh(): Promise<void> {
-    const rows = await loadRows(this.database, this.countries);
+    const rows = await loadRandomAddressIndexRows(this.database, this.countries);
     const next = new RandomAddressIndex(rows);
     this.refreshToken = await this.token();
     this.index = next;

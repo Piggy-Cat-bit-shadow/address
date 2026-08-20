@@ -2,17 +2,26 @@
 
 | 项目 | 核心内容 |
 |---|---|
-| 主源 | Overture Maps addresses + Geofabrik 法国 27 个本土/海外区域独立分片；BAN 仅作地址存在候选 |
+| 主源 | Overture Maps addresses + Geofabrik 法国区域独立分片；CSTB BDNB `2026-02.a` 的 Creuse（23）、Gironde（33）、Rhone（69）和 Paris（75）通过 BAN 地址键提供独立官方住宅证据 |
 | 格式 / 邮编 | `<number> <street>, <postcode> <commune>, FR`；地址补充（bis/ter）仅保留源值；源记录；格式门禁 5 位数字。只清洗格式，不创造或按邻近地址补齐 |
 | 行政区 | INSEE/IGN ADMIN EXPRESS 作为候选核验；当前源字段与 catalog 反查。行政层级必须与坐标反查一致；冲突时保留源值在隔离区并拒绝发布 |
-| 住宅证据 | 明确住宅建筑用途证据；BAN 地址存在本身不等于住宅。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
+| 住宅证据 | 明确住宅建筑用途证据；BDNB 仅接受 `usage_principal_bdnb_open` 为 `Résidentiel individuel` 或 `Résidentiel collectif` 的建筑，并要求 BAN 关联 `fiabilite >= 17`。BAN 地址存在本身不等于住宅 |
 | 发布门禁 | 质量高于数量。仅发布 E3：地址存在与独立住宅用途证据同时成立；本国格式规定的必填组件缺一即淘汰，字段冲突拒绝合并；只允许可逆、可验证的格式规范化。 |
 | 同步频率 | 每月检查上游版本；新快照通过门禁后原子切换，失败保留上一 active 快照。 |
-| 验证 / 排除 | 缺 5 位邮编、commune、合法坐标或住宅建筑证据的记录淘汰；海外区域使用离散坐标范围，禁止跨洋矩形误收。 |
-| 策略版本 / 状态 / 更新 | 1.3 / 27 区域分片严格同步 + 多规则完成下限 / 2026-08-02 |
+| 验证 / 排除 | 缺门牌、道路、5 位邮编、INSEE commune、合法坐标或住宅建筑证据的记录淘汰；BDNB 只接受 BAN 地址并将 EPSG:2154 转为 WGS84；海外区域使用离散坐标范围，禁止跨洋矩形误收 |
+| 策略版本 / 状态 / 更新 | 1.6 / BDNB 多 département 严格住宅关联 + 解除旧区域容量截断 + 多规则完成下限 / 2026-08-16 |
 
-- 默认 active 地址上限 40,000；大区、市镇、区单节点上限 3,500/350/80，后台可覆盖；只裁剪地址记录，行政区划与邮编目录保持完整。
+- 默认国家完成数量下限为 80,000，不是发布上限；大区、市镇、区采样上限为 80,000/1,500/300，后台可覆盖。每个 BDNB département 分片最多采样 50,000 条，严格门禁容量不足时不得降低可靠度阈值补数量。适配器能力版本 `bdnb-ban-fiabilite17-v2` 使此前被旧大区采样上限截断的合格集合重新接受自动评估；各 département 的版本、失败和来源耗尽状态相互独立。
 
+## BDNB 字段与联接
+
+- `batiment_groupe_synthese_propriete_usage.csv`：`batiment_groupe_id`、`usage_principal_bdnb_open` 提供住宅类型。
+- `rel_batiment_groupe_adresse.csv`：以 `batiment_groupe_id` 关联住宅建筑，并仅保留 `fiabilite >= 17` 的 `cle_interop_adr`。
+- `adresse.csv`：以 `cle_interop_adr` 关联 BAN 门牌、道路、邮编、INSEE commune 和 EPSG:2154 地址点。
+- 同一 BAN 地址关联多个住宅建筑时，稳定选择可靠度最高的建筑；可靠度相同按建筑 ID 稳定选择。地址点、行政区和邮编不从邻近建筑推断。
+
+
+默认同步生命周期为自动初始化一次；未完成的额度或 checkpoint 任务自动续跑，完整扫描或来源耗尽后停止，不按日/月重复执行。只有来源、上游版本、严格提取能力变化或管理员明确刷新才重新运行；周期元数据探测仅在显式启用时执行。
 
 统一证据等级、许可、配额与 VPS 边界见 [数据源与自动同步方案](../data-sources.md)。策略变化时同步更新本文件、实现与测试。
 ## 覆盖与保留

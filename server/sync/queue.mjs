@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { loadSourceCatalog, sourceAdapterRevisions } from './source-adapters.mjs';
+import { loadSourceCatalog, sourceAdapterRevisions, sourceCapabilityRevision } from './source-adapters.mjs';
 import { evaluateCountryGoals } from './country-goals.mjs';
 import { ADDRESS_IMPORT_REVISION } from './postgres-address-importer.mjs';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
@@ -14,6 +14,7 @@ export const SHARED_FAILURE_REASON = 'shared_failure_circuit';
 export const PARTIAL_REASON = 'source_partial_checkpoint';
 export const PARTIAL_STALLED_REASON = 'source_partial_stalled';
 const DEFAULT_SOURCE_PROBE_MS = 24 * 60 * 60_000;
+const STALE_CREDENTIAL_CHECKPOINT_MS = 24 * 60 * 60_000;
 // Failure codes that deterministically repeat for identical inputs; the ETL
 // skips same-signature retries itself, so a fruitless pass latches immediately.
 const deterministicFailureCodes = new Set(['SOURCE_QUALITY_FAILED', 'SNAPSHOT_QUALITY_FAILED']);
@@ -41,13 +42,14 @@ const adapterExecutionCapabilityRevisions = Object.freeze({
 const builtinQuotaProviders = { 'korea-kapt-residential': 'geoapify' };
 const providerEnvironmentVariables = Object.freeze({
   geoapify: 'GEOAPIFY_API_KEY',
+  'google-geocoding': 'GOOGLE_GEOCODING_API_KEY',
   mappls: 'MAPPLS_API_KEY',
   onemap: 'ONEMAP_ACCESS_TOKEN'
 });
 const revisionEmbeddedAdapters = new Set([
   'japan-abr', 'singapore-hdb', 'korea-kapt', 'inegi-residential', 'ethekwini-residential',
   'cape-town-residential', 'taiwan-residential', 'hong-kong-residential', 'mappls-residential',
-  'licensed-residential-feed', 'pdok-bag'
+  'licensed-residential-feed', 'pdok-bag', 'google-residential-enrichment'
 ]);
 
 const timestamp = (value) => {
@@ -87,6 +89,12 @@ export const countryFingerprint = ({ adapterRevisions = [], sourceVersions = [] 
     adapterRevisions: sortedPairs(adapterRevisions),
     sourceVersions: sortedPairs(sourceVersions)
   }));
+
+// Source capability changes must unlock only the opted-in source. Country
+// policy edits intentionally stay outside this fingerprint. This allows an
+// exporter capacity or strict extraction configuration change to re-evaluate
+// an older snapshot without reopening unrelated exhausted sources.
+export { sourceCapabilityRevision };
 
 export const legacyCountryFingerprint = ({ importRevision = ADDRESS_IMPORT_REVISION, sourceVersions = [] }) =>
   sha256(JSON.stringify({ importRevision, sourceVersions: sortedPairs(sourceVersions) }));
@@ -243,16 +251,28 @@ export const evaluateAttempt = ({
   checkpointStage = null,
   partialNextAttemptAt = null,
   partialStalls = 0,
+  partialWorkCount = 0,
+  partialMinimumWorkCount = 1,
+  partialProgressEvaluationReady = false,
   maxPartialStalls = 3
 }) => {
   const progressed = netGrowth > 0 || (goalDeficitBefore != null && goalDeficitAfter != null
     && Number(goalDeficitAfter) < Number(goalDeficitBefore));
   const retainedCheckpointToken = checkpointToken || previousCheckpointToken || null;
   if (sourceComplete === false && (jobSucceeded || failureCode === 'SOURCE_PARTIAL')) {
+    const normalizedCheckpointStage = String(checkpointStage || '').toLowerCase();
     const checkpointProgressed = checkpointToken
       ? checkpointToken !== previousCheckpointToken
       : progressed;
-    const stalls = checkpointProgressed ? 0 : Number(partialStalls || 0) + 1;
+    const workCount = Number(partialWorkCount || 0);
+    const enoughEvaluatedWork = workCount >= Math.max(1, Number(partialMinimumWorkCount || 1));
+    const noGoalProgress = partialProgressEvaluationReady && enoughEvaluatedWork && !progressed;
+    const transientWait = workCount === 0
+      && ['quota', 'credential', 'network'].includes(normalizedCheckpointStage);
+    const countCheckpointStall = !checkpointProgressed && !transientWait;
+    const stalls = noGoalProgress || countCheckpointStall
+      ? Number(partialStalls || 0) + 1
+      : checkpointProgressed ? 0 : Number(partialStalls || 0);
     const partialWaitAt = timestamp(partialNextAttemptAt) > timestamp(completedAt)
       ? partialNextAttemptAt
       : !quotaAvailable && timestamp(quotaResetAt) > timestamp(completedAt)
@@ -260,7 +280,18 @@ export const evaluateAttempt = ({
         : ['quota', 'credential', 'network'].includes(String(checkpointStage || '').toLowerCase())
           ? new Date(timestamp(completedAt) + backoffBaseMs).toISOString()
           : null;
-    if (stalls >= Math.max(1, maxPartialStalls)) {
+    if (noGoalProgress && stalls >= Math.max(1, maxPartialStalls)) {
+      return {
+        action: 'latch',
+        reason: LATCH_REASON,
+        fingerprint: fingerprintAfter,
+        checkpointToken,
+        consecutiveFailures: stalls,
+        latchedAt: completedAt,
+        nextAttemptAt: new Date(timestamp(completedAt) + Math.max(60_000, probeIntervalMs)).toISOString()
+      };
+    }
+    if (!checkpointProgressed && stalls >= Math.max(1, maxPartialStalls)) {
       return {
         action: 'suspend',
         reason: PARTIAL_STALLED_REASON,
@@ -277,11 +308,13 @@ export const evaluateAttempt = ({
     return {
       action: 'checked',
       reason: checkpointProgressed ? PARTIAL_REASON : PARTIAL_STALLED_REASON,
+      waitReason: ['quota', 'credential', 'network'].includes(normalizedCheckpointStage)
+        ? normalizedCheckpointStage : null,
       fingerprint: fingerprintAfter,
       checkpointToken,
       consecutiveFailures: stalls,
       nextAttemptAt: partialWaitAt || (checkpointProgressed
-        ? completedAt
+        ? new Date(timestamp(completedAt) + 60_000).toISOString()
         : new Date(timestamp(completedAt) + Math.min(backoffCapMs, backoffBaseMs * 2 ** Math.max(0, stalls - 1))).toISOString())
     };
   }
@@ -519,7 +552,7 @@ export class PostgresQueueStateStore {
     await this.initialize();
       const rows = (await this.database.prepare(`SELECT country_code,source_id,state,reason,source_fingerprint,
         failure_fingerprint,consecutive_failures,failure_code,adapter,failure_phase,failure_signature,
-        checkpoint_token,probe_failures,probe_version,next_attempt_at,exhausted_at,updated_at
+        checkpoint_token,wait_reason,probe_failures,probe_version,next_attempt_at,exhausted_at,updated_at
       FROM sync_source_execution_state`).all()).results;
     const state = { schemaVersion: 1, countries: {} };
     for (const row of rows) {
@@ -537,6 +570,7 @@ export class PostgresQueueStateStore {
         failurePhase: row.failure_phase || inferredFailurePhase(row.failure_code),
         failureSignature: row.failure_signature || null,
         checkpointToken: row.checkpoint_token || null,
+        waitReason: row.wait_reason || null,
         probeFailures: Number(row.probe_failures || 0),
         probeVersion: row.probe_version || null,
         nextAttemptAt: row.next_attempt_at || null,
@@ -554,13 +588,13 @@ export class PostgresQueueStateStore {
     const failureState = ['backoff', 'suspended'].includes(savedState);
     await this.database.prepare(`INSERT INTO sync_source_execution_state(
       country_code,source_id,state,reason,source_fingerprint,failure_fingerprint,consecutive_failures,
-      failure_code,adapter,failure_phase,failure_signature,checkpoint_token,probe_failures,probe_version,
+      failure_code,adapter,failure_phase,failure_signature,checkpoint_token,wait_reason,probe_failures,probe_version,
       next_attempt_at,exhausted_at,last_attempt_at,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(country_code,source_id) DO UPDATE SET
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(country_code,source_id) DO UPDATE SET
       state=excluded.state,reason=excluded.reason,source_fingerprint=excluded.source_fingerprint,
       failure_fingerprint=excluded.failure_fingerprint,consecutive_failures=excluded.consecutive_failures,
       failure_code=excluded.failure_code,adapter=excluded.adapter,failure_phase=excluded.failure_phase,
-      failure_signature=excluded.failure_signature,checkpoint_token=excluded.checkpoint_token,
+      failure_signature=excluded.failure_signature,checkpoint_token=excluded.checkpoint_token,wait_reason=excluded.wait_reason,
       probe_failures=excluded.probe_failures,probe_version=excluded.probe_version,next_attempt_at=excluded.next_attempt_at,
       exhausted_at=excluded.exhausted_at,last_attempt_at=excluded.last_attempt_at,updated_at=excluded.updated_at`)
       .bind(
@@ -568,7 +602,7 @@ export class PostgresQueueStateStore {
         failureState ? null : entry.fingerprint || null,
         failureState ? entry.fingerprint || null : null,
         Number(entry.consecutiveFailures || 0), entry.failureCode || null, entry.adapter || null,
-        entry.failurePhase || null, entry.failureSignature || null, entry.checkpointToken || null,
+        entry.failurePhase || null, entry.failureSignature || null, entry.checkpointToken || null, entry.waitReason || null,
         Number(entry.probeFailures || 0), entry.probeVersion || null, entry.nextAttemptAt || null,
         savedState === 'latched' ? entry.latchedAt || evaluatedAt : null, evaluatedAt, evaluatedAt
       ).run();
@@ -596,6 +630,7 @@ export class PostgresQueueStateStore {
       failurePhase: evaluation.failurePhase || null,
       failureSignature: evaluation.failureSignature || null,
       checkpointToken: evaluation.checkpointToken || null,
+      waitReason: evaluation.waitReason || null,
       probeFailures: Number(evaluation.probeFailures || 0),
       probeVersion: evaluation.probeVersion || null,
       nextAttemptAt: evaluation.nextAttemptAt || null
@@ -819,7 +854,7 @@ export const createQueueSources = ({
   const brokerClientPromise = String(environment.CREDENTIAL_BROKER_URL || '').trim()
     ? createCredentialBrokerClient(environment) : null;
   const quotaStatus = async (provider, now = new Date()) => {
-    if (brokerClientPromise && ['geoapify', 'mappls', 'onemap'].includes(provider)) {
+    if (brokerClientPromise && ['geoapify', 'mappls', 'onemap', 'google-geocoding'].includes(provider)) {
       try {
         const client = await brokerClientPromise;
         return (await client.availability([provider]))[provider];
@@ -876,7 +911,8 @@ export const computeQueueSnapshot = async ({
   queueState = { countries: {} },
   runningJob = null,
   importRevision = ADDRESS_IMPORT_REVISION,
-  now = new Date()
+  now = new Date(),
+  enableSourceProbes = true
 }) => {
   const facts = await sources.addressFacts();
   const providers = quotaProviderMap(catalogShards);
@@ -910,7 +946,7 @@ export const computeQueueSnapshot = async ({
     const sourceEntries = configuredShards.map((shard) => {
       const stored = storedById.get(shard.id) || {};
       const sourceVersion = stored.sourceVersion || shard.source?.sourceVersion || '';
-      const adapterRevision = sourceAdapterRevisions[shard.source?.adapter] || '';
+      const adapterRevision = sourceCapabilityRevision(shard);
       const provider = providers[shard.id] || null;
       const quota = provider ? quotaByProvider[provider] : null;
       const adapter = String(shard.source?.adapter || '');
@@ -930,10 +966,26 @@ export const computeQueueSnapshot = async ({
         : sourceFingerprint;
       const matches = saved.fingerprint === expectedFingerprint;
       const nextAttempt = timestamp(saved.nextAttemptAt);
-      const probeDue = !configurationError && matches && ['latched', 'suspended'].includes(savedState)
+      const probeDue = enableSourceProbes && !configurationError && matches && ['latched', 'suspended'].includes(savedState)
         && (!nextAttempt || nextAttempt <= now.getTime());
+      const resumableCheckpoint = savedState === 'checked'
+        && [PARTIAL_REASON, PARTIAL_STALLED_REASON].includes(saved.reason);
+      // Older checkpoint rows did not persist the credential wait reason. If
+      // the provider is available again and the stored wake time is far beyond
+      // the bounded retry window, treat that checkpoint as a stale quota wait.
+      // Normal short backoffs remain untouched so transient failures do not
+      // turn into a tight loop.
+      const staleCredentialCheckpoint = resumableCheckpoint && Boolean(provider)
+        && quota?.available === true && nextAttempt > now.getTime()
+        && nextAttempt - now.getTime() >= STALE_CREDENTIAL_CHECKPOINT_MS;
+      const credentialManagedWait = resumableCheckpoint
+        && ['quota', 'credential'].includes(String(saved.waitReason || ''))
+        && Boolean(provider)
+        || staleCredentialCheckpoint;
       const paused = matches && ['latched', 'checked', 'suspended'].includes(savedState)
-        && (['latched', 'suspended'].includes(savedState) ? !probeDue : !nextAttempt || nextAttempt > now.getTime());
+        && (['latched', 'suspended'].includes(savedState)
+          ? !probeDue
+          : !resumableCheckpoint || (!credentialManagedWait && (!nextAttempt || nextAttempt > now.getTime())));
       return {
         shard,
         stored,
@@ -942,6 +994,7 @@ export const computeQueueSnapshot = async ({
         matches,
         probeDue,
         paused,
+        credentialManagedWait,
         nextAttempt,
         provider,
         quota,
@@ -953,7 +1006,7 @@ export const computeQueueSnapshot = async ({
       };
     });
     const sourceVersions = sourceEntries.map(({ shard, stored }) => [shard.id, stored.sourceVersion || shard.source?.sourceVersion || '']);
-    const adapterRevisions = sourceEntries.map(({ shard }) => [shard.id, sourceAdapterRevisions[shard.source?.adapter] || '']);
+    const adapterRevisions = sourceEntries.map(({ shard }) => [shard.id, sourceCapabilityRevision(shard)]);
     const fingerprint = countryFingerprint({ adapterRevisions, sourceVersions });
     const legacyFingerprint = legacyCountryFingerprint({ importRevision, sourceVersions });
     const deprecatedFingerprint = deprecatedCountryFingerprint({
@@ -963,7 +1016,7 @@ export const computeQueueSnapshot = async ({
       catalogVersion: facts.catalogVersion || '',
       adapterRevisions: storedShards.map((shard) => [
         shard.shardId,
-        sourceAdapterRevisions[configuredShards.find((candidate) => candidate.id === shard.shardId)?.source?.adapter] || ''
+        sourceCapabilityRevision(configuredShards.find((candidate) => candidate.id === shard.shardId) || {})
       ]),
       sourceVersions: storedShards.map((shard) => [shard.shardId, shard.sourceVersion])
     });
@@ -997,9 +1050,14 @@ export const computeQueueSnapshot = async ({
         return (leftAt > now.getTime()) - (rightAt > now.getTime()) || leftAt - rightAt;
       });
     const selectedSource = runnableSources[0] || null;
+    const pausedQuotaSource = sourceEntries.find((source) => source.matches
+      && source.savedState === 'checked'
+      && [PARTIAL_REASON, PARTIAL_STALLED_REASON].includes(source.saved.reason || '')
+      && source.provider && source.quota && !source.quota.available);
     const provider = selectedSource?.provider || null;
     const quota = selectedSource?.quota || null;
     const delayedUntil = selectedSource?.matches && selectedSource.nextAttempt > now.getTime()
+      && !(selectedSource.credentialManagedWait && (!selectedSource.quota || selectedSource.quota.available))
       ? selectedSource.nextAttempt
       : 0;
     const pausedWakeAt = sourceEntries.map((source) => source.paused ? source.nextAttempt : 0)
@@ -1050,10 +1108,11 @@ export const computeQueueSnapshot = async ({
         consecutiveFailures: source.matches ? Number(source.saved.consecutiveFailures || 0) : 0,
         failureCode: source.matches ? source.saved.failureCode || null : null,
         adapter: source.adapter || null,
-        adapterRevision: sourceAdapterRevisions[source.adapter] || '',
+        adapterRevision: sourceCapabilityRevision(source.shard),
         failurePhase: source.matches ? source.saved.failurePhase || null : null,
         failureSignature: source.matches ? source.saved.failureSignature || null : null,
         checkpointToken: source.matches ? source.saved.checkpointToken || null : null,
+        waitReason: source.matches ? source.saved.waitReason || null : null,
         probeFailures: source.matches ? Number(source.saved.probeFailures || 0) : 0,
         probeVersion: source.matches ? source.saved.probeVersion || null : null,
         intervalDays: Number(source.shard.intervalDays || 1),
@@ -1102,6 +1161,15 @@ export const computeQueueSnapshot = async ({
     } else if (!configuredShards.length || !shardCountries.has(countryCode)) {
       entry.state = 'no_source';
       entry.reason = 'no_source_shard';
+    } else if (pausedQuotaSource) {
+      entry.runnableShardId = pausedQuotaSource.shard.id;
+      entry.quotaBound = true;
+      entry.quotaProvider = pausedQuotaSource.provider;
+      entry.quotaAvailable = false;
+      entry.quotaResetAt = pausedQuotaSource.quota.nextResetAt || null;
+      entry.nextAttemptAt = pausedQuotaSource.quota.nextResetAt || null;
+      entry.state = pausedQuotaSource.quota.waitState === 'blocked' ? 'blocked' : 'quota_wait';
+      entry.reason = pausedQuotaSource.quota.reason || pausedQuotaSource.provider;
     } else if (!selectedSource) {
       const blocked = sourceEntries.find((source) => source.configurationError);
       const suspended = sourceEntries.find((source) => source.savedState === 'suspended');
@@ -1167,7 +1235,8 @@ export const createSyncQueue = ({
   rescanMs = integer(environment.SYNC_QUEUE_RESCAN_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
   cooldownMs = integer(environment.SYNC_QUEUE_COOLDOWN_MS, 10_000, 0, 60 * 60_000),
   backoffBaseMs = integer(environment.SYNC_QUEUE_BACKOFF_BASE_MS, 5 * 60_000, 1_000, 24 * 60 * 60_000),
-  backoffCapMs = integer(environment.SYNC_QUEUE_BACKOFF_CAP_MS, 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000)
+  backoffCapMs = integer(environment.SYNC_QUEUE_BACKOFF_CAP_MS, 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
+  enableSourceProbes = environment.ADDRESS_SYNC_ENABLE_SOURCE_PROBES === 'true'
 }) => {
   const legacyStateFile = resolve(stateDir, 'queue-state.json');
   const store = addressDatabase
@@ -1197,7 +1266,8 @@ export const createSyncQueue = ({
       catalogShards: configured,
       queueState: await store.load(),
       runningJob: coordinator?.currentJob || null,
-      now: now()
+      now: now(),
+      enableSourceProbes
     });
     let result = await build();
     const migrations = result.entries.filter((entry) => entry.legacyMigration);
@@ -1352,6 +1422,8 @@ export const createSyncQueue = ({
           checkpointStage: recoveredMetrics.checkpointStage || null,
           partialNextAttemptAt: recoveredMetrics.nextAttemptAt || null,
           partialStalls: Number(source.consecutiveFailures || 0),
+          partialWorkCount: Number(recoveredMetrics.runRequestCount || 0),
+          partialProgressEvaluationReady: recoveredMetrics.progressEvaluationReady === true,
           netGrowth: Number(row.net_growth || 0),
           goalDeficitBefore: goalDeficit(parseJson(row.before_goals_json)),
           goalDeficitAfter: goalDeficit(parseJson(row.after_goals_json)),
@@ -1427,6 +1499,7 @@ export const createSyncQueue = ({
   // the next pass (0 means continue immediately).
   const tick = async () => {
     await ensureRecoveredSourceStates();
+    if (!coordinator.currentJob) await history?.repairInterruptedRuns?.();
     await history?.schedulerHeartbeat(coordinator.currentJob?.id || null);
     const snap = await queueSnapshot();
     await Promise.all(snap.entries.filter((entry) => entry.state === 'quota_wait' && entry.runnableShardId)
@@ -1451,6 +1524,7 @@ export const createSyncQueue = ({
       ? snap.entries.find((entry) => entry.state !== 'done' && entry.probeShardIds?.length)
       : null;
     if (!pick && !probePick) {
+      await onIdle?.();
       const wakeAt = nextWakeAt(snap.entries, currentTime);
       const delay = wakeAt ? Math.max(1_000, wakeAt.getTime() - currentTime.getTime()) : rescanMs;
       return Math.min(rescanMs, delay);
@@ -1545,6 +1619,9 @@ export const createSyncQueue = ({
       checkpointStage: sourceOutcome?.checkpointStage || null,
       partialNextAttemptAt: sourceOutcome?.nextAttemptAt || sourceOutcome?.metrics?.nextAttemptAt || null,
       partialStalls: Number(beforeSource.consecutiveFailures || 0),
+      partialWorkCount: Number(sourceOutcome?.metrics?.runRequestCount || 0),
+      partialMinimumWorkCount: Number(sourceOutcome?.metrics?.progressEvaluationMinimum || 1),
+      partialProgressEvaluationReady: sourceOutcome?.metrics?.progressEvaluationReady === true,
       netGrowth: (after?.current ?? pick.current) - pick.current,
       goalDeficitBefore: goalDeficit(pick.rules),
       goalDeficitAfter: goalDeficit(after?.rules),

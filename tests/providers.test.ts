@@ -29,18 +29,19 @@ describe('registered address providers', () => {
       coordinates: { latitude: 22.34135, longitude: 114.19278 },
       components: {
         houseNumber: '103號', street: '正德街', buildingName: '龍安樓', locality: '黃大仙區',
-        dependentLocality: '黃大仙下邨(二區)', district: '黃大仙區', admin1: '九龍'
+        dependentLocality: '黃大仙下邨(二區)', admin1: '九龍'
       },
       componentVariants: {
         en: {
           houseNumber: '103', street: 'CHING TAK STREET', buildingName: 'LUNG ON HOUSE',
-          dependentLocality: 'LOWER WONG TAI SIN (II) ESTATE', district: 'WONG TAI SIN DISTRICT', admin1: 'KOWLOON'
+          dependentLocality: 'LOWER WONG TAI SIN (II) ESTATE', locality: 'Wong Tai Sin', admin1: 'Kowloon'
         },
         'zh-CN': {
-          houseNumber: '103号', street: '正德街', buildingName: '龙安楼', district: '黄大仙区', admin1: '九龙'
+          houseNumber: '103号', street: '正德街', buildingName: '龙安楼', locality: '黄大仙区', admin1: '九龙'
         }
       }
     });
+    expect(result.candidates[0].components.district).toBeUndefined();
     expect(result.candidates[0].evidence).toContainEqual(expect.objectContaining({ sourceId: 'hk-als', type: 'residential_use' }));
     const localized = await localizeAddress(result.candidates[0], country('HK'), {});
     expect(localized.addressVariants.native).toContain('正德街103號');

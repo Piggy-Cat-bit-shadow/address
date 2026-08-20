@@ -103,8 +103,11 @@ export const createCredentialBroker = async ({
         const code = testPolicy ? 'BROKER_TEST_POLICY_BLOCKED'
           : reservation.reason === 'quota' ? 'SOURCE_QUOTA_UNAVAILABLE'
             : reservation.reason === 'qps' ? 'SOURCE_RATE_LIMITED' : 'SOURCE_CREDENTIAL_UNAVAILABLE';
-        await store.finishRequest(requestKey, { status: 'failed', responseStatus: status, errorCode: code });
-        return send(status, { code, nextAvailableAt: reservation.nextAvailableAt }, retryHeaders(reservation.nextAvailableAt));
+        const authFailure = reservation.reason === 'auth';
+        const responseStatus = authFailure ? 503 : status;
+        const responseCode = authFailure ? 'SOURCE_CREDENTIAL_EXPIRED' : code;
+        await store.finishRequest(requestKey, { status: 'failed', responseStatus: responseStatus, errorCode: responseCode });
+        return send(responseStatus, { code: responseCode, nextAvailableAt: reservation.nextAvailableAt }, retryHeaders(reservation.nextAvailableAt));
       }
       const result = await executeOperation({
         definition, parameters, secret: reservation.credential.secret, fetchImpl
@@ -144,7 +147,7 @@ export const createCredentialBroker = async ({
         return send(400, { code: 'INVALID_REQUEST' });
       }
       const providers = [...new Set(input.providers.map(String))];
-      if (providers.some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'mappls'].includes(provider))) {
+      if (providers.some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider))) {
         return send(400, { code: 'UNSUPPORTED_PROVIDER' });
       }
       const statuses = await Promise.all(providers.map((provider) => store.availability({ clientId, provider })));
@@ -204,7 +207,7 @@ const testPoliciesFrom = (source) => {
   let parsed;
   try { parsed = JSON.parse(source); } catch { throw new Error('CREDENTIAL_BROKER_TEST_POLICY_JSON is invalid'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-    || Object.keys(parsed).some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'mappls'].includes(provider))) {
+    || Object.keys(parsed).some((provider) => !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider))) {
     throw new Error('CREDENTIAL_BROKER_TEST_POLICY_JSON is invalid');
   }
   return parsed;

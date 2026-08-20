@@ -95,14 +95,18 @@ The Korea K-apt worker obtains a credential from the encrypted rotation pool for
 3. Set `ONEMAP_ACCESS_TOKEN` before starting the Singapore import.
 
 OneMap states that a token is valid for three days. Refresh the environment value before expiry and restart the worker that consumes it.
+The credential broker validates the JWT expiry automatically. An expired token is reported as `api_key_expired:onemap` and is excluded from synchronization until replaced. Legacy local quota counters are reconciled with the current configured window automatically; no database edit is required.
+
+OneMap documents HTTP `429` as an API-limit response but does not publish a daily Search allowance or reset clock. The worker therefore enforces `1 QPS`, retries short throttles with bounded backoff, and does not treat `429` as a fabricated daily quota. Administrators may still configure a local safety budget.
 
 ### Google Geocoding
 
 1. Create or select a Google Cloud project, attach billing, and enable Geocoding API.
 2. Create an API key and apply API and server restrictions.
 3. Set `GOOGLE_GEOCODING_API_KEY` or add it in the administrator console.
+4. Set `ADDRESS_SYNC_GOOGLE_GEOCODING_LICENSE_CONFIRMED=true` and `ADDRESS_SYNC_GOOGLE_GEOCODING_REDISTRIBUTION_ALLOWED=true` only when written authorization covers persistent storage and redistribution of derived address data.
 
-Follow Google's [official setup guide](https://developers.google.com/maps/documentation/geocoding/get-api-key). Pricing and quotas are account-dependent; review the [usage and billing page](https://developers.google.com/maps/documentation/geocoding/usage-and-billing) and set cost/quota alerts.
+The adapter uses Geocoding API v4 only; Places API is not required. It sends the key in `X-Goog-Api-Key`, requests a field mask, and filters `street_address`, `premise`, and `subpremise` results at rooftop or geometric-center granularity. Google currently lists `10,000` Geocoding billable events at no cost per billing account each calendar month and a project-wide limit of `3,000` queries per minute. Address defaults automatic synchronization to a `9,000`-request monthly budget and `5 QPS`. When adding the first key, enter any Geocoding usage already incurred in the same billing account this month. Google does not return the remaining monthly free usage in Geocoding responses, and usage across other projects cannot be discovered from an API key; verify it in Google Cloud Console and set a project quota there. Budget alerts alone do not stop charges. Keys in the same project share one quota scope and are never rotated to bypass it. Follow Google's [official setup guide](https://developers.google.com/maps/documentation/geocoding/get-api-key), [v4 migration guide](https://developers.google.com/maps/documentation/geocoding/geocoding-v4-migrate), [usage and billing page](https://developers.google.com/maps/documentation/geocoding/usage-and-billing), and [pricing list](https://developers.google.com/maps/billing-and-pricing/pricing).
 
 ### OS Data Hub
 
@@ -116,7 +120,7 @@ The [official account and API FAQ](https://osdatahub.os.uk/support/faqs/account-
 
 1. Register at [Youdao Zhiyun](https://ai.youdao.com/), create an application, and enable text translation.
 2. Copy the application ID and application secret.
-3. Set `YOUDAO_APP_KEY` and `YOUDAO_APP_SECRET`, or save both in **Admin → Service credentials → Online translation**.
+3. Set `YOUDAO_APP_KEY` and `YOUDAO_APP_SECRET`, or add one or more credential pairs in **Admin → Map keys → Online translation**. Multiple pairs rotate automatically according to quota and cooldown state.
 4. `GOOGLE_TRANSLATION_ENABLED` controls only the Google online-translation path; when it is disabled, a configured Youdao credential can still provide translation.
 
 The [official text-translation API](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) describes the v3 SHA-256 signature. Never expose the application secret in frontend code.

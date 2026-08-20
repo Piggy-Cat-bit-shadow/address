@@ -33,7 +33,8 @@ describe('synchronized address registry', () => {
         statements.push(sql);
         const statement = {
           bind: () => statement,
-          all: async () => ({ results: [{ country_code: 'US', total: 10, residential: 8 }] })
+          all: async () => ({ results: [{ country_code: 'US', total: 10, residential: 8 }] }),
+          first: async () => 12
         };
         return statement;
       }
@@ -42,6 +43,9 @@ describe('synchronized address registry', () => {
     const payload = await response.json() as { data: Array<{ code: string; addressCount: number; residentialCount: number; residentialAvailable: boolean; generationMode: string }> };
     expect(payload.data.find(({ code }) => code === 'US')).toMatchObject({
       addressCount: 8, residentialCount: 8, residentialAvailable: true, generationMode: 'synchronized-pool'
+    });
+    expect(payload.data.find(({ code }) => code === 'CN')).toMatchObject({
+      addressCount: 12, residentialCount: 12, residentialAvailable: true, generationMode: 'synchronized-pool'
     });
     expect(statements).toHaveLength(2);
     expect(statements[0]).toContain('FROM sync_country_state');
@@ -345,7 +349,11 @@ describe('pool-only and IP address generation', () => {
       district: '永福', postcode: '168-0064', street: '永福四丁目', house_number: '4-27-7', building_name: '', latitude: 35.676,
       longitude: 139.642, native_language: 'ja', property_type: 'residential', generation: 'test', quality_score: 0.95,
       first_seen_at: '2026-07-15T00:00:00Z', expires_at: '2027-07-15T00:00:00Z',
-      component_variants_json: JSON.stringify({ native: components, en: { ...components, street: 'Eifuku', locality: 'Suginami' }, 'zh-CN': { ...components, locality: '杉并区' } }),
+      component_variants_json: JSON.stringify({
+        native: { ...components, postalLocality: '杉並区', district: '永福' },
+        en: { ...components, street: 'Eifuku', locality: 'Suginami', postalLocality: 'Suginami', district: 'Eifuku', admin1: 'Tokyo' },
+        'zh-CN': { ...components, street: '永福', locality: '杉并区', postalLocality: '杉并区', district: '永福', admin1: '东京都' }
+      }),
       address_variants_json: JSON.stringify({ native: '東京都杉並区永福四丁目4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福四丁目4-27-7' }),
       source_id: 'fixture', source_name: 'Fixture', source_url: 'https://example.test', source_record_id: 'jp-hot',
       observed_at: '2026-07-15T00:00:00Z', evidence_type: 'address_existence', dataset_id: 'fixture-v2', dataset_version: 'test',

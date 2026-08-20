@@ -14,6 +14,14 @@ interface CommunityCandidateRow {
 
 interface CommunityRow extends CommunityCandidateRow { providers: string }
 
+const mainlandProvinceNames = [
+  '北京市', '天津市', '河北省', '山西省', '内蒙古自治区', '辽宁省', '吉林省', '黑龙江省',
+  '上海市', '江苏省', '浙江省', '安徽省', '福建省', '江西省', '山东省', '河南省', '湖北省',
+  '湖南省', '广东省', '广西壮族自治区', '海南省', '重庆市', '四川省', '贵州省', '云南省',
+  '西藏自治区', '陕西省', '甘肃省', '青海省', '宁夏回族自治区', '新疆维吾尔自治区'
+];
+const mainlandProvinceSql = mainlandProvinceNames.map((name) => `'${name}'`).join(',');
+
 const loadCommunityProviders = async (database: Database, communityId: string): Promise<string> => {
   const rows = (await database.prepare(`SELECT DISTINCT provider FROM cn_community_sources
     WHERE community_id=? AND ${chinaFreshTimestampClause('last_seen_at')} ORDER BY provider`)
@@ -21,17 +29,19 @@ const loadCommunityProviders = async (database: Database, communityId: string): 
   return rows.map((row) => row.provider).join(',');
 };
 
-export const CHINA_COMMUNITY_VALIDITY_DAYS = 180;
 export const chinaFreshTimestampClause = (column: string): string =>
-  `${column}::timestamptz > CURRENT_TIMESTAMP - INTERVAL '${CHINA_COMMUNITY_VALIDITY_DAYS} days'`;
+  `${column} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'`;
 export const chinaFreshSourceCountClause = (communityAlias = 'community', sourceAlias = 'fresh_source'): string => `(
   SELECT COUNT(DISTINCT ${sourceAlias}.provider) FROM cn_community_sources ${sourceAlias}
   WHERE ${sourceAlias}.community_id=${communityAlias}.id AND ${chinaFreshTimestampClause(`${sourceAlias}.last_seen_at`)}
 )`;
 export const chinaCommunityPublicationClause = (alias = 'community'): string => [
   `${alias}.active=1`,
+  `${alias}.province IN (${mainlandProvinceSql})`,
   chinaFreshTimestampClause(`${alias}.last_seen_at`),
   chinaDeliveryAddressClause(alias),
+  `${alias}.provider_address ~ '^[^A-Za-z]+[0-9A-Za-z]+((弄|巷)[0-9A-Za-z]+)?([-之][0-9A-Za-z]+)*(号|號)(院|楼|栋|棟)?$'`,
+  `${alias}.canonical_name ~ '^([^A-Za-z]|[A-Za-z](区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))*$'`,
   `${alias}.id IN (SELECT publication_source.community_id FROM cn_community_sources publication_source
     LEFT JOIN cn_ingest_candidates strict_candidate
       ON strict_candidate.provider=publication_source.provider
@@ -71,21 +81,33 @@ const providerHome: Record<string, string> = {
 };
 const providerName: Record<string, string> = { amap: '高德地图', baidu: '百度地图', tencent: '腾讯地图' };
 
+const splitChinaDeliveryAddress = (value: string): { street: string; houseNumber: string } => {
+  const match = value.match(/^(.+?)([0-9A-Za-z]+(?:(?:弄|巷)[0-9A-Za-z]+)?(?:[-之][0-9A-Za-z]+)*(?:号|號)(?:院|楼|栋|棟)?)$/u);
+  if (!match) return { street: value, houseNumber: '' };
+  return { street: match[1], houseNumber: match[2].replace(/號/gu, '号') };
+};
+
+const chinaEnglishHouseNumber = (value: string): string => value
+  .replace(/[弄巷]/gu, '-')
+  .replace(/(?:号|號)(?:院|楼|栋|棟)?$/u, '');
+
 const rowToAddress = (row: CommunityRow): VerifiedAddress => {
   const providerAddress = normalizeChinaProviderAddress(row.provider_address, row);
+  const delivery = splitChinaDeliveryAddress(providerAddress);
   const native: AddressComponents = {
-    houseNumber: '', street: providerAddress, buildingName: row.canonical_name,
+    houseNumber: delivery.houseNumber, street: delivery.street, buildingName: row.canonical_name,
     locality: row.city, postalLocality: row.city, district: row.district,
     ...(row.township ? { dependentLocality: row.township } : {}), admin1: row.province, postcode: ''
   };
   const english: AddressComponents = {
     ...native,
-    street: romanize(providerAddress), buildingName: romanize(row.canonical_name), locality: romanize(row.city),
+    houseNumber: chinaEnglishHouseNumber(delivery.houseNumber), street: romanize(delivery.street),
+    buildingName: romanize(row.canonical_name), locality: romanize(row.city),
     postalLocality: romanize(row.city), district: romanize(row.district),
     ...(row.township ? { dependentLocality: romanize(row.township) } : {}), admin1: romanize(row.province)
   };
   const nativeAddress = `${row.province}${row.city}${row.district}${row.township}${providerAddress}${row.canonical_name}`;
-  const englishAddress = [english.buildingName, english.street, english.dependentLocality, english.district, english.locality, english.admin1, 'China']
+  const englishAddress = [english.buildingName, [english.houseNumber, english.street].filter(Boolean).join(' '), english.dependentLocality, english.district, english.locality, english.admin1, 'China']
     .filter(Boolean).join(', ');
   const evidence: AddressEvidence[] = [...new Set(row.providers.split(',').filter(Boolean))].flatMap((provider) => {
     const sourceUrl = providerHome[provider] || '';
@@ -115,7 +137,7 @@ const rowToAddress = (row: CommunityRow): VerifiedAddress => {
     sourceVersion: `map-poi-${row.last_seen_at.slice(0, 10)}`,
     sourceUpdatedAt: row.last_seen_at.slice(0, 10),
     verifiedAt: row.last_seen_at,
-    expiresAt: new Date(new Date(row.last_seen_at).getTime() + 180 * 86400000).toISOString(),
+    expiresAt: '9999-12-31T23:59:59.999Z',
     evidence,
     exclusionFlags: []
   };

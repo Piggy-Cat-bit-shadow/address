@@ -111,6 +111,17 @@ describe('country address quality gate', () => {
     }).reasons).toContain('coordinates_outside_country');
   });
 
+  it('rejects Hong Kong coordinates outside its territory and non-existent postcodes', () => {
+    const components = {
+      houseNumber: '8號', street: '正德街', locality: '深水埗區', admin1: '九龍', postcode: ''
+    };
+    expect(validateAddressQuality({ countryCode: 'HK', components, latitude: 22.33, longitude: 114.16 }).valid).toBe(true);
+    expect(validateAddressQuality({ countryCode: 'HK', components, latitude: 39.9, longitude: 116.4 }).reasons)
+      .toContain('coordinates_outside_country');
+    expect(validateAddressQuality({ countryCode: 'HK', components: { ...components, postcode: '999077' } }).reasons)
+      .toContain('invalid_postcode');
+  });
+
   it('accepts French overseas coordinates without opening a cross-ocean envelope', () => {
     const components = { ...base, locality: 'Saint-Denis', postcode: '97400', street: 'Rue de Paris' };
     expect(validateAddressQuality({ countryCode: 'FR', components, latitude: -20.88, longitude: 55.45 }).valid).toBe(true);

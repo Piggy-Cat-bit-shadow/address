@@ -34,6 +34,11 @@ fi
 docker image inspect "$RELEASE_IMAGE" >/dev/null
 
 mkdir -p "$STATE_ROOT" "$GATEWAY_ROOT"
+exec 9>"$STATE_ROOT/activation.lock"
+if ! flock -n 9; then
+  echo "Another production activation is already running" >&2
+  exit 1
+fi
 ACTIVE_SLOT=''
 if [[ -f "$STATE_ROOT/active-slot" ]]; then
   ACTIVE_SLOT=$(tr -d '\r\n' <"$STATE_ROOT/active-slot")
@@ -122,19 +127,25 @@ render_gateway() {
 
 rollback_cutover() {
   local status=$?
+  local stop_timeout=30
   trap - ERR INT TERM
   set +e
   if [[ -f "$GATEWAY_ROOT/Caddyfile.previous" ]]; then
+    stop_timeout=5700
     cp "$GATEWAY_ROOT/Caddyfile.previous" "$GATEWAY_ROOT/Caddyfile"
     compose exec -T gateway caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
   elif [[ "$CUTOVER_STARTED" == true ]]; then
+    stop_timeout=5700
     compose stop -t 10 gateway
   fi
-  compose --profile "production-$TARGET_SLOT" stop -t 5700 \
+  compose --profile "production-$TARGET_SLOT" stop -t "$stop_timeout" \
     "api-$TARGET_SLOT" "credential-broker-$TARGET_SLOT"
   echo "Deployment failed; gateway remains on the previous release" >&2
   exit "$status"
 }
+
+CUTOVER_STARTED=false
+trap rollback_cutover ERR INT TERM
 
 echo "==> preparing PostgreSQL and migration"
 compose up -d --wait --wait-timeout 180 postgres
@@ -155,7 +166,6 @@ if [[ -f "$GATEWAY_ROOT/Caddyfile" ]]; then
   cp "$GATEWAY_ROOT/Caddyfile" "$GATEWAY_ROOT/Caddyfile.previous"
 fi
 CUTOVER_STARTED=true
-trap rollback_cutover ERR INT TERM
 mv "$GATEWAY_ROOT/Caddyfile.next" "$GATEWAY_ROOT/Caddyfile"
 if compose ps --status running --services | grep -Fx gateway >/dev/null; then
   compose exec -T gateway caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -184,6 +194,12 @@ if [[ -n "$ACTIVE_SLOT" ]]; then
   compose --profile "production-$ACTIVE_SLOT" stop -t 5700 \
     "api-$ACTIVE_SLOT" "credential-broker-$ACTIVE_SLOT"
 fi
+
+for legacy_service in api credential-broker; do
+  if compose ps --status running --services | grep -Fx "$legacy_service" >/dev/null; then
+    compose stop -t 30 "$legacy_service"
+  fi
+done
 
 echo "==> updating singleton sync service"
 compose up -d --no-deps --wait --wait-timeout 6000 sync

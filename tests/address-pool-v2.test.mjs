@@ -15,6 +15,8 @@ describe('unified PostgreSQL address schema', () => {
     expect(schema).toContain('CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates');
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS address_pool_evidence');
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS sync_country_state');
+    expect(schema).toContain('idx_address_pool_zh_han_id');
+    expect(schema).toContain('idx_address_pool_zh_han_random');
     expect(schema).not.toContain('address_pool_meta');
   });
 });
@@ -31,6 +33,46 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(repaired.en).toBe(variants.en);
   });
 
+  it('strips trailing English from bilingual Hong Kong native components', () => {
+    const variants = {
+      native: { houseNumber: '23', street: '康樂園第十九街 Hong Lok Yuen 19th Street', locality: '大埔區 Tai Po', admin1: '新界 New Territories', postcode: '' },
+      en: { houseNumber: '23', street: 'Hong Lok Yuen 19th Street', locality: 'Tai Po', admin1: 'New Territories', postcode: '' },
+      'zh-CN': { houseNumber: '23', street: '康乐园第十九街', locality: '大埔区', admin1: '新界', postcode: '' }
+    };
+    expect(repairHongKongNativeVariants('HK', variants).native).toMatchObject({
+      street: '康樂園第十九街', locality: '大埔區', admin1: '新界'
+    });
+  });
+
+  it('converts Taiwan native components to Taiwan traditional Chinese', () => {
+    const variants = {
+      native: { houseNumber: '10号', street: '忠孝东路', locality: '中正区', admin1: '台北市', postcode: '100001' },
+      en: { houseNumber: '10', street: 'Zhongxiao East Road', locality: 'Zhongzheng', admin1: 'Taipei', postcode: '100001' },
+      'zh-CN': { houseNumber: '10号', street: '忠孝东路', locality: '中正区', admin1: '台北市', postcode: '100001' }
+    };
+    expect(repairHongKongNativeVariants('TW', variants).native).toMatchObject({
+      street: '忠孝東路', locality: '中正區', admin1: '臺北市'
+    });
+  });
+
+  it('rebuilds Hong Kong and Taiwan native address variants without Latin country codes', async () => {
+    const source = {
+      id: 'fixture-han', country_code: 'TW', admin1: '臺北市', admin1_code: '', locality: '中正區', postal_locality: '中正區', district: '', postcode: '100003',
+      street: '忠孝東路一段', house_number: '10號', building_name: '', latitude: 25.04, longitude: 121.52, native_language: 'zh-TW', property_type: 'residential', generation: 'fixture', quality_score: 0.95,
+      first_seen_at: '2026-01-01T00:00:00Z', expires_at: '2027-01-01T00:00:00Z',
+      component_variants_json: JSON.stringify({
+        native: { houseNumber: '10號', street: '忠孝東路一段', locality: '中正區', postalLocality: '中正區', admin1: '臺北市', postcode: '100003' },
+        en: { houseNumber: '10', street: 'Zhongxiao East Road Section 1', locality: 'Zhongzheng District', postalLocality: 'Zhongzheng District', admin1: 'Taipei City', postcode: '100003' },
+        'zh-CN': { houseNumber: '10号', street: '忠孝东路一段', locality: '中正区', postalLocality: '中正区', admin1: '台北市', postcode: '100003' }
+      }),
+      address_variants_json: JSON.stringify({ native: '10號 忠孝東路一段, 中正區, 臺北市, TW' }), source_id: 'fixture', source_name: 'Fixture', source_url: 'https://example.test', source_record_id: 'tw', record_url: '', observed_at: '2026-01-01T00:00:00Z', evidence_type: 'address_existence', residential_evidence: 1, dataset_id: 'fixture', dataset_version: '1', source_updated_at: '2026-01-01T00:00:00Z', imported_at: '2026-01-01T00:00:00Z'
+    };
+    const db = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: source.id }, source] }) }) }) };
+    const address = await pickAddressPoolV2Address(db, 'TW', false, {}, undefined, 'tw-native');
+    expect(address?.addressVariants.native).toMatch(/臺北市/u);
+    expect(address?.addressVariants.native).not.toMatch(/\bTW\b/u);
+  });
+
   const row = {
     id: 'fixture-address', country_code: 'JP', admin1: '東京都', admin1_code: '13',
     locality: '杉並区', postal_locality: '杉並区', district: '永福', postcode: '168-0064',
@@ -38,9 +80,9 @@ describe('ADDRESS_DB v2 repository', () => {
     native_language: 'ja', property_type: 'residential', generation: 'fixture-2026-07', quality_score: 0.95,
     first_seen_at: '2026-07-16T00:00:00Z', expires_at: '2027-07-15T00:00:00Z',
     component_variants_json: JSON.stringify({
-      native: { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', postcode: '168-0064' },
-      en: { houseNumber: '4-27-7', street: 'Eifuku', locality: 'Suginami', postcode: '168-0064' },
-      'zh-CN': { houseNumber: '4-27-7', street: '永福', locality: '杉并区', postcode: '168-0064' }
+      native: { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', postalLocality: '杉並区', district: '永福', admin1: '東京都', admin1Code: '13', postcode: '168-0064' },
+      en: { houseNumber: '4-27-7', street: 'Eifuku', locality: 'Suginami', postalLocality: 'Suginami', district: 'Eifuku', admin1: 'Tokyo', admin1Code: '13', postcode: '168-0064' },
+      'zh-CN': { houseNumber: '4-27-7', street: '永福', locality: '杉并区', postalLocality: '杉并区', district: '永福', admin1: '东京都', admin1Code: '13', postcode: '168-0064' }
     }),
     address_variants_json: JSON.stringify({ native: '東京都杉並区永福四丁目4-27-7', en: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', 'zh-CN': '东京都杉并区永福四丁目4-27-7' }),
     source_id: 'fixture', source_name: 'Fixture Source', source_url: 'https://example.test/source',
@@ -81,6 +123,8 @@ describe('ADDRESS_DB v2 repository', () => {
       formattedAddress: '4-27-7 Eifuku, Suginami, Tokyo 168-0064', sourceVersion: 'fixture-dataset:2026-07-15'
     }));
     expect(address?.componentVariants['zh-CN'].locality).toBe('杉并区');
+    expect(address?.componentVariants.en.dependentLocality).toBe('Eifuku');
+    expect(address?.componentVariants['zh-CN'].dependentLocality).toBe('永福');
     expect(address?.evidence[0]).toEqual(expect.objectContaining({ sourceId: 'fixture', sourceUrl: row.record_url }));
     expect(statements[0]).toContain('SELECT id FROM address_pool');
     expect(statements[0]).toContain('active = 1');
@@ -120,6 +164,73 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(statements[0]).toContain('LIMIT 16');
     expect(statements[1]).toContain('FROM address_pool_runtime');
     expect(statements[1]).toContain('WHERE id IN (?)');
+  });
+
+  it('does not publish records whose stored English or Chinese variants still use the native script', async () => {
+    const untranslated = {
+      ...row,
+      component_variants_json: JSON.stringify({
+        native: { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', district: '永福', postcode: '168-0064' },
+        en: { houseNumber: '4-27-7', street: '永福四丁目', locality: '杉並区', district: '永福', postcode: '168-0064' },
+        'zh-CN': { houseNumber: '4-27-7', street: '永福', locality: '杉并区', district: '永福', postcode: '168-0064' }
+      })
+    };
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() { return { results: sql.startsWith('SELECT id FROM address_pool') ? [{ id: row.id }] : [untranslated] }; }
+        };
+        return statement;
+      }
+    };
+    await expect(pickAddressPoolV2Address(database, 'JP', false, {}, undefined, 'translation-gate'))
+      .resolves.toBeUndefined();
+  });
+
+  it('skips a Singapore row whose stored Chinese semantic fields are entirely Latin', async () => {
+    const native = {
+      houseNumber: '111B', street: 'PLANTATION CRES', locality: 'Tengah',
+      postalLocality: 'Singapore', postcode: '699111'
+    };
+    const translated = {
+      houseNumber: '111B', street: '种植园弯', locality: '登加',
+      postalLocality: '新加坡', postcode: '699111'
+    };
+    const base = {
+      ...row, country_code: 'SG', admin1: '', admin1_code: '', locality: 'Tengah',
+      postal_locality: 'Singapore', district: '', postcode: '699111', street: 'PLANTATION CRES',
+      house_number: '111B', latitude: 1.35, longitude: 103.72, native_language: 'en',
+      address_variants_json: JSON.stringify({
+        native: '111B PLANTATION CRES, Singapore 699111',
+        en: '111B PLANTATION CRES, Singapore 699111',
+        'zh-CN': '111B 种植园弯，新加坡 699111'
+      })
+    };
+    const untranslated = {
+      ...base, id: 'sg-untranslated',
+      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': native })
+    };
+    const valid = {
+      ...base, id: 'sg-translated',
+      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': translated })
+    };
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            return { results: sql.startsWith('SELECT id FROM address_pool')
+              ? [{ id: untranslated.id }, { id: valid.id }]
+              : [untranslated, valid] };
+          }
+        };
+        return statement;
+      }
+    };
+
+    await expect(pickAddressPoolV2Address(database, 'SG', false, {}, undefined, 'translation-gate'))
+      .resolves.toMatchObject({ id: 'pool-v2-sg-translated' });
   });
 
   it('attributes Overture residential classification to the buildings theme', async () => {
@@ -164,10 +275,14 @@ describe('ADDRESS_DB v2 repository', () => {
       houseNumber: '10', street: 'Market Street', locality: 'Philadelphia', postalLocality: 'Philadelphia',
       admin1: 'Pennsylvania', admin1Code: 'PA', postcode: '19103'
     };
+    const chinese = {
+      houseNumber: '10', street: '市场街', locality: '费城', postalLocality: '费城',
+      admin1: '宾夕法尼亚州', admin1Code: 'PA', postcode: '19103'
+    };
     const base = {
       ...row, country_code: 'US', locality: 'Philadelphia', postal_locality: 'Philadelphia', district: '',
       postcode: '19103', street: 'Market Street', house_number: '10', latitude: 39.95, longitude: -75.16,
-      native_language: 'en', component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+      native_language: 'en', component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': chinese }),
       address_variants_json: JSON.stringify({
         native: '10 Market Street, Philadelphia, PA 19103', en: '10 Market Street, Philadelphia, PA 19103',
         'zh-CN': '美国宾夕法尼亚州费城市场街10号'
@@ -203,16 +318,20 @@ describe('ADDRESS_DB v2 repository', () => {
       houseNumber: '2704', street: 'College Avenue', locality: 'Berkeley', postalLocality: 'Berkeley',
       admin1: 'California', admin1Code: 'CA', postcode: '94704', buildingName: '3'
     };
+    const chinese = {
+      houseNumber: '2704', street: '学院大道', locality: '伯克利', postalLocality: '伯克利',
+      admin1: '加利福尼亚州', admin1Code: 'CA', postcode: '94704', buildingName: '3'
+    };
     const valid = {
       ...row, id: 'legacy-unit', country_code: 'US', admin1: 'California', admin1_code: 'CA',
       locality: 'Berkeley', postal_locality: 'Berkeley', district: '', postcode: '94704',
       street: 'College Avenue', house_number: '2704', building_name: '3', latitude: 37.86, longitude: -122.25,
       native_language: 'en',
-      component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+      component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': chinese }),
       address_variants_json: JSON.stringify({ native: '3, 2704 College Avenue, Berkeley, CA 94704', en: '3, 2704 College Avenue, Berkeley, CA 94704', 'zh-CN': '3, 2704 College Avenue' })
     };
     const missingZip = { ...valid, id: 'missing-zip', postcode: '', component_variants_json: JSON.stringify({
-      native: { ...components, postcode: '' }, en: { ...components, postcode: '' }, 'zh-CN': { ...components, postcode: '' }
+      native: { ...components, postcode: '' }, en: { ...components, postcode: '' }, 'zh-CN': { ...chinese, postcode: '' }
     }) };
     const database = {
       prepare(sql) {
@@ -259,11 +378,15 @@ describe('ADDRESS_DB v2 repository', () => {
       houseNumber: '478', street: 'Dean Street', locality: 'New York', postalLocality: 'New York',
       admin1: 'New York', admin1Code: 'NY', postcode: '11217'
     };
+    const chinese = {
+      houseNumber: '478', street: '迪恩街', locality: '纽约', postalLocality: '纽约',
+      admin1: '纽约州', admin1Code: 'NY', postcode: '11217'
+    };
     const brooklyn = {
       ...row, id: 'brooklyn', country_code: 'US', admin1: 'New York', admin1_code: 'NY',
       locality: 'New York', postal_locality: 'New York', district: 'Kings County', postcode: '11217',
       street: 'Dean Street', house_number: '478', latitude: 40.681116, longitude: -73.975375,
-      native_language: 'en', component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+      native_language: 'en', component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': chinese }),
       address_variants_json: JSON.stringify({
         native: '478 Dean Street, New York, NY 11217', en: '478 Dean Street, New York, NY 11217',
         'zh-CN': '美国纽约州纽约市迪恩街478号'

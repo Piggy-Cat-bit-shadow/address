@@ -10,19 +10,19 @@ const policy = (target, limits, labels, coverageRatio = DEFAULT_COVERAGE_RATIO, 
 
 export const ADDRESS_POLICY_DEFAULTS = {
   US: policy(50_000, [2_000, 300, 80, 0], ['State', 'County / city', 'Local area', ''], 1, 1_000),
-  CA: policy(15_000, [2_500, 350, 80, 0], ['Province / territory', 'City', 'Regional area', ''], 1, 300),
+  CA: policy(80_000, [12_000, 1_500, 300, 0], ['Province / territory', 'City', 'Regional area', ''], 1, 300),
   MX: policy(20_000, [2_000, 300, 70, 0], ['State', 'Municipality', 'Locality', ''], 1, 400),
   GB: policy(35_000, [3_000, 350, 80, 0], ['Country / region', 'Post town', 'District', ''], 1, 700),
   DE: policy(40_000, [2_500, 350, 80, 0], ['State', 'Municipality', 'District', ''], 1, 800),
-  FR: policy(40_000, [3_500, 350, 80, 0], ['Region', 'Commune', 'District', ''], 1, 800),
+  FR: policy(80_000, [80_000, 1_500, 300, 0], ['Region', 'Commune', 'District', ''], 1, 800),
   IT: policy(35_000, [2_500, 350, 80, 0], ['Region', 'Municipality', 'District', ''], 1, 700),
-  ES: policy(25_000, [2_500, 350, 80, 0], ['Autonomous community', 'Municipality', 'District', ''], 1, 500),
+  ES: policy(80_000, [80_000, 70_000, 300, 0], ['Autonomous community', 'Municipality', 'District', ''], 1, 500),
   NL: policy(50_000, [5_000, 700, 120, 0], ['Province', 'Municipality', 'District', ''], 1, 1_000),
   JP: policy(20_000, [7_000, 1_000, 200, 0], ['Prefecture', 'Municipality', 'Town / ward', ''], 1, 400),
   CN: policy(40_000, [2_500, 400, 30, 10], ['Province', 'Prefecture city', 'District / county', 'Township'], 1, 800, 60),
   HK: policy(20_000, [10_000, 2_000, 300, 0], ['Region', 'District', 'Locality', '']),
   TW: policy(10_000, [2_000, 300, 70, 0], ['County / city', 'District / township', 'Village', ''], 1, 200),
-  KR: policy(20_000, [3_000, 500, 100, 0], ['Province / city', 'City / district', 'Neighborhood', ''], 1, 400),
+  KR: policy(30_000, [5_000, 800, 150, 0], ['Province / city', 'City / district', 'Neighborhood', ''], 1, 400),
   SG: policy(12_000, [12_000, 1_000, 100, 0], ['Planning region', 'Planning area', 'Locality', '']),
   MY: policy(10_000, [1_500, 250, 60, 0], ['State / territory', 'District / city', 'Locality', ''], 0.6),
   TH: policy(10_000, [1_200, 250, 60, 0], ['Province', 'District', 'Subdistrict', ''], 0.6),
@@ -39,16 +39,19 @@ export const ADDRESS_POLICY_DEFAULTS = {
 };
 
 const LEGACY_DEFAULT_TARGETS = {
-  CA: [35_000], MX: [30_000], ES: [35_000], NL: [30_000, 25_000], JP: [40_000, 15_000],
-  HK: [12_000, 10_000], TW: [25_000], KR: [10_000], SG: [8_000], MY: [15_000], TH: [15_000],
+  CA: [15_000, 35_000], MX: [30_000], FR: [40_000], ES: [25_000, 35_000], NL: [30_000, 25_000], JP: [40_000, 15_000],
+  HK: [12_000, 10_000], TW: [25_000], KR: [10_000, 20_000], SG: [8_000], MY: [15_000], TH: [15_000],
   PH: [15_000], VN: [15_000], TR: [15_000], SA: [8_000], IN: [30_000],
   AU: [35_000], BR: [30_000], NG: [10_000], ZA: [15_000], RU: [30_000]
 };
 
 const LEGACY_DEFAULT_LIMITS = {
+  CA: [[2_500, 350, 80, 0]],
+  FR: [[3_500, 350, 80, 0], [12_000, 1_500, 300, 0]],
+  ES: [[2_500, 350, 80, 0], [12_000, 1_500, 300, 0]],
   NL: [[3_000, 400, 80, 0]],
   HK: [[2_000, 300, 80, 0]],
-  KR: [[1_500, 250, 60, 0]],
+  KR: [[1_500, 250, 60, 0], [3_000, 500, 100, 0]],
   SG: [[8_000, 500, 80, 0]],
   ZA: [[1_500, 250, 60, 0]]
 };

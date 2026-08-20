@@ -63,7 +63,7 @@ export const runTranslationBackfillBatch = async ({
   let scanned = 0;
   while (pending.length < pendingLimit && scanned < scanLimit) {
     const rows = (await database.prepare(`SELECT id, native_language, component_variants_json
-      FROM address_pool WHERE active = 1 AND native_language NOT LIKE 'en%' AND id > ? ORDER BY id LIMIT 500`)
+      FROM address_pool WHERE active = 1 AND id > ? ORDER BY id LIMIT 500`)
       .bind(state.cursor).all()).results || [];
     if (!rows.length) {
       // End of table: restart from the top on the NEXT tick.
@@ -73,7 +73,6 @@ export const runTranslationBackfillBatch = async ({
     for (const row of rows) {
       state.cursor = row.id;
       scanned += 1;
-      if (String(row.native_language || '').toLowerCase().startsWith('en')) continue;
       const variants = parseVariants(row.component_variants_json);
       if (!variants) continue;
       const fields = pendingFields(variants, row.native_language);
@@ -96,7 +95,7 @@ export const runTranslationBackfillBatch = async ({
   ]);
 
   let updated = 0;
-  const updatedAt = now().toISOString();
+  const revision = new Date(Math.floor(now().getTime() / 900_000) * 900_000).toISOString();
   for (const { row, variants, fields } of pending) {
     let changed = false;
     for (const field of fields.en) {
@@ -116,9 +115,13 @@ export const runTranslationBackfillBatch = async ({
       }
     }
     if (!changed) continue;
-    await database.prepare('UPDATE address_pool SET component_variants_json = ?, last_seen_at = ? WHERE id = ?')
-      .bind(JSON.stringify(variants), updatedAt, row.id).run();
+    await database.prepare('UPDATE address_pool SET component_variants_json = ? WHERE id = ?')
+      .bind(JSON.stringify(variants), row.id).run();
     updated += 1;
+  }
+  if (updated > 0) {
+    await database.prepare(`INSERT INTO address_pool_revisions(kind,version) VALUES ('translation',?)
+      ON CONFLICT (kind) DO UPDATE SET version=excluded.version`).bind(revision).run();
   }
   // Translation service unavailable: everything came back unchanged. Back off ~10 ticks.
   if (updated === 0 && (enValues.length || zhValues.length)) state.failedTicks = 10;
@@ -141,12 +144,10 @@ export const startTranslationBackfill = ({
     if (stopped) return;
     timer = setTimer(async () => {
       try {
-        if (!isBusy()) {
-          const result = await runTranslationBackfillBatch({ database, environment, now });
-          logged += result.updated;
-          if (result.updated > 0 && logged % 1000 < result.updated) {
-            console.log(`[translation-backfill] cumulative updated=${logged}`);
-          }
+        const result = await runTranslationBackfillBatch({ database, environment, now });
+        logged += result.updated;
+        if (result.updated > 0 && logged % 1000 < result.updated) {
+          console.log(`[translation-backfill] cumulative updated=${logged}${isBusy() ? ' during-sync' : ''}`);
         }
       } catch (error) {
         console.error('Translation backfill batch failed', error);

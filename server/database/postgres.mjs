@@ -6,8 +6,8 @@ import pg from 'pg';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 13;
-const CONTROL_SCHEMA_VERSION = 16;
+const ADDRESS_SCHEMA_VERSION = 17;
+const CONTROL_SCHEMA_VERSION = 18;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -53,6 +53,8 @@ export const initializePostgres = async (pool, {
       if (!['3F000', '42P01'].includes(error?.code)) throw error;
     }
     await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout TO '30min'");
+    await client.query("SET LOCAL lock_timeout TO '5min'");
     await client.query('CREATE SCHEMA IF NOT EXISTS address');
     await client.query('CREATE SCHEMA IF NOT EXISTS control');
     await client.query('SET LOCAL search_path TO address, public');

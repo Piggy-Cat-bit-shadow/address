@@ -159,8 +159,10 @@ export class PostgresCountryStateStore {
       const datasetId = await this.database.prepare(`SELECT id FROM address_datasets
         WHERE country_code=? AND status='active' ORDER BY imported_at DESC LIMIT 1`).bind(countryCode).first('id');
       const counts = await this.database.prepare(`SELECT COUNT(*) AS address_count,
-        SUM(CASE WHEN property_type IN ('residential','apartment') THEN 1 ELSE 0 END) AS residential_count
-        FROM address_pool WHERE country_code=? AND active=1`).bind(countryCode).first();
+        SUM(CASE WHEN property_type IN ('residential','apartment') AND residential_evidence=1
+          THEN 1 ELSE 0 END) AS residential_count
+        FROM address_pool_runtime WHERE country_code=?`)
+        .bind(countryCode).first();
       const minimum = (column) => shardRows.map((row) => row[column]).filter(Boolean).sort()[0] || null;
       const status = failed ? 'failed' : shardRows.length && shardRows.every((row) => row.status === 'ready') ? 'ready' : 'pending';
       await this.database.prepare(`UPDATE sync_country_state SET status=?,last_success_at=?,next_sync_at=?,

@@ -10,12 +10,16 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createGeoapifyCredentialBridge } from './geoapify-credential-bridge.mjs';
 import { createOneMapCredentialBridge } from './onemap-credential-bridge.mjs';
+import {
+  evaluateGoogleResidentialResult, googleResidentialLanguages, reconcileGoogleProgressOutput, requestGoogleReverse
+} from './google-residential-enrichment.mjs';
 import { runProcess } from './process.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const catalogFile = resolve(syncRoot, 'source-shards.json');
 const overtureExporter = resolve(syncRoot, 'overture-export.py');
 const geofabrikExporter = resolve(syncRoot, 'geofabrik-export.py');
+const googleResidentialSeedExporter = resolve(syncRoot, 'google-residential-seeds.py');
 const japanAbrExporter = resolve(syncRoot, 'japan-abr-export.py');
 const singaporeHdbExporter = resolve(syncRoot, 'singapore-hdb-export.py');
 const koreaKaptExporter = resolve(syncRoot, 'korea-kapt-export.py');
@@ -23,18 +27,27 @@ const openAddressesExporter = resolve(syncRoot, 'openaddresses-export.py');
 const inegiResidentialExporter = resolve(syncRoot, 'inegi-residential-export.py');
 const ethekwiniResidentialExporter = resolve(syncRoot, 'south-africa-ethekwini-export.py');
 const capeTownResidentialExporter = resolve(syncRoot, 'south-africa-cape-town-export.py');
+const thailandDptResidentialExporter = resolve(syncRoot, 'thailand-dpt-export.py');
+const canadaNarExporter = resolve(syncRoot, 'canada-nar-export.py');
+const franceBdnbExporter = resolve(syncRoot, 'france-bdnb-export.py');
+const spainCatastroExporter = resolve(syncRoot, 'spain-catastro-export.py');
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
 const licensedResidentialExporter = resolve(syncRoot, 'licensed-residential-export.py');
 const overtureResidentialRevision = 'residential-buildings-v5';
 const geofabrikExportRevision = 'g69';
+const googleResidentialRevision = 'osm-explicit-residential-google-geocoding-v8';
 const japanAbrExportRevision = 'abr-rsdt-plateau-osm-chiban-v14';
-const singaporeHdbExportRevision = 'hdb-property-building-onemap-v3';
-const koreaKaptExportRevision = 'kapt-official-apartments-v5';
+const singaporeHdbExportRevision = 'hdb-property-building-onemap-v5';
+const koreaKaptExportRevision = 'kapt-official-apartments-v6';
 const openAddressesExportRevision = 'archive-residential-v2';
 const inegiResidentialExportRevision = 'official-dwelling-v1';
 const ethekwiniResidentialExportRevision = 'official-address-zoning-postcode-v1';
 const capeTownResidentialExportRevision = 'official-parcel-zoning-postcode-v1';
+const thailandDptResidentialExportRevision = 'official-building-residential-v3';
+const canadaNarExportRevision = 'statcan-nar-pumf-v1';
+const franceBdnbExportRevision = 'bdnb-ban-fiabilite17-v2';
+const spainCatastroExportRevision = 'inspire-residential-join-v2';
 const taiwanResidentialExportRevision = 'molit-lvr-oa-post-v2';
 const hongKongResidentialExportRevision = 'bd-building-information-v1';
 const mapplsResidentialRevision = 'licensed-nearby-details-v2';
@@ -43,6 +56,7 @@ const pdokBagRevision = 'strict-active-residential-coverage-round-robin-v2';
 export const sourceAdapterRevisions = Object.freeze({
   overture: overtureResidentialRevision,
   geofabrik: geofabrikExportRevision,
+  'google-residential-enrichment': googleResidentialRevision,
   'japan-abr': japanAbrExportRevision,
   'singapore-hdb': singaporeHdbExportRevision,
   'korea-kapt': koreaKaptExportRevision,
@@ -50,12 +64,27 @@ export const sourceAdapterRevisions = Object.freeze({
   'inegi-residential': inegiResidentialExportRevision,
   'ethekwini-residential': ethekwiniResidentialExportRevision,
   'cape-town-residential': capeTownResidentialExportRevision,
+  'thailand-dpt-residential': thailandDptResidentialExportRevision,
+  'canada-nar-residential': canadaNarExportRevision,
+  'france-bdnb-residential': franceBdnbExportRevision,
+  'spain-catastro-residential': spainCatastroExportRevision,
   'taiwan-residential': taiwanResidentialExportRevision,
   'hong-kong-residential': hongKongResidentialExportRevision,
   'mappls-residential': mapplsResidentialRevision,
   'licensed-residential-feed': licensedResidentialRevision,
   'pdok-bag': pdokBagRevision
 });
+
+export const sourceCapabilityRevision = (shard) => {
+  const adapter = String(shard?.source?.adapter || '');
+  const base = sourceAdapterRevisions[adapter] || '';
+  const inputs = shard?.source?.capabilityInputs;
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) return base;
+  return `${base}:cap-${createHash('sha256').update(JSON.stringify({
+    maxRecords: shard.maxRecords ?? null,
+    inputs
+  })).digest('hex').slice(0, 16)}`;
+};
 // geoBoundaries gbOpen has no entries for these territories; use the exact OSM admin relations instead.
 const osmBoundaryRelations = { HKG: 913110, MAC: 1867188 };
 
@@ -407,8 +436,15 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
   for (const configuredSource of catalog.sources) {
     if (configuredSource.enabledEnvironment && !environmentEnabled(environment[configuredSource.enabledEnvironment])) continue;
     const source = { ...configuredSource };
+    if (source.licenseConfirmationEnvironment
+      && !environmentEnabled(environment[source.licenseConfirmationEnvironment])) {
+      source.configurationError = `missing_source_configuration:${source.licenseConfirmationEnvironment}`;
+    }
     if (source.redistributionConfirmationEnvironment) {
       source.redistributionAllowed = environmentEnabled(environment[source.redistributionConfirmationEnvironment]);
+      if (!source.redistributionAllowed) {
+        source.configurationError ||= `missing_source_configuration:${source.redistributionConfirmationEnvironment}`;
+      }
     }
     if (source.dataUrlEnvironment) {
       const configuredUrl = String(environment[source.dataUrlEnvironment] || '').trim();
@@ -508,6 +544,49 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         intervalDays,
         source
       });
+    } else if (source.adapter === 'thailand-dpt-residential') {
+      shards.push({
+        id: source.id,
+        countryCode: 'TH',
+        maxRecords: source.maxRecords,
+        qualityGate: source.qualityGate,
+        intervalDays,
+        source
+      });
+    } else if (source.adapter === 'canada-nar-residential') {
+      shards.push({
+        id: source.id,
+        countryCode: 'CA',
+        maxRecords: source.maxRecords,
+        qualityGate: source.qualityGate,
+        intervalDays,
+        source
+      });
+    } else if (source.adapter === 'france-bdnb-residential') {
+      shards.push({
+        id: source.id,
+        countryCode: 'FR',
+        maxRecords: source.maxRecords,
+        qualityGate: source.qualityGate,
+        intervalDays,
+        source
+      });
+    } else if (source.adapter === 'spain-catastro-residential') {
+      for (const municipality of source.municipalities || []) shards.push({
+        id: `${source.id}-${municipality.code}`,
+        countryCode: 'ES',
+        maxRecords: municipality.maxRecords,
+        qualityGate: municipality.qualityGate,
+        intervalDays,
+        source: {
+          ...source,
+          ...municipality,
+          id: `${source.id}-${municipality.code}`,
+          dataUrl: municipality.addressesUrl,
+          municipalityName: municipality.name,
+          name: `${source.name} (${municipality.name})`
+        }
+      });
     } else if (source.adapter === 'taiwan-residential') {
       shards.push({
         id: source.id,
@@ -537,6 +616,22 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         intervalDays,
         source
       });
+    } else if (source.adapter === 'google-residential-enrichment') {
+      for (const extract of source.extracts || []) shards.push({
+        id: `${source.id}-${extract.countryCode.toLowerCase()}`,
+        countryCode: extract.countryCode,
+        extractId: extract.extractId,
+        boundaryIso3: extract.boundaryIso3,
+        excludeBoundaryIso3: extract.excludeBoundaryIso3,
+        maxRecords: extract.maxRecords ?? source.maxRecords,
+        qualityGate: extract.qualityGate ?? source.qualityGate,
+        quotaProvider: source.quotaProvider,
+        intervalDays,
+        source: extract.capabilityInputs ? {
+          ...source,
+          capabilityInputs: { ...(source.capabilityInputs || {}), ...extract.capabilityInputs }
+        } : source
+      });
     } else {
       throw new Error(`Unsupported source adapter: ${source.adapter}`);
     }
@@ -557,7 +652,8 @@ export const createSourceAdapters = ({
   enableOvertureResidential = environment.ADDRESS_SYNC_OVERTURE_BUILDINGS !== 'false',
   credentialPool = null,
   credentialBrokerClient = null,
-  loadSeedLocations = async () => []
+  loadSeedLocations = async () => [],
+  loadGoogleCoverageTargets = async () => []
 } = {}) => {
   const apiFetchImpl = fetchImpl;
   const useCurlTransport = fetchImpl === fetch;
@@ -974,6 +1070,19 @@ export const createSourceAdapters = ({
     };
   };
 
+  const discoverGoogleResidential = async (shard, options) => {
+    requireLicensedSource(shard.source);
+    const source = await discoverGeofabrik(shard, options);
+    return {
+      ...source,
+      adapter: 'google-residential-enrichment',
+      version: googleResidentialRevision,
+      rawVersion: source.version,
+      publishedAt: null,
+      estimateMethod: 'fixed-residential-seed-cap'
+    };
+  };
+
   const discoverJapanAbr = async (shard) => {
     const abr = await fetchJson(shard.source.dataUrl);
     const postalUrl = shard.source.postalDataUrl;
@@ -1252,6 +1361,124 @@ export const createSourceAdapters = ({
     };
   };
 
+  const discoverThailandDptResidential = async (shard) => {
+    const residentialWhere = `(${['BL_CLASS17 = 1', 'BL_CLASS18 = 1', 'BL_CLASS20 = 1', 'BL_CLASS22 = 1', 'BL_CLASS54 = 1']
+      .join(' OR ')}) AND ${['BL_ID', 'BL_HOUSENUM', 'BL_ROAD', 'BL_TAMBOL', 'BL_AMPHOE', 'BL_CHANGWAT', 'BL_POSTCODE']
+      .map((field) => `${field} IS NOT NULL AND ${field} <> ''`).join(' AND ')}`;
+    const idQuery = new URLSearchParams({ where: residentialWhere, returnIdsOnly: 'true', f: 'json' });
+    const updateQuery = new URLSearchParams({
+      where: residentialWhere,
+      outStatistics: JSON.stringify([{
+        statisticType: 'max', onStatisticField: 'BL_UPDATED_DATE', outStatisticFieldName: 'latest_update'
+      }]),
+      returnGeometry: 'false', f: 'json'
+    });
+    const [layer, result, updateResult] = await Promise.all([
+      fetchJson(`${shard.source.dataUrl}?f=json`),
+      fetchJson(`${shard.source.dataUrl}/query?${idQuery}`),
+      fetchJson(`${shard.source.dataUrl}/query?${updateQuery}`).catch(() => null)
+    ]);
+    if (result.error) {
+      throw new Error(`Thailand DPT object ID query failed (${result.error.code || 'unknown'}): ${result.error.message || 'unknown error'}`);
+    }
+    const objectIds = Array.isArray(result.objectIds)
+      ? result.objectIds.map(Number).filter((value) => Number.isSafeInteger(value) && value >= 0)
+      : [];
+    if (!objectIds.length) throw new Error('Thailand DPT residential query returned no object IDs');
+    const maximumObjectId = Math.max(...objectIds);
+    const objectIdDigest = createHash('sha256').update(objectIds.sort((left, right) => left - right).join(','))
+      .digest('hex').slice(0, 16);
+    const lastEditDate = Number(layer.editingInfo?.lastEditDate);
+    const latestFeatureUpdate = Number(updateResult?.features?.[0]?.attributes?.latest_update);
+    const revisionTime = [lastEditDate, latestFeatureUpdate]
+      .filter((value) => Number.isFinite(value) && value > 0).sort((left, right) => right - left)[0];
+    const publishedAt = revisionTime ? new Date(revisionTime).toISOString() : null;
+    return {
+      adapter: 'thailand-dpt-residential',
+      version: `${publishedAt?.slice(0, 10) || 'undated'}-oid-${maximumObjectId}-count-${objectIds.length}-${objectIdDigest}-${thailandDptResidentialExportRevision}`,
+      publishedAt,
+      dataUrl: shard.source.dataUrl,
+      residentialCount: objectIds.length,
+      maximumObjectId,
+      objectIdDigest,
+      residentialBuildingAvailable: true,
+      estimateMethod: 'arcgis-strict-address-object-ids-and-latest-update'
+    };
+  };
+
+  const discoverCanadaNarResidential = async (shard) => {
+    const response = await fetchHead(shard.source.dataUrl);
+    if (!response.ok) throw new Error(`Statistics Canada NAR metadata request failed (${response.status})`);
+    const bytes = headerNumber(response.headers, 'content-length');
+    const modified = response.headers.get('last-modified');
+    const etag = response.headers.get('etag') || '';
+    const publishedAt = modified ? new Date(modified) : null;
+    const release = shard.source.release || '202606';
+    const version = `${release}-${bytes || 'unknown'}-${etag.replace(/[^a-zA-Z0-9-]/gu, '')}-${canadaNarExportRevision}`;
+    return {
+      adapter: 'canada-nar-residential', version,
+      publishedAt: publishedAt && Number.isFinite(publishedAt.getTime()) ? publishedAt.toISOString() : null,
+      dataUrl: shard.source.dataUrl, sourceBytes: bytes,
+      residentialBuildingAvailable: true, estimateMethod: 'official-release-http-metadata'
+    };
+  };
+
+  const discoverFranceBdnbResidential = async (shard) => {
+    const response = await fetchHead(shard.source.dataUrl);
+    if (!response.ok) throw new Error(`CSTB BDNB metadata request failed (${response.status})`);
+    const bytes = headerNumber(response.headers, 'content-length');
+    const modified = response.headers.get('last-modified');
+    const publishedAt = modified ? new Date(modified) : null;
+    const etag = (response.headers.get('etag') || '').replace(/[^a-zA-Z0-9-]/gu, '');
+    const advertisedChecksum = response.headers.get('x-amz-meta-sha256') || '';
+    const metadataIdentity = createHash('sha256').update(`${bytes}\u001f${etag}\u001f${advertisedChecksum}`)
+      .digest('hex').slice(0, 16);
+    return {
+      adapter: 'france-bdnb-residential',
+      version: `${shard.source.sourceVersion || 'undated'}-${metadataIdentity}-${franceBdnbExportRevision}`,
+      publishedAt: publishedAt && Number.isFinite(publishedAt.getTime()) ? publishedAt.toISOString() : null,
+      dataUrl: shard.source.dataUrl,
+      sourceBytes: bytes,
+      advertisedChecksum,
+      residentialBuildingAvailable: true,
+      estimateMethod: 'official-department-archive-http-metadata'
+    };
+  };
+
+  const discoverSpainCatastroResidential = async (shard) => {
+    const inspect = async (url) => {
+      const response = await fetchHead(url);
+      if (!response.ok) throw new Error(`Spanish Catastro metadata request failed (${response.status}): ${url}`);
+      return {
+        bytes: headerNumber(response.headers, 'content-length'),
+        modified: response.headers.get('last-modified'),
+        etag: response.headers.get('etag') || ''
+      };
+    };
+    const [addresses, buildings] = await Promise.all([
+      inspect(shard.source.addressesUrl), inspect(shard.source.buildingsUrl)
+    ]);
+    const dates = [addresses.modified, buildings.modified]
+      .map((value) => value ? new Date(value) : null)
+      .filter((value) => value && Number.isFinite(value.getTime()))
+      .sort((left, right) => right.getTime() - left.getTime());
+    const metadataIdentity = createHash('sha256').update([
+      addresses.bytes, addresses.etag, buildings.bytes, buildings.etag
+    ].join('\u001f')).digest('hex').slice(0, 16);
+    return {
+      adapter: 'spain-catastro-residential',
+      version: `${shard.source.sourceVersion || 'undated'}-${metadataIdentity}-${spainCatastroExportRevision}`,
+      publishedAt: dates[0]?.toISOString() || null,
+      dataUrl: shard.source.addressesUrl,
+      addressesUrl: shard.source.addressesUrl,
+      buildingsUrl: shard.source.buildingsUrl,
+      addressBytes: addresses.bytes,
+      buildingBytes: buildings.bytes,
+      residentialBuildingAvailable: true,
+      estimateMethod: 'official-municipality-atom-archive-metadata'
+    };
+  };
+
   const discoverTaiwanResidential = async (shard) => {
     const inspect = async (url) => {
       let response = await fetchHead(url);
@@ -1431,6 +1658,7 @@ export const createSourceAdapters = ({
     }
     if (shard.source.adapter === 'overture') return discoverOverture(shard, options);
     if (shard.source.adapter === 'geofabrik') return discoverGeofabrik(shard, options);
+    if (shard.source.adapter === 'google-residential-enrichment') return discoverGoogleResidential(shard, options);
     if (shard.source.adapter === 'japan-abr') return discoverJapanAbr(shard, options);
     if (shard.source.adapter === 'singapore-hdb') return discoverSingaporeHdb(shard, options);
     if (shard.source.adapter === 'korea-kapt') return discoverKoreaKapt(shard, options);
@@ -1438,6 +1666,10 @@ export const createSourceAdapters = ({
     if (shard.source.adapter === 'inegi-residential') return discoverInegiResidential(shard, options);
     if (shard.source.adapter === 'ethekwini-residential') return discoverEthekwiniResidential(shard, options);
     if (shard.source.adapter === 'cape-town-residential') return discoverCapeTownResidential(shard, options);
+    if (shard.source.adapter === 'thailand-dpt-residential') return discoverThailandDptResidential(shard, options);
+    if (shard.source.adapter === 'canada-nar-residential') return discoverCanadaNarResidential(shard, options);
+    if (shard.source.adapter === 'france-bdnb-residential') return discoverFranceBdnbResidential(shard, options);
+    if (shard.source.adapter === 'spain-catastro-residential') return discoverSpainCatastroResidential(shard, options);
     if (shard.source.adapter === 'taiwan-residential') return discoverTaiwanResidential(shard, options);
     if (shard.source.adapter === 'hong-kong-residential') return discoverHongKongResidential(shard, options);
     if (shard.source.adapter === 'mappls-residential') return discoverMapplsResidential(shard, options);
@@ -1640,6 +1872,248 @@ export const createSourceAdapters = ({
     }
     const size = (await stat(output)).size;
     return { file: output, format: 'geofabrik-geojsonseq', cacheBytes: size, checksum: await sha256File(output), sourceChecksum, cacheHit: false };
+  };
+
+  const materializeGoogleResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const rawVersion = String(discovery.rawVersion || discovery.version);
+    const policyIdentity = normalizedCachePolicyIdentity(options.maxRecords, options.perLocality);
+    const normalizedRoot = resolve(options.cacheDir, 'normalized');
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const publishedOutput = resolve(normalizedRoot, `${shard.id}-${version}-${policyIdentity}.jsonl`);
+    const completeMarker = `${publishedOutput}.complete`;
+    try {
+      await stat(completeMarker);
+      const size = (await stat(publishedOutput)).size;
+      return { file: publishedOutput, format: 'overture-jsonl', cacheBytes: size,
+        checksum: await sha256File(publishedOutput), cacheHit: true };
+    } catch {}
+    await Promise.all([mkdir(normalizedRoot, { recursive: true }), mkdir(rawRoot, { recursive: true })]);
+    const rawIdentity = createHash('sha256')
+      .update(`${discovery.dataUrl}\u001f${rawVersion}`).digest('hex').slice(0, 16);
+    const stateIdentity = createHash('sha256')
+      .update(`${version}\u001f${rawVersion}\u001f${policyIdentity}`).digest('hex').slice(0, 20);
+    const statePrefix = `${shard.id}-state-`;
+    const stateDirectory = resolve(rawRoot, `${statePrefix}${stateIdentity}`);
+    const seeds = resolve(stateDirectory, 'seeds.jsonl');
+    const coverageTargets = resolve(stateDirectory, 'coverage-targets.json');
+    const progressFile = resolve(stateDirectory, 'progress.json');
+    const output = resolve(stateDirectory, 'candidates.jsonl');
+    const raw = resolve(rawRoot, `${rawIdentity}-${basename(new URL(discovery.dataUrl).pathname)}`);
+    const boundary = `${raw}.${shard.id}.boundary.geojson`;
+    const excludeBoundaries = (discovery.excludeBoundaryUrls || []).map((_, index) => `${raw}.${shard.id}.exclude-${index}.geojson`);
+    for (const entry of await readdir(rawRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(statePrefix) && entry.name !== basename(stateDirectory)) {
+        await rm(resolve(rawRoot, entry.name), { recursive: true, force: true });
+      }
+    }
+    await verifiedGeofabrikDownload(discovery.dataUrl, raw, {
+      expectedBytes: discovery.sourceBytes, maxBytes: options.maxBytes
+    });
+    const sourceChecksum = await sha256File(raw);
+    await mkdir(stateDirectory, { recursive: true });
+    let progress = {
+      schemaVersion: 2, version, rawVersion, sourceChecksum,
+      nextIndex: 0, accepted: 0, requested: 0, rejected: 0, rejectionReasons: {}
+    };
+    try {
+      const saved = JSON.parse(await readFile(progressFile, 'utf8'));
+      const compatible = saved.schemaVersion === 2 && saved.version === version
+        && saved.rawVersion === rawVersion && saved.sourceChecksum === sourceChecksum
+        && Number.isSafeInteger(saved.nextIndex) && Number.isSafeInteger(saved.accepted);
+      if (compatible) progress = {
+        ...progress,
+        nextIndex: saved.nextIndex,
+        accepted: saved.accepted,
+        requested: Number.isSafeInteger(saved.requested) ? saved.requested : saved.nextIndex,
+        rejected: Number.isSafeInteger(saved.rejected) ? saved.rejected : Math.max(0, saved.nextIndex - saved.accepted),
+        rejectionReasons: saved.rejectionReasons && typeof saved.rejectionReasons === 'object'
+          ? saved.rejectionReasons : {}
+      };
+      else {
+        await rm(stateDirectory, { recursive: true, force: true });
+        await mkdir(stateDirectory, { recursive: true });
+      }
+    } catch {}
+    if (discovery.boundaryUrl) {
+      await download(discovery.boundaryUrl, boundary, {
+        expectedBytes: null, maxBytes: Math.min(options.maxBytes, 100 * 1024 * 1024)
+      });
+    }
+    for (let index = 0; index < (discovery.excludeBoundaryUrls || []).length; index += 1) {
+      await download(discovery.excludeBoundaryUrls[index], excludeBoundaries[index], {
+        expectedBytes: null, maxBytes: Math.min(options.maxBytes, 100 * 1024 * 1024)
+      });
+    }
+    try {
+      await stat(seeds);
+    } catch {
+      const temporarySeeds = `${seeds}.${process.pid}.tmp`;
+      try {
+        let targets = [];
+        try {
+          targets = await loadGoogleCoverageTargets(shard.countryCode);
+        } catch (error) {
+          console.error(`[address-sync] ${shard.countryCode} Google coverage targets unavailable`, error);
+        }
+        if (targets.length) await writeFile(coverageTargets, `${JSON.stringify(targets)}\n`, 'utf8');
+        await runExecute({
+          file: pythonBin,
+          args: [googleResidentialSeedExporter, '--input', raw, '--output', temporarySeeds,
+            '--max-records', String(Math.min(Number(shard.maxRecords || options.maxRecords), options.maxRecords)),
+            ...(targets.length ? ['--coverage-targets', coverageTargets] : []),
+            ...(discovery.boundaryUrl ? ['--boundary', boundary] : []),
+            ...excludeBoundaries.flatMap((file) => ['--exclude-boundary', file])],
+          phase: `materialize:${shard.id}:seeds`
+        });
+        await rename(temporarySeeds, seeds);
+      } finally {
+        await rm(temporarySeeds, { force: true });
+      }
+    }
+    if (!progress.nextIndex) {
+      await writeFile(output, '', 'utf8');
+      progress.accepted = 0;
+      progress.requested = 0;
+      progress.rejected = 0;
+      progress.rejectionReasons = {};
+    } else if (!await reconcileGoogleProgressOutput(output, progress)) {
+        progress = { ...progress, nextIndex: 0, accepted: 0, requested: 0, rejected: 0, rejectionReasons: {} };
+        await writeFile(output, '', 'utf8');
+    }
+    const saveProgress = async () => {
+      const temporary = `${progressFile}.${process.pid}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(progress)}\n`, 'utf8');
+      await rename(temporary, progressFile);
+    };
+    const maximumRequests = Math.max(1, Number(shard.source.maxRequestsPerRun || 1_000));
+    const pilotRequests = Math.min(maximumRequests, Math.max(1, Number(shard.source.pilotRequests || 50)));
+    const minimumPilotAccepted = Math.min(pilotRequests,
+      Math.max(1, Number(shard.source.minimumPilotAccepted || 5)));
+    let requests = 0;
+    let currentIndex = 0;
+    let unavailable = null;
+    let requestBudgetReached = false;
+    let pilotFailed = false;
+    const lines = createInterface({ input: createReadStream(seeds), crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        options.signal?.throwIfAborted();
+        if (!line.trim()) continue;
+        if (currentIndex < progress.nextIndex) {
+          currentIndex += 1;
+          continue;
+        }
+        if (requests >= maximumRequests) {
+          requestBudgetReached = true;
+          break;
+        }
+        currentIndex += 1;
+        const seed = JSON.parse(line);
+        let payload;
+        try {
+          payload = await requestGoogleReverse({
+            latitude: seed.latitude,
+            longitude: seed.longitude,
+            language: googleResidentialLanguages[shard.countryCode] || 'en',
+            regionCode: shard.countryCode,
+            credentialPool,
+            brokerClient: credentialBrokerClient,
+            fetchImpl: apiFetchImpl,
+            signal: options.signal || signal
+          });
+        } catch (error) {
+          if (['SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED',
+            'BROKER_TEST_POLICY_BLOCKED', 'BROKER_UNAVAILABLE'].includes(error?.code)) {
+            unavailable = error;
+            break;
+          }
+          throw error;
+        }
+        requests += 1;
+        progress.requested += 1;
+        const evaluation = evaluateGoogleResidentialResult(payload, seed, shard.countryCode);
+        const record = evaluation.record;
+        if (record) {
+          await appendFile(output, `${JSON.stringify(record)}\n`, 'utf8');
+          progress.accepted += 1;
+        } else {
+          progress.rejected += 1;
+          const reason = evaluation.reason || 'unknown';
+          progress.rejectionReasons[reason] = Number(progress.rejectionReasons[reason] || 0) + 1;
+        }
+        progress.nextIndex = currentIndex;
+        if (requests % 25 === 0) await saveProgress();
+        if (progress.nextIndex >= pilotRequests && progress.accepted < minimumPilotAccepted) {
+          pilotFailed = true;
+          break;
+        }
+      }
+    } finally {
+      lines.close();
+    }
+    await saveProgress();
+    const totalSeeds = currentIndex;
+    const sourceComplete = !unavailable && !requestBudgetReached;
+    const size = (await stat(output)).size;
+    const metrics = {
+      processedCount: progress.nextIndex,
+      acceptedCount: progress.accepted,
+      rejectedCount: progress.rejected,
+      requestCount: progress.requested,
+      runRequestCount: requests,
+      geocodeRejectionReasons: progress.rejectionReasons,
+      progressEvaluationReady: progress.requested >= pilotRequests,
+      progressEvaluationMinimum: pilotRequests,
+      seedCount: sourceComplete ? totalSeeds : null
+    };
+    if (pilotFailed) {
+      await Promise.all([
+        rm(stateDirectory, { recursive: true, force: true }), rm(publishedOutput, { force: true }),
+        rm(completeMarker, { force: true }), rm(boundary, { force: true }),
+        ...excludeBoundaries.map((file) => rm(file, { force: true })),
+        ...(!options.retainRaw ? [rm(raw, { force: true })] : [])
+      ]);
+      throw Object.assign(new Error(
+        `Google residential pilot accepted ${progress.accepted}/${progress.nextIndex}; minimum ${minimumPilotAccepted}/${pilotRequests}`
+      ), {
+        code: 'SOURCE_QUALITY_FAILED',
+        failureSignature: `${shard.id}:${version}:pilot:${pilotRequests}:${minimumPilotAccepted}`,
+        metrics: { ...metrics, pilotRequests, minimumPilotAccepted, pilotFailed: true }
+      });
+    }
+    if (!sourceComplete) {
+      return {
+        file: progress.accepted ? output : null,
+        format: progress.accepted ? 'overture-jsonl' : 'checkpoint',
+        cacheBytes: size,
+        checksum: progress.accepted ? await sha256File(output) : null,
+        sourceChecksum,
+        cacheHit: false,
+        sourceComplete: false,
+        checkpointToken: `${version}:${stateIdentity}:${progress.nextIndex}`,
+        checkpointStage: unavailable ? 'credential' : 'materialize',
+        nextAttemptAt: unavailable?.retryAt || new Date(Date.now() + 60_000).toISOString(),
+        metrics
+      };
+    }
+    await rm(publishedOutput, { force: true });
+    await rename(output, publishedOutput);
+    await writeFile(completeMarker, `${JSON.stringify({ version, rawVersion, sourceChecksum,
+      completedAt: new Date().toISOString(), ...metrics })}\n`, 'utf8');
+    await rm(stateDirectory, { recursive: true, force: true });
+    await Promise.all([rm(boundary, { force: true }), ...excludeBoundaries.map((file) => rm(file, { force: true }))]);
+    if (!options.retainRaw) await rm(raw, { force: true });
+    return {
+      file: publishedOutput,
+      format: 'overture-jsonl',
+      cacheBytes: size,
+      checksum: await sha256File(publishedOutput),
+      sourceChecksum,
+      cacheHit: false,
+      sourceComplete: true,
+      metrics
+    };
   };
 
   const materializeJapanAbr = async (shard, discovery, options) => {
@@ -1847,6 +2321,7 @@ export const createSourceAdapters = ({
       sha256File(propertyFile), sha256File(buildingFile)
     ]);
     let completed = false;
+    let exporterMetrics = null;
     const bridge = createOneMapCredentialBridge({ brokerClient: credentialBrokerClient, signal });
     try {
       const bridgeUrl = await bridge.start();
@@ -1866,7 +2341,8 @@ export const createSourceAdapters = ({
           '--state-output', stateFile,
           '--output', temporary,
           '--max-records', String(options.maxRecords),
-          '--per-locality', String(options.perLocality)],
+          '--per-locality', String(options.perLocality),
+          '--max-onemap-requests', String(Math.max(1, Math.floor(Number(shard.source.maxRequestsPerRun) || 500)))],
         env: childEnvironment,
         phase: `materialize:${shard.id}`
       });
@@ -1880,17 +2356,31 @@ export const createSourceAdapters = ({
       if (state?.version !== 1 || typeof state.source_complete !== 'boolean') {
         throw Object.assign(new Error('Singapore HDB exporter state is invalid'), { code: 'SOURCE_STATE_INVALID' });
       }
+      exporterMetrics = {
+        candidateCount: Number(state.candidate_count || 0),
+        resolvedCount: Number(state.resolved_count || 0),
+        publishableCount: Number(state.publishable_count || 0),
+        selectedCount: Number(state.selected_count || 0),
+        onemapRequestCount: Number(state.onemap_request_count || 0)
+      };
       if (!state.source_complete) {
+        const size = (await stat(temporary)).size;
+        const checksum = size > 0 ? await sha256File(temporary) : null;
+        const partialOutput = checksum
+          ? resolve(options.cacheDir, 'normalized', `${shard.id}-${version}-partial-${checksum.slice(0, 24)}.jsonl`)
+          : null;
+        if (partialOutput) await publishContentAddressed(temporary, partialOutput, checksum);
         return {
-          file: null,
-          format: 'checkpoint',
-          cacheBytes: 0,
-          checksum: null,
+          file: partialOutput,
+          format: partialOutput ? 'overture-jsonl' : 'checkpoint',
+          cacheBytes: size,
+          checksum,
           cacheHit: false,
           sourceComplete: false,
           checkpointToken: state.checkpoint_token || null,
           checkpointStage: state.temporary_failure || 'onemap',
-          nextAttemptAt: state.next_available_at || null
+          nextAttemptAt: state.next_available_at || null,
+          metrics: exporterMetrics
         };
       }
       await rename(temporary, output);
@@ -1911,7 +2401,9 @@ export const createSourceAdapters = ({
       cacheBytes: size,
       checksum: await sha256File(output),
       sourceChecksum,
-      cacheHit: false
+      cacheHit: false,
+      sourceComplete: true,
+      metrics: exporterMetrics
     };
   };
 
@@ -1948,7 +2440,13 @@ export const createSourceAdapters = ({
         if (size !== manifest.output_bytes || await sha256File(output) !== manifest.output_checksum) continue;
         return {
           file: output, format: 'overture-jsonl', cacheBytes: size, checksum: manifest.output_checksum,
-          sourceChecksum: discovery.sourceChecksum, cacheHit: true, sourceComplete: true, checkpointToken: null
+          sourceChecksum: discovery.sourceChecksum, cacheHit: true, sourceComplete: true, checkpointToken: null,
+          metrics: {
+            candidateCount: Number(manifest.candidate_count || 0),
+            resolvedCount: Number(manifest.resolved_count || 0),
+            publishableCount: Number(manifest.publishable_count || 0),
+            selectedCount: Number(manifest.selected_count || 0)
+          }
         };
       } catch {}
     }
@@ -1996,18 +2494,30 @@ export const createSourceAdapters = ({
         });
       }
       const outputBytes = (await stat(temporary)).size;
+      const metrics = {
+        candidateCount: Number(state.candidate_count),
+        resolvedCount: Number(state.resolved_count),
+        publishableCount: Number(state.publishable_count),
+        selectedCount: Number(state.selected_count)
+      };
       if (!state.source_complete) {
+        const outputChecksum = outputBytes > 0 ? await sha256File(temporary) : null;
+        const partialOutput = outputChecksum
+          ? resolve(normalizedRoot, `${identity}-partial-${outputChecksum.slice(0, 24)}.jsonl`)
+          : null;
+        if (partialOutput) await publishContentAddressed(temporary, partialOutput, outputChecksum);
         return {
-          file: null,
-          format: 'checkpoint',
-          cacheBytes: 0,
-          checksum: null,
+          file: partialOutput,
+          format: partialOutput ? 'overture-jsonl' : 'checkpoint',
+          cacheBytes: outputBytes,
+          checksum: outputChecksum,
           sourceChecksum: discovery.sourceChecksum,
           cacheHit: false,
           sourceComplete: false,
           checkpointToken: state.checkpoint_token || null,
           checkpointStage: bridge.unavailable() ? 'credential' : 'materialize',
-          nextAttemptAt: bridge.nextAvailableAt?.() || null
+          nextAttemptAt: bridge.nextAvailableAt?.() || null,
+          metrics
         };
       }
       const outputChecksum = await sha256File(temporary);
@@ -2039,7 +2549,8 @@ export const createSourceAdapters = ({
         sourceChecksum: discovery.sourceChecksum,
         cacheHit: false,
         sourceComplete: true,
-        checkpointToken: null
+        checkpointToken: null,
+        metrics
       };
     } finally {
       await bridge.close();
@@ -2268,6 +2779,286 @@ export const createSourceAdapters = ({
       sourceChecksum: createHash('sha256').update(`${postalChecksum}\u001f${discovery.version}`).digest('hex'),
       cacheHit: false
     };
+  };
+
+  const materializeThailandDptResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const policyIdentity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
+    const output = resolve(options.cacheDir, 'normalized', `${shard.id}-${version}-${policyIdentity}.jsonl`);
+    const minimum = Number(shard.qualityGate?.minimumRecords || 1);
+    try {
+      const size = (await stat(output)).size;
+      if (await hasMinimumLines(output, minimum)) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const statePrefix = `${shard.id}-state-`;
+    const stateIdentity = createHash('sha256').update(`${version}\u001f${policyIdentity}`).digest('hex').slice(0, 20);
+    const stateDirectory = resolve(rawRoot, `${statePrefix}${stateIdentity}`);
+    const checkpoint = resolve(stateDirectory, 'checkpoint.json');
+    const candidates = `${checkpoint}.candidates.jsonl`;
+    const temporary = `${output}.${process.pid}.tmp`;
+    await Promise.all([
+      mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true }),
+      mkdir(stateDirectory, { recursive: true })
+    ]);
+    for (const entry of await readdir(rawRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(statePrefix) && entry.name !== basename(stateDirectory)) {
+        await rm(resolve(rawRoot, entry.name), { recursive: true, force: true });
+      }
+    }
+    const progressToken = async () => {
+      const [checkpointValue, candidateBytes] = await Promise.all([
+        readFile(checkpoint, 'utf8').catch(() => ''),
+        stat(candidates).then((value) => value.size).catch(() => 0)
+      ]);
+      if (!checkpointValue && !candidateBytes) return null;
+      return createHash('sha256').update(`${checkpointValue}\u001f${candidateBytes}`).digest('hex');
+    };
+    const initialProgressToken = await progressToken();
+    try {
+      try {
+        await runExecute({
+          file: pythonBin,
+          args: [thailandDptResidentialExporter,
+            '--layer-url', discovery.dataUrl,
+            '--output', temporary,
+            '--max-records', String(sourceMaximum),
+            '--per-locality', String(options.perLocality),
+            '--batch-size', String(shard.source.batchSize || 500),
+            '--checkpoint', checkpoint],
+          phase: `materialize:${shard.id}`
+        });
+      } catch (error) {
+        const token = await progressToken();
+        if (token && token !== initialProgressToken) {
+          throw Object.assign(new Error(`Thailand DPT checkpoint saved after ${error.message}`, { cause: error }), {
+            code: 'SOURCE_PARTIAL', sourceComplete: false, checkpointToken: token,
+            checkpointStage: 'materialize', failurePhase: `materialize:${shard.id}`, stderr: error.stderr || null
+          });
+        }
+        throw error;
+      }
+      if (!await hasMinimumLines(temporary, minimum)) {
+        throw Object.assign(new Error(`Thailand DPT source produced fewer than ${minimum} publishable records`), {
+          code: 'SOURCE_QUALITY_FAILED'
+        });
+      }
+      await rename(temporary, output);
+      await rm(stateDirectory, { recursive: true, force: true });
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    const size = (await stat(output)).size;
+    return {
+      file: output,
+      format: 'overture-jsonl',
+      cacheBytes: size,
+      checksum: await sha256File(output),
+      sourceChecksum: createHash('sha256').update(discovery.version).digest('hex'),
+      cacheHit: false
+    };
+  };
+
+  const materializeCanadaNarResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const policyIdentity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
+    const output = resolve(options.cacheDir, 'normalized', `${shard.id}-${version}-${policyIdentity}.jsonl`);
+    try {
+      const size = (await stat(output)).size;
+      const minimum = Number(shard.qualityGate?.minimumRecords || 1);
+      if (await hasMinimumLines(output, minimum)) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const statePrefix = `${shard.id}-state-`;
+    const stateDirectory = resolve(rawRoot, `${statePrefix}${createHash('sha256').update(`${version}\u001f${policyIdentity}`).digest('hex').slice(0, 20)}`);
+    const checkpoint = resolve(stateDirectory, 'checkpoint.json');
+    const temporary = `${output}.${process.pid}.tmp`;
+    await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
+    await mkdir(rawRoot, { recursive: true });
+    for (const entry of await readdir(rawRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(statePrefix) && entry.name !== basename(stateDirectory)) {
+        await rm(resolve(rawRoot, entry.name), { recursive: true, force: true });
+      }
+    }
+    try {
+      await runExecute({
+        file: pythonBin,
+        args: [canadaNarExporter, '--archive-url', discovery.dataUrl,
+          '--expected-size', String(discovery.sourceBytes || 0), '--output', temporary,
+          '--checkpoint', checkpoint, '--max-records', String(sourceMaximum),
+          '--per-locality', String(options.perLocality)],
+        phase: `materialize:${shard.id}`
+      });
+      const minimum = Number(shard.qualityGate?.minimumRecords || 1);
+      if (!await hasMinimumLines(temporary, minimum)) {
+        throw Object.assign(new Error(`Statistics Canada NAR source produced fewer than ${minimum} publishable records`), {
+          code: 'SOURCE_QUALITY_FAILED'
+        });
+      }
+      await rename(temporary, output);
+      await rm(stateDirectory, { recursive: true, force: true });
+    } catch (error) {
+      const checkpointValue = await readFile(checkpoint, 'utf8').catch(() => '');
+      if (checkpointValue) {
+        const token = createHash('sha256').update(checkpointValue).digest('hex');
+        throw Object.assign(new Error(`Statistics Canada NAR checkpoint saved after ${error.message}`, { cause: error }), {
+          code: 'SOURCE_PARTIAL', sourceComplete: false, checkpointToken: token,
+          checkpointStage: 'province', failurePhase: `materialize:${shard.id}`, stderr: error.stderr || null
+        });
+      }
+      throw error;
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    const size = (await stat(output)).size;
+    return { file: output, format: 'overture-jsonl', cacheBytes: size,
+      checksum: await sha256File(output), sourceChecksum: createHash('sha256').update(discovery.version).digest('hex'),
+      cacheHit: false, sourceComplete: true, checkpointToken: null };
+  };
+
+  const materializeFranceBdnbResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const output = resolve(options.cacheDir, 'normalized',
+      `${shard.id}-${version}-${normalizedCachePolicyIdentity(sourceMaximum, options.perLocality)}.jsonl`);
+    const minimum = Number(shard.qualityGate?.minimumRecords || 1);
+    try {
+      const size = (await stat(output)).size;
+      if (await hasMinimumLines(output, minimum)) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const archiveFile = resolve(rawRoot, basename(shard.source.archiveCacheName));
+    const temporary = `${output}.${process.pid}.tmp`;
+    await Promise.all([
+      mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true }),
+      mkdir(rawRoot, { recursive: true })
+    ]);
+    let completed = false;
+    try {
+      await sharedDownload(discovery.dataUrl, archiveFile, {
+        expectedBytes: discovery.sourceBytes, maxBytes: options.maxBytes, retainPartial: true
+      });
+      const sourceChecksum = await sha256File(archiveFile);
+      const configuredChecksum = String(shard.source.sha256 || '').toLowerCase();
+      const advertisedChecksum = String(discovery.advertisedChecksum || '').toLowerCase();
+      if (configuredChecksum && sourceChecksum !== configuredChecksum) {
+        throw new Error('CSTB BDNB source checksum mismatch');
+      }
+      if (/^[a-f\d]{64}$/u.test(advertisedChecksum) && sourceChecksum !== advertisedChecksum) {
+        throw new Error('CSTB BDNB advertised checksum mismatch');
+      }
+      await runExecute({
+        file: pythonBin,
+        args: [franceBdnbExporter,
+          '--input', archiveFile,
+          '--output', temporary,
+          '--max-records', String(sourceMaximum),
+          '--per-locality', String(options.perLocality),
+          '--minimum-fiability', String(shard.source.minimumFiability || 17)],
+        phase: `materialize:${shard.id}`
+      });
+      if (!await hasMinimumLines(temporary, minimum)) {
+        throw Object.assign(new Error(`CSTB BDNB source produced fewer than ${minimum} publishable records`), {
+          code: 'SOURCE_QUALITY_FAILED'
+        });
+      }
+      await rename(temporary, output);
+      completed = true;
+      const size = (await stat(output)).size;
+      return {
+        file: output,
+        format: 'overture-jsonl',
+        cacheBytes: size,
+        checksum: await sha256File(output),
+        sourceChecksum,
+        cacheHit: false
+      };
+    } finally {
+      await rm(temporary, { force: true });
+      if (!options.retainRaw && completed) await rm(archiveFile, { force: true });
+    }
+  };
+
+  const materializeSpainCatastroResidential = async (shard, discovery, options) => {
+    const version = safeVersion(discovery.version);
+    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
+    const output = resolve(options.cacheDir, 'normalized',
+      `${shard.id}-${version}-${normalizedCachePolicyIdentity(sourceMaximum, options.perLocality)}.jsonl`);
+    const minimum = Number(shard.qualityGate?.minimumRecords || 1);
+    try {
+      const size = (await stat(output)).size;
+      if (await hasMinimumLines(output, minimum)) {
+        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
+      }
+      await rm(output, { force: true });
+    } catch {}
+    const rawRoot = resolve(options.cacheDir, 'raw');
+    const addressFile = resolve(rawRoot, `${shard.id}-${version}-addresses.zip`);
+    const buildingFile = resolve(rawRoot, `${shard.id}-${version}-buildings.zip`);
+    const temporary = `${output}.${process.pid}.tmp`;
+    await Promise.all([
+      mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true }),
+      mkdir(rawRoot, { recursive: true })
+    ]);
+    let completed = false;
+    try {
+      const addressBytes = await sharedDownload(discovery.addressesUrl, addressFile, {
+        expectedBytes: discovery.addressBytes, maxBytes: options.maxBytes, retainPartial: true
+      });
+      await sharedDownload(discovery.buildingsUrl, buildingFile, {
+        expectedBytes: discovery.buildingBytes,
+        maxBytes: Math.max(1, options.maxBytes - addressBytes),
+        retainPartial: true
+      });
+      const [addressChecksum, buildingChecksum] = await Promise.all([
+        sha256File(addressFile), sha256File(buildingFile)
+      ]);
+      await runExecute({
+        file: pythonBin,
+        args: [spainCatastroExporter,
+          '--addresses-archive', addressFile,
+          '--buildings-archive', buildingFile,
+          '--output', temporary,
+          '--max-records', String(sourceMaximum),
+          '--province', shard.source.province,
+          '--province-code', shard.source.provinceCode,
+          '--municipality', shard.source.municipalityName,
+          '--municipality-code', shard.source.code],
+        phase: `materialize:${shard.id}`
+      });
+      if (!await hasMinimumLines(temporary, minimum)) {
+        throw Object.assign(new Error(`Spanish Catastro source produced fewer than ${minimum} publishable records`), {
+          code: 'SOURCE_QUALITY_FAILED'
+        });
+      }
+      await rename(temporary, output);
+      completed = true;
+      const size = (await stat(output)).size;
+      return {
+        file: output,
+        format: 'overture-jsonl',
+        cacheBytes: size,
+        checksum: await sha256File(output),
+        sourceChecksum: createHash('sha256').update(`${addressChecksum}\u001f${buildingChecksum}`).digest('hex'),
+        cacheHit: false
+      };
+    } finally {
+      await rm(temporary, { force: true });
+      if (!options.retainRaw && completed) {
+        await Promise.all([rm(addressFile, { force: true }), rm(buildingFile, { force: true })]);
+      }
+    }
   };
 
   const materializeTaiwanResidential = async (shard, discovery, options) => {
@@ -2859,6 +3650,7 @@ export const createSourceAdapters = ({
   const materialize = (shard, discovery, options) => {
     if (discovery.adapter === 'overture') return materializeOverture(shard, discovery, options);
     if (discovery.adapter === 'geofabrik') return materializeGeofabrik(shard, discovery, options);
+    if (discovery.adapter === 'google-residential-enrichment') return materializeGoogleResidential(shard, discovery, options);
     if (discovery.adapter === 'japan-abr') return materializeJapanAbr(shard, discovery, options);
     if (discovery.adapter === 'singapore-hdb') return materializeSingaporeHdb(shard, discovery, options);
     if (discovery.adapter === 'korea-kapt') return materializeKoreaKapt(shard, discovery, options);
@@ -2866,6 +3658,10 @@ export const createSourceAdapters = ({
     if (discovery.adapter === 'inegi-residential') return materializeInegiResidential(shard, discovery, options);
     if (discovery.adapter === 'ethekwini-residential') return materializeEthekwiniResidential(shard, discovery, options);
     if (discovery.adapter === 'cape-town-residential') return materializeCapeTownResidential(shard, discovery, options);
+    if (discovery.adapter === 'thailand-dpt-residential') return materializeThailandDptResidential(shard, discovery, options);
+    if (discovery.adapter === 'canada-nar-residential') return materializeCanadaNarResidential(shard, discovery, options);
+    if (discovery.adapter === 'france-bdnb-residential') return materializeFranceBdnbResidential(shard, discovery, options);
+    if (discovery.adapter === 'spain-catastro-residential') return materializeSpainCatastroResidential(shard, discovery, options);
     if (discovery.adapter === 'taiwan-residential') return materializeTaiwanResidential(shard, discovery, options);
     if (discovery.adapter === 'hong-kong-residential') return materializeHongKongResidential(shard, discovery, options);
     if (discovery.adapter === 'mappls-residential') return materializeMapplsResidential(shard, discovery, options);

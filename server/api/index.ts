@@ -47,6 +47,7 @@ interface Bindings {
   YOUDAO_APP_KEY?: string;
   YOUDAO_APP_SECRET?: string;
   TRUST_PROXY?: string;
+  API_TOKEN_AUTHENTICATED?: boolean;
   incoming?: { socket?: { remoteAddress?: string } };
 }
 
@@ -243,8 +244,7 @@ const addressPoolV2Counts = async (db: Database | undefined): Promise<Map<string
 const hotPoolCoverage = async (
   db: Database | undefined,
   requiredCountries: string[],
-  minimumPerSlot: number,
-  checkedAt: string
+  minimumPerSlot: number
 ): Promise<HotPoolCoverage> => {
   if (!db || !requiredCountries.length) return { available: false, countries: [], lowWaterSlots: [] };
   const placeholders = requiredCountries.map(() => '?').join(',');
@@ -261,20 +261,16 @@ const hotPoolCoverage = async (
   try {
     const summary = await db.prepare(`${evaluated}
       SELECT country_code, COUNT(*) AS slot_count, SUM(active_count) AS active_count,
-        SUM(CASE WHEN active_count >= minimum_count AND refresh_status = 'ready'
-          AND (expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-            THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END) THEN 1 ELSE 0 END) AS ready_slot_count
+        SUM(CASE WHEN active_count >= minimum_count AND refresh_status = 'ready' THEN 1 ELSE 0 END) AS ready_slot_count
       FROM evaluated GROUP BY country_code ORDER BY country_code`)
-      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries, checkedAt).all<HotPoolCountryRow>();
+      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<HotPoolCountryRow>();
     const lowWater = await db.prepare(`${evaluated}
       SELECT coverage_key, country_code, admin1_key, locality_key, property_type, active_count,
         minimum_count, refresh_status, expires_at
       FROM evaluated
       WHERE active_count < minimum_count OR refresh_status <> 'ready'
-        OR (expires_at IS NOT NULL AND CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-          THEN expires_at::timestamptz <= ?::timestamptz ELSE TRUE END)
       ORDER BY (minimum_count - active_count) DESC, country_code, coverage_key LIMIT 100`)
-      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries, checkedAt).all<LowWaterSlotRow>();
+      .bind(minimumPerSlot, minimumPerSlot, ...requiredCountries).all<LowWaterSlotRow>();
     return {
       available: true,
       countries: summary.results || [],
@@ -325,10 +321,9 @@ app.get('/api/v1/countries', async (context) => {
   const hasPoolDatabase = Boolean(context.env.LOCATION_DB || context.env.ADDRESS_DB);
   const data = countries.map((country) => {
     const v2 = poolV2Counts.get(country.code);
-    const addressCount = context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
-    const residentialCount = country.code === 'CN' && chinaCommunities > 0
-      ? chinaCommunities
-      : context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
+    const synchronizedCount = context.env.ADDRESS_DB ? v2?.residential || 0 : coverage.get(country.code) || 0;
+    const addressCount = country.code === 'CN' && chinaCommunities > 0 ? chinaCommunities : synchronizedCount;
+    const residentialCount = addressCount;
     return {
       ...country,
       addressCount: hasPoolDatabase ? addressCount : null,
@@ -863,7 +858,7 @@ const translationRateLimited = (ip: string, now = Date.now()): boolean => {
 
 app.post('/api/v1/address-translation', async (context) => {
   const ip = requestContext(context.req.raw, context.env).publicIp || 'local';
-  if (translationRateLimited(ip)) {
+  if (!context.env.API_TOKEN_AUTHENTICATED && translationRateLimited(ip)) {
     context.header('Retry-After', '60');
     return context.json({ error: { code: 'RATE_LIMITED', message: 'Too many translation requests.' } }, 429);
   }
@@ -901,7 +896,7 @@ app.get('/api/v1/data-health', async (context) => {
   const [poolCounts, poolV2Counts, coverage] = await Promise.all([
     addressPoolCounts(context.env.LOCATION_DB),
     addressPoolV2Counts(context.env.ADDRESS_DB),
-    hotPoolCoverage(context.env.ADDRESS_DB, requiredCountries, minimumPerSlot, checkedAt)
+    hotPoolCoverage(context.env.ADDRESS_DB, requiredCountries, minimumPerSlot)
   ]);
   const coverageByCountry = new Map(coverage.countries.map((item) => [item.country_code, item]));
   const missingCountries = requiredCountries.filter((code) => !coverageByCountry.get(code)?.slot_count);

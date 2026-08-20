@@ -51,7 +51,7 @@ const fillLogin = async (page, password) => {
 const login = async (page, password, failedResponses = []) => {
   const button = await fillLogin(page, password);
   await button.click();
-  try { await page.locator('.dashboard-page').waitFor(); }
+  try { await page.locator('.admin-shell').waitFor(); }
   catch (error) {
     const detail = await page.locator('.admin-error').textContent().catch(() => '');
     throw new Error(`ADMIN_LOGIN_FAILED:${detail || page.url()}:${failedResponses.join(',')}`, { cause: error });
@@ -89,7 +89,7 @@ const server = spawn(process.execPath, ['--import', 'tsx', 'server/api/server.ts
 server.stderr.on('data', (value) => serverErrors.push(String(value)));
 
 const syncErrors = [];
-const syncControl = spawn(process.execPath, ['server/sync/index.mjs'], {
+const syncControl = spawn(process.execPath, ['--import', 'tsx', 'server/sync/index.mjs'], {
   cwd: root,
   env: {
     ...process.env,
@@ -135,7 +135,7 @@ try {
   await page.locator('.dashboard-page').waitFor();
   assert.equal(await page.locator('.admin-content > header.admin-topbar').count(), 1);
   assert.equal(await page.locator('.admin-content > header.admin-topbar h1').count(), 1);
-  assert.equal(await page.locator('.admin-sidebar .nav-icon').count(), 8);
+  assert.equal(await page.locator('.admin-sidebar .nav-icon').count(), 9);
   assert.equal(await page.locator('.dashboard-kpis .dashboard-kpi').count(), 4);
   assert.equal(await page.locator('.world-distribution-map').count(), 1);
   const mapCanvas = page.locator('.world-distribution-map .maplibregl-canvas').first();
@@ -236,27 +236,38 @@ try {
   assert.equal(await page.locator('input[name=frontendPasswordEnabled]').isChecked(), true);
 
   await page.getByRole('button', { name: '地图密钥', exact: true }).click();
+  const providerSection = (name) => page.locator('.provider-group').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  assert.equal(await page.locator('.provider-group').count(), 7);
+  for (const provider of ['高德地图', '百度地图', '腾讯地图', 'OneMap', 'Geoapify', 'Google Geocoding', 'Mappls']) {
+    await providerSection(provider).waitFor();
+  }
+  await providerSection('Google Geocoding').getByText('0 个密钥', { exact: true }).waitFor();
   assert.equal(await page.locator('input[name=googleChina]').isChecked(), true);
   assert.equal(await page.locator('input[name=googleInternational]').isChecked(), true);
   assert.equal(await page.locator('input[name=amapChina]').isChecked(), false);
   assert.equal(await page.locator('input[name=amapInternational]').isChecked(), false);
-  await page.getByRole('button', { name: '+ 配置密钥', exact: true }).click();
-  const browserMapDialog = page.getByRole('dialog', { name: '配置高德地图的 Web端密钥' });
+  assert.equal(await page.locator('input[name=amapChina]').isDisabled(), true);
+  await page.locator('.map-prerequisite').getByRole('button', { name: '配置凭据', exact: true }).click();
+  const browserMapDialog = page.getByRole('dialog', { name: '配置高德前端地图凭据' });
   await browserMapDialog.locator('input[name=label]').fill('e2e-browser-map');
   await browserMapDialog.locator('input[name=apiKey]').fill('e2e-public-browser-key');
   await browserMapDialog.locator('input[name=securityCode]').fill('e2e-private-security-code');
   await browserMapDialog.getByRole('button', { name: '保存', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '高德地图的 Web端密钥已保存' }).waitFor();
+  await page.locator('.admin-notice').filter({ hasText: '高德前端地图凭据已保存' }).waitFor();
   assert.equal((await page.locator('body').textContent()).includes('e2e-public-browser-key'), false);
   assert.equal((await page.locator('body').textContent()).includes('e2e-private-security-code'), false);
-  const browserKeyCell = page.locator('.credential-summary > div').filter({ hasText: 'Web端 API Key' });
+  const browserPanel = page.locator('.admin-panel').filter({ has: page.getByRole('heading', { name: '高德前端地图凭据', exact: true }) });
+  const browserRow = browserPanel.locator('.amap-browser-row');
+  await browserRow.waitFor();
+  assert.equal(await providerSection('高德地图').locator('.amap-browser-row').count(), 0);
+  const browserKeyCell = browserRow.locator('.amap-browser-secrets > div').filter({ hasText: 'JS API Key' });
   await browserKeyCell.getByRole('button', { name: '显示', exact: true }).click();
   await browserKeyCell.getByText('e2e-public-browser-key', { exact: true }).waitFor();
   await browserKeyCell.getByRole('button', { name: '复制', exact: true }).click();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'e2e-public-browser-key');
   await browserKeyCell.getByRole('button', { name: '隐藏', exact: true }).click();
   assert.equal(await browserKeyCell.getByText('e2e-public-browser-key', { exact: true }).count(), 0);
-  const browserCodeCell = page.locator('.credential-summary > div').filter({ hasText: '安全密钥' });
+  const browserCodeCell = browserRow.locator('.amap-browser-secrets > div').filter({ hasText: '安全密钥' });
   await browserCodeCell.getByRole('button', { name: '显示', exact: true }).click();
   await browserCodeCell.getByText('e2e-private-security-code', { exact: true }).waitFor();
   await browserCodeCell.getByRole('button', { name: '隐藏', exact: true }).click();
@@ -280,16 +291,17 @@ try {
     amapApiKey: 'e2e-public-browser-key', serviceHost: '/_AMapService'
   });
   assert.equal(JSON.stringify(mapConfiguration).includes('e2e-private-security-code'), false);
-  await page.getByRole('button', { name: '+ 添加密钥', exact: true }).click();
+  await providerSection('高德地图').getByRole('button', { name: '添加密钥', exact: true }).click();
   const keyDialog = page.getByRole('dialog', { name: '添加地图密钥' });
   await keyDialog.waitFor();
-  assert.equal(await keyDialog.getByRole('option', { name: '高德地图的 Web服务', exact: true }).count(), 1);
-  assert.equal(await keyDialog.getByRole('option', { name: '百度的 Web服务API', exact: true }).count(), 1);
-  assert.equal(await keyDialog.getByRole('option', { name: '腾讯地图的 Web服务', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '高德地图', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '百度地图', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '腾讯地图', exact: true }).count(), 1);
   assert.equal(await keyDialog.getByRole('option', { name: 'OneMap', exact: true }).count(), 1);
-  assert.equal(await keyDialog.getByRole('option', { name: 'Geoapify 地理编码', exact: true }).count(), 1);
-  assert.equal(await keyDialog.getByRole('option', { name: '有道智云翻译', exact: true }).count(), 0);
-  assert.equal(await keyDialog.getByRole('option', { name: '谷歌地理编码', exact: true }).count(), 0);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Geoapify', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '有道翻译', exact: true }).count(), 0);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Google Geocoding', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Mappls', exact: true }).count(), 1);
   assert.equal(await keyDialog.getByRole('option', { name: '英国 OS Data Hub', exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('QPS', { exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('每日额度', { exact: true }).count(), 0);
@@ -298,11 +310,10 @@ try {
   await keyDialog.locator('input[name=secret]').fill('fake-key-for-e2e');
   await keyDialog.getByRole('button', { name: '保存', exact: true }).click();
   await page.locator('.admin-notice').filter({ hasText: '地图密钥已保存' }).waitFor();
-  const providerRow = () => page.locator('tbody tr').filter({ hasText: 'e2e-amap' });
+  const providerRow = () => providerSection('高德地图').locator('.provider-key-row').filter({ hasText: 'e2e-amap' });
   await providerRow().waitFor();
-  await providerRow().getByText('每月', { exact: false }).waitFor();
-  await providerRow().getByText('0 / 5,000', { exact: true }).waitFor();
-  await providerRow().getByText('本地统计', { exact: false }).waitFor();
+  await providerRow().getByText('0/5,000 每月', { exact: true }).waitFor();
+  assert.equal((await providerRow().textContent()).includes('本地统计'), false);
   assert.equal((await providerRow().textContent()).includes('fake-key-for-e2e'), false);
   const providerSecretCell = providerRow().locator('.secret-cell');
   await providerSecretCell.getByRole('button', { name: '显示', exact: true }).click();
@@ -317,16 +328,33 @@ try {
   await providerRow().getByRole('button', { name: '停用', exact: true }).waitFor();
 
   const translationPanel = page.locator('.admin-panel').filter({ has: page.getByRole('heading', { name: '在线翻译', exact: true }) });
+  assert.equal(await translationPanel.getByRole('switch', { name: '启用谷歌翻译', exact: true }).count(), 1);
+  assert.equal(await translationPanel.locator('input[name=googleTranslationEnabled]').count(), 0);
   await translationPanel.getByText('未配置', { exact: true }).waitFor();
   assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 0);
-  await translationPanel.locator('input[name=youdaoAppKey]').fill('e2e-youdao-app-key');
-  await translationPanel.locator('input[name=youdaoAppSecret]').fill('e2e-youdao-app-secret');
-  await translationPanel.getByRole('button', { name: '保存', exact: true }).click();
+  const createYoudao = async (label, appKey, appSecret) => {
+    await translationPanel.getByRole('button', { name: '添加密钥', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '添加密钥', exact: true });
+    await dialog.locator('input[name=label]').fill(label);
+    await dialog.locator('input[name=youdaoAppKey]').fill(appKey);
+    await dialog.locator('input[name=youdaoAppSecret]').fill(appSecret);
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.admin-notice').filter({ hasText: '有道翻译密钥已保存' }).waitFor();
+  };
+  await createYoudao('e2e-youdao-primary', 'e2e-youdao-app-key', 'e2e-youdao-app-secret');
+  await createYoudao('e2e-youdao-backup', 'e2e-youdao-backup-key', 'e2e-youdao-backup-secret');
   await page.locator('.admin-notice').filter({ hasText: '有道翻译密钥已保存' }).waitFor();
-  await translationPanel.getByText('已配置 · e2e-****', { exact: true }).waitFor();
-  await translationPanel.getByRole('button', { name: '测试', exact: true }).waitFor();
+  await translationPanel.getByText('2 个密钥', { exact: true }).waitFor();
+  assert.equal(await translationPanel.locator('.provider-key-row').count(), 2);
+  assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 2);
   assert.equal((await page.locator('body').textContent()).includes('e2e-youdao-app-secret'), false);
-  assert.equal(await page.locator('tbody tr').filter({ hasText: '有道智云翻译' }).count(), 0);
+  const youdaoPrimary = translationPanel.locator('.provider-key-row').filter({ hasText: 'e2e-youdao-primary' });
+  const youdaoAppKey = youdaoPrimary.locator('.provider-key-secret').filter({ hasText: '应用 ID（AppKey）' });
+  const youdaoAppSecret = youdaoPrimary.locator('.provider-key-secret').filter({ hasText: '应用密钥（AppSecret）' });
+  await youdaoAppKey.getByRole('button', { name: '显示', exact: true }).click();
+  await youdaoAppKey.getByText('e2e-youdao-app-key', { exact: true }).waitFor();
+  await youdaoAppSecret.getByRole('button', { name: '显示', exact: true }).click();
+  await youdaoAppSecret.getByText('e2e-youdao-app-secret', { exact: true }).waitFor();
 
   await page.getByRole('button', { name: '接口令牌', exact: true }).click();
   await selectLocale(page, 'English');
@@ -476,11 +504,12 @@ try {
   await addressDialog.getByRole('button', { name: '关闭', exact: true }).click();
 
   await page.getByRole('button', { name: '地图密钥', exact: true }).click();
+  page.once('dialog', (dialog) => dialog.accept());
   await providerRow().getByRole('button', { name: '删除', exact: true }).click();
   await providerRow().waitFor({ state: 'detached' });
   page.once('dialog', (dialog) => dialog.accept());
-  await page.locator('.credential-summary').getByRole('button', { name: '删除', exact: true }).click();
-  await page.getByText('尚未配置高德地图的 Web端密钥', { exact: true }).waitFor();
+  await browserRow.getByRole('button', { name: '删除', exact: true }).click();
+  await page.getByText('尚未配置高德前端地图凭据', { exact: true }).waitFor();
 
   await page.getByRole('button', { name: '访问与安全', exact: true }).click();
   assert.equal(await page.locator('input[name=apiAuthEnabled]').count(), 0);

@@ -48,7 +48,7 @@ const aliasClause = (columns: string[], values: string[], bindings: unknown[]): 
 
 const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefined => {
   if (!validateAdministrativeHierarchy({
-    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code
+    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code, locality: row.locality
   }).valid) return undefined;
   const components: AddressComponents = normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, {
     houseNumber: row.house_number,
@@ -67,7 +67,7 @@ const rowToAddress = (row: AddressPoolRow, now: Date): VerifiedAddress | undefin
   const sourceUpdatedAt = row.source_updated_at || row.imported_at;
   const formatted = [row.house_number, row.street, components.postalLocality || components.locality, row.admin1_code || row.admin1, row.postcode]
     .filter(Boolean).join(', ');
-  const expiresAt = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = '9999-12-31T23:59:59.999Z';
   const propertyType = propertyTypes.has(row.property_type as PropertyType)
     ? row.property_type as PropertyType
     : 'unknown';

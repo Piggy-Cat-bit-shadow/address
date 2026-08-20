@@ -97,6 +97,8 @@ const adminCodeLabel = (definition: Definition): LocalizedText => {
   return text('Administrative abbreviation', '行政区缩写');
 };
 
+const postalAdminCodeCountries = new Set<CountryCode>(['US', 'CA', 'AU', 'BR', 'MX', 'IT']);
+
 const detailFields: Record<CountryCode, Array<'locality' | 'district' | 'admin1' | 'postcode'>> = {
   US: ['locality', 'admin1', 'postcode'],
   CA: ['locality', 'admin1', 'postcode'],
@@ -143,7 +145,7 @@ const addressSchema = (definition: Definition): CountryAddressSchema => {
   const hierarchy: AddressResultField[] = ['district', 'locality', 'admin1', 'postcode'];
   const details = hierarchy.flatMap((field): AddressResultField[] => {
     if (!configuredDetails.has(field as 'locality' | 'district' | 'admin1' | 'postcode')) return [];
-    return field === 'admin1' ? [field, 'admin1Code'] : [field];
+    return field === 'admin1' && postalAdminCodeCountries.has(definition.code) ? [field, 'admin1Code'] : [field];
   });
   const fields: AddressResultField[] = [
     ...(definition.code === 'CN' ? ['buildingName' as const] : []),
@@ -159,7 +161,7 @@ const addressSchema = (definition: Definition): CountryAddressSchema => {
           ? ['postcode']
           : ['region', 'city', 'postcode'],
     resultFields,
-    postalAdmin1Style: ['US', 'AU', 'CA', 'BR'].includes(definition.code) ? 'code' : 'name'
+    postalAdmin1Style: postalAdminCodeCountries.has(definition.code) ? 'code' : 'name'
   };
 };
 
@@ -271,7 +273,7 @@ export const countries: CountryConfig[] = [
   makeCountry({
     code: 'IT', en: 'Italy', zh: '意大利', nativeName: 'Italia', nativeLanguage: 'it', flag: '🇮🇹', callingCode: '+39',
     group: 'europe', order: 7, readiness: 'partial', residential: true, googleValidation: true, googleResidential: false,
-    format: '%N%n%O%n%A%n%Z %C %S', center: [41.902, 12.496], adminLabel: ['Region', '大区'], postcodeLabel: ['CAP', '邮编'],
+    format: '%N%n%O%n%A%n%Z %C %S', center: [41.902, 12.496], adminLabel: ['Province code', '省代码'], postcodeLabel: ['CAP', '邮编'],
     primary: [source('anncsu', 'ANNCSU', 'https://www.anncsu.gov.it/', 'address', 'version-triggered')],
     cities: [['Rome', '罗马', 'Roma'], ['Milan', '米兰', 'Milano'], ['Florence', '佛罗伦萨', 'Firenze'], ['Naples', '那不勒斯', 'Napoli'], ['Turin', '都灵', 'Torino'], ['Bologna', '博洛尼亚', 'Bologna'], ['Venice', '威尼斯', 'Venezia'], ['Palermo', '巴勒莫', 'Palermo']],
     admins: [['Lazio', '拉齐奥大区', 'Lazio'], ['Lombardy', '伦巴第大区', 'Lombardia'], ['Tuscany', '托斯卡纳大区', 'Toscana'], ['Campania', '坎帕尼亚大区', 'Campania'], ['Piedmont', '皮埃蒙特大区', 'Piemonte']]
@@ -312,7 +314,7 @@ export const countries: CountryConfig[] = [
   makeCountry({
     code: 'HK', en: 'Hong Kong', zh: '香港', nativeName: '香港', nativeLanguage: 'zh-HK', flag: '🇭🇰', callingCode: '+852',
     group: 'east-asia', order: 12, readiness: 'strict', residential: true, googleValidation: false, googleResidential: false,
-    format: '%S%n%C%n%D%n%A%n%O%n%N', latinFormat: '%N%n%O%n%D%n%A%n%C%n%S', center: [22.319, 114.169], adminLabel: ['Region', '地域'], postcodeLabel: ['Postcode (not used)', '邮编（不使用）'],
+    format: '%S%n%C%n%D%n%A%n%O%n%N', latinFormat: '%N%n%O%n%D%n%A%n%C%n%S', center: [22.319, 114.169], adminLabel: ['Area', '地域'], postcodeLabel: ['Postcode (not used)', '无通用邮编'],
     primary: [source('hk-als', 'Hong Kong Address Lookup Service', 'https://www.als.gov.hk/', 'address', 'live')],
     cities: [['Central', '中环', 'Central'], ['Wan Chai', '湾仔', 'Wan Chai'], ['Causeway Bay', '铜锣湾', 'Causeway Bay'], ['Tsim Sha Tsui', '尖沙咀', 'Tsim Sha Tsui'], ['Mong Kok', '旺角', 'Mong Kok'], ['Kowloon Tong', '九龙塘', 'Kowloon Tong'], ['Kwun Tong', '观塘', 'Kwun Tong'], ['Sha Tin', '沙田', 'Sha Tin'], ['Tsuen Wan', '荃湾', 'Tsuen Wan'], ['Tuen Mun', '屯门', 'Tuen Mun'], ['Yuen Long', '元朗', 'Yuen Long'], ['Tseung Kwan O', '将军澳', 'Tseung Kwan O']],
     admins: [['Central and Western', '中西区', 'Central and Western'], ['Wan Chai', '湾仔区', 'Wan Chai'], ['Kowloon City', '九龙城区', 'Kowloon City'], ['Yau Tsim Mong', '油尖旺区', 'Yau Tsim Mong'], ['Kwun Tong', '观塘区', 'Kwun Tong'], ['Sha Tin', '沙田区', 'Sha Tin'], ['Tsuen Wan', '荃湾区', 'Tsuen Wan'], ['Yuen Long', '元朗区', 'Yuen Long']]
@@ -328,7 +330,7 @@ export const countries: CountryConfig[] = [
   makeCountry({
     code: 'TW', en: 'Taiwan', zh: '台湾', nativeName: '臺灣', nativeLanguage: 'zh-TW', flag: '🇹🇼', callingCode: '+886',
     group: 'east-asia', order: 13, readiness: 'strict', residential: true, googleValidation: false, googleResidential: false,
-    format: '%Z%n%S%C%n%A%n%O%n%N', latinFormat: '%N%n%O%n%A%n%C, %S %Z', center: [25.033, 121.565], adminLabel: ['County and city', '县市'], postcodeLabel: ['Postal code', '邮编'],
+    format: '%Z%n%S%C%n%A%n%O%n%N', latinFormat: '%N%n%O%n%A%n%C, %S %Z', center: [25.033, 121.565], adminLabel: ['County and city', '縣市'], postcodeLabel: ['Postal code', '郵遞區號'],
     primary: [source('tgos', 'TGOS Address Locator', 'https://api.tgos.tw/TGOS_MAP_API/docs/site/web/Locate', 'address', 'live')],
     cities: [['Taipei', '台北', '臺北市'], ['Kaohsiung', '高雄', '高雄市'], ['Taichung', '台中', '臺中市'], ['New Taipei', '新北', '新北市'], ['Tainan', '台南', '臺南市'], ['Taoyuan', '桃园', '桃園市'], ['Hsinchu', '新竹', '新竹市'], ['Keelung', '基隆', '基隆市']],
     admins: [['Taipei City', '台北市', '臺北市'], ['New Taipei City', '新北市', '新北市'], ['Taichung City', '台中市', '臺中市'], ['Kaohsiung City', '高雄市', '高雄市'], ['Tainan City', '台南市', '臺南市'], ['Taoyuan City', '桃园市', '桃園市']]

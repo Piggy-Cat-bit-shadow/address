@@ -47,7 +47,7 @@ export class ProviderCredentialPool {
   async quotaAvailable(row, date = new Date()) {
     const windows = (await this.database.prepare(`SELECT quota_window.service,quota_window.scope_id,quota_window.period,
       quota_window.limit_count,quota_window.timezone_offset,observation.used_count,
-      observation.limit_count AS observed_limit,observation.reset_at,observation.observed_at
+      observation.limit_count AS observed_limit,observation.reset_at,observation.observed_at,observation.source AS observation_source
       FROM provider_quota_windows quota_window LEFT JOIN provider_quota_observations observation
         ON observation.credential_id=quota_window.credential_id AND observation.service=quota_window.service
           AND observation.period=quota_window.period
@@ -57,7 +57,9 @@ export class ProviderCredentialPool {
     for (const window of windows) {
       const localUsed = await this.quotaUsed(row, window.period, window.service, window.scope_id, window.timezone_offset, date);
       const observed = window.observed_at && (!window.reset_at || Date.parse(window.reset_at) > date.getTime());
-      const used = Math.max(localUsed, observed ? Number(window.used_count || 0) : 0);
+      const baseline = observed && window.observation_source === 'local' ? Number(window.used_count || 0) : 0;
+      const used = observed && window.observation_source === 'provider'
+        ? Math.max(localUsed, Number(window.used_count || 0)) : localUsed + baseline;
       const limit = observed && window.observed_limit !== null ? Number(window.observed_limit) : Number(window.limit_count);
       if (used >= limit) return false;
     }

@@ -4,6 +4,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { strFromU8, unzipSync } from 'fflate';
+import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
 
 const countryCodes = new Set([
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU', 'JP', 'HK', 'SG', 'TW', 'KR', 'MY',
@@ -58,9 +59,20 @@ const cities = JSON.parse(gunzipSync(await readFile(citiesFile)).toString('utf8'
 const postcodes = JSON.parse(gunzipSync(await readFile(postcodesFile)).toString('utf8'));
 const residentialCoverage = JSON.parse(await readFile(residentialCoverageUrl, 'utf8'));
 const includedState = (state) => countryCodes.has(state.country_code) && (state.country_code !== 'US' || usStateCodes.has(state.iso2));
-const selectedStates = states.filter(includedState);
+const selectedStates = states.filter((state) => includedState(state) && state.country_code !== 'HK');
+selectedStates.push(...hongKongRegions.map((region) => ({
+  id: region.id, country_code: 'HK', iso2: region.code, name: region.name, native: region.native,
+  translations: { 'zh-CN': region.zh }, type: 'region', parent_id: null, latitude: null, longitude: null
+})));
 const stateIds = new Set(selectedStates.map((state) => state.id));
-const selectedCities = cities.filter((city) => countryCodes.has(city.country_code) && (!city.state_id || stateIds.has(city.state_id)));
+const selectedCities = cities.filter((city) => city.country_code !== 'HK' && countryCodes.has(city.country_code)
+  && (!city.state_id || stateIds.has(city.state_id)));
+const hongKongRegionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
+selectedCities.push(...hongKongDistricts.map((district) => ({
+  id: district.id, country_code: 'HK', state_id: hongKongRegionIds.get(district.regionCode),
+  name: district.name, native: district.native, translations: { 'zh-CN': district.zh },
+  type: 'district', population: null, latitude: null, longitude: null
+})));
 const cityIds = new Set(selectedCities.map((city) => city.id));
 let selectedPostcodes = postcodes.filter((postcode) => countryCodes.has(postcode.country_code)
   && (!postcode.state_id || stateIds.has(postcode.state_id))
@@ -184,7 +196,9 @@ for (const [name, file] of Object.entries({ states: statesFile, cities: citiesFi
 }
 const now = new Date().toISOString();
 stream.write(`DELETE FROM catalog_metadata WHERE source = 'countries-states-cities-database';\n`);
-stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('countries-states-cities-database')}, ${sql(now.slice(0, 10))}, ${sql('https://github.com/dr5hn/countries-states-cities-database')}, ${sql(checksums.cities)}, ${sql(now)}, ${selectedStates.length}, ${selectedCities.length}, ${dr5hnPostcodeCount});\n`);
+stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('countries-states-cities-database')}, ${sql(now.slice(0, 10))}, ${sql('https://github.com/dr5hn/countries-states-cities-database')}, ${sql(checksums.cities)}, ${sql(now)}, ${selectedStates.filter((state) => state.country_code !== 'HK').length}, ${selectedCities.filter((city) => city.country_code !== 'HK').length}, ${dr5hnPostcodeCount});\n`);
+stream.write(`DELETE FROM catalog_metadata WHERE source = 'hong-kong-official-administrative-catalog';\n`);
+stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('hong-kong-official-administrative-catalog')}, ${sql('2026-08-18')}, ${sql('https://www.had.gov.hk/en/18_districts/my_map.htm')}, ${sql(createHash('sha256').update(JSON.stringify([hongKongRegions, hongKongDistricts])).digest('hex'))}, ${sql(now)}, ${hongKongRegions.length}, ${hongKongDistricts.length}, 0);\n`);
 stream.write(`DELETE FROM catalog_metadata WHERE source = 'geonames-postal-codes';\n`);
 stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('geonames-postal-codes')}, ${sql(now.slice(0, 10))}, ${sql('https://download.geonames.org/export/zip/')}, ${sql(createHash('sha256').update(JSON.stringify(geoNamesChecksums)).digest('hex'))}, ${sql(now)}, 0, 0, ${geoNamesAdded});\n`);
 for (let index = 0; index < residentialCoverage.length; index += 250) {
@@ -200,6 +214,7 @@ const countByCountry = (records) => Object.fromEntries([...countryCodes].map((co
 const manifest = {
   sources: [
     { name: 'Countries States Cities Database', url: 'https://github.com/dr5hn/countries-states-cities-database', license: 'ODbL-1.0' },
+    { name: 'Hong Kong official administrative catalog', url: 'https://www.had.gov.hk/en/18_districts/my_map.htm', license: 'See source terms' },
     { name: 'GeoNames Postal Codes', url: 'https://download.geonames.org/export/zip/', license: 'CC-BY-4.0', added: geoNamesAdded }
   ],
   syncedAt: now,

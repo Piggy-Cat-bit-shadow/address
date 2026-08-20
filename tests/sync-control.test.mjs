@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSyncApi } from '../server/sync/api.mjs';
 import { SyncCoordinator } from '../server/sync/coordinator.mjs';
 import { SyncHistoryStore } from '../server/sync/history-store.mjs';
-import { createSyncRuntime } from '../server/sync/index.mjs';
+import { createPublicationValidationWorker, createSyncRuntime } from '../server/sync/index.mjs';
 import {
   acquireSyncLease, assertSyncMemory, runAddressSync, syncPostgresStatementTimeout
 } from '../server/sync/run-address-sync.mjs';
@@ -429,11 +429,11 @@ describe('address sync coordinator', () => {
     await database.prepare(`INSERT INTO sync_runs(
       id,kind,target_json,status,progress_json,created_at,started_at,updated_at
     ) VALUES ('orphan-history','address-pool','{"shards":["oa-us"]}','running','{}',
-      '2026-08-05T05:00:00Z','2026-08-05T05:00:00Z','2026-08-05T05:00:00Z')`).run();
+      '2026-08-05T04:59:00Z','2026-08-05T04:59:00Z','2026-08-05T04:59:00Z')`).run();
     await database.prepare(`INSERT INTO sync_run_countries(
       run_id,country_code,source_id,trigger_name,status,started_at,created_at,updated_at
-    ) VALUES ('orphan-history','US','oa-us','queue','running','2026-08-05T05:00:00Z',
-      '2026-08-05T05:00:00Z','2026-08-05T05:00:00Z')`).run();
+    ) VALUES ('orphan-history','US','oa-us','queue','running','2026-08-05T04:59:00Z',
+      '2026-08-05T04:59:00Z','2026-08-05T04:59:00Z')`).run();
     const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
     await expect(history.repairInterruptedRuns()).resolves.toBe(1);
     expect(await database.prepare(`SELECT status,error_code,completed_at FROM sync_runs
@@ -444,6 +444,49 @@ describe('address sync coordinator', () => {
       WHERE run_id='orphan-history'`).first()).toEqual({
       status: 'failed', net_growth: null, error_code: 'SYNC_JOB_INTERRUPTED'
     });
+    database.close();
+  });
+
+  it('repairs stale non-address history without closing recent work owned by another service', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    for (const [id, updatedAt] of [['stale-china', '2026-08-05T04:00:00Z'], ['recent-china', '2026-08-05T06:30:00Z']]) {
+      await database.prepare(`INSERT INTO sync_runs(
+        id,kind,target_json,status,progress_json,created_at,started_at,updated_at
+      ) VALUES (?,'china-communities','{}','running','{}',?,?,?)`)
+        .bind(id, updatedAt, updatedAt, updatedAt).run();
+      await database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,started_at,created_at,updated_at
+      ) VALUES (?,'CN','china-map-providers','scheduled','running',?,?,?)`)
+        .bind(id, updatedAt, updatedAt, updatedAt).run();
+    }
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairInterruptedRuns()).resolves.toBe(1);
+    expect(await database.prepare("SELECT status FROM sync_runs WHERE id='stale-china'").first('status')).toBe('failed');
+    expect(await database.prepare("SELECT status FROM sync_runs WHERE id='recent-china'").first('status')).toBe('running');
+    database.close();
+  });
+
+  it('does not close a recent address run or clear its scheduler ownership while repairing another run', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    for (const [id, kind, updatedAt] of [
+      ['stale-china', 'china-communities', '2026-08-05T04:00:00Z'],
+      ['recent-address', 'address-pool', '2026-08-05T06:59:30Z']
+    ]) {
+      await database.prepare(`INSERT INTO sync_runs(
+        id,kind,target_json,status,progress_json,created_at,started_at,updated_at
+      ) VALUES (?,?, '{}','running','{}',?,?,?)`).bind(id, kind, updatedAt, updatedAt, updatedAt).run();
+    }
+    await database.prepare(`INSERT INTO sync_scheduler_state(
+      scheduler_id,heartbeat_at,last_planned_at,active_run_id,updated_at
+    ) VALUES ('address-sync','2026-08-05T06:59:30Z','2026-08-05T06:59:30Z','recent-address','2026-08-05T06:59:30Z')`).run();
+    const history = new SyncHistoryStore(database, { now: () => new Date('2026-08-05T07:00:00Z') });
+    await expect(history.repairInterruptedRuns()).resolves.toBe(1);
+    await history.schedulerHeartbeat();
+    expect(await database.prepare("SELECT status FROM sync_runs WHERE id='recent-address'").first('status')).toBe('running');
+    expect(await database.prepare("SELECT active_run_id FROM sync_scheduler_state WHERE scheduler_id='address-sync'")
+      .first('active_run_id')).toBe('recent-address');
     database.close();
   });
 
@@ -526,6 +569,25 @@ describe('address sync coordinator', () => {
 });
 
 describe('sync management API', () => {
+  it('continues publication validation independently until the revision scan completes', async () => {
+    vi.useFakeTimers();
+    const validate = vi.fn()
+      .mockResolvedValueOnce({ completed: false, countryCode: 'AU', scanned: 2_000, retired: 3 })
+      .mockResolvedValueOnce({ completed: false, countryCode: 'AU', countryCompleted: true, scanned: 0, retired: 0 })
+      .mockResolvedValueOnce({ completed: true, scanned: 0, retired: 0 });
+    const worker = createPublicationValidationWorker({ validate, intervalMs: 1_000, log: { log: vi.fn(), error: vi.fn() } });
+
+    worker.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(validate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(validate).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(validate).toHaveBeenCalledTimes(3);
+    await worker.stop();
+    vi.useRealTimers();
+  });
+
   it('serves health under the /sync-control prefix', async () => {
     const database = openTestDatabase();
     await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));

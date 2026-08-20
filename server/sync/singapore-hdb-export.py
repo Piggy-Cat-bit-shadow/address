@@ -1,5 +1,6 @@
 import argparse
 import csv
+import datetime
 import hashlib
 import json
 import os
@@ -40,7 +41,7 @@ class TemporaryOnemapFailure(RuntimeError):
 
 class RecordBatch(list):
     def __init__(self, values, source_complete, checkpoint_token, candidate_count, resolved_count,
-                 temporary_failure=None, next_available_at=None):
+                 temporary_failure=None, next_available_at=None, onemap_request_count=0):
         super().__init__(values)
         self.source_complete = source_complete
         self.checkpoint_token = checkpoint_token
@@ -48,6 +49,7 @@ class RecordBatch(list):
         self.resolved_count = resolved_count
         self.temporary_failure = temporary_failure
         self.next_available_at = next_available_at
+        self.onemap_request_count = onemap_request_count
 
 
 def clean(value):
@@ -141,7 +143,7 @@ def load_onemap_cache(path):
     return cached
 
 
-def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=0.2):
+def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=1.05):
     query = f"{clean(row.get('blk_no'))} {clean(row.get('street'))}"
     if query in cache:
         return cache[query]["result"]
@@ -152,7 +154,9 @@ def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=0.2):
         method="POST",
     )
     payload = None
-    for attempt in range(3):
+    network_attempts = 0
+    rate_limit_attempts = 0
+    while True:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.load(response)
@@ -166,19 +170,36 @@ def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=0.2):
                 details = {}
             code = clean(details.get("code")).upper()
             next_available_at = details.get("nextAvailableAt") or details.get("next_available_at")
-            if error.code == 429 or "QUOTA" in code:
+            if code == "SOURCE_RATE_LIMITED" or (error.code == 429 and "QUOTA" not in code
+                                                   and "QUOTA" not in str(details.get("message", "")).upper()):
+                if rate_limit_attempts < 8:
+                    rate_limit_attempts += 1
+                    retry_at = next_available_at
+                    delay = minimum_interval
+                    if retry_at:
+                        try:
+                            retry_time = datetime.datetime.fromisoformat(str(retry_at).replace("Z", "+00:00"))
+                            delay = max(delay, min(10.0, retry_time.timestamp() - time.time()))
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                    time.sleep(max(0.05, delay))
+                    continue
+                raise TemporaryOnemapFailure("rate_limit", next_available_at) from None
+            if code == "SOURCE_QUOTA_UNAVAILABLE" or "QUOTA" in code:
                 raise TemporaryOnemapFailure("quota", next_available_at) from None
             if error.code in {401, 403} or "CREDENTIAL" in code:
                 raise TemporaryOnemapFailure("credential", next_available_at) from None
             if error.code == 408 or error.code >= 500 or "NETWORK" in code:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+                if network_attempts < 2:
+                    time.sleep(2 ** network_attempts)
+                    network_attempts += 1
                     continue
                 raise TemporaryOnemapFailure("network", next_available_at) from None
             raise RuntimeError(f"OneMap bridge stopped with HTTP {error.code}") from None
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-            if attempt < 2:
-                time.sleep(2 ** attempt)
+            if network_attempts < 2:
+                time.sleep(2 ** network_attempts)
+                network_attempts += 1
                 continue
             raise TemporaryOnemapFailure("network") from None
     postcodes = defaultdict(list)
@@ -209,7 +230,7 @@ def onemap_result(row, bridge_url, cache, cache_file, minimum_interval=0.2):
     with open(cache_file, "a", encoding="utf-8", newline="\n") as output:
         output.write(json.dumps({"query": query, "status": status, "result": result},
                                 ensure_ascii=False, separators=(",", ":")) + "\n")
-    time.sleep(minimum_interval)
+    time.sleep(max(0, minimum_interval))
     return result
 
 
@@ -219,13 +240,15 @@ def checkpoint_token(cache):
                                      sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def records(property_file, building_file, onemap_cache_file, bridge_url, minimum_interval=0.2):
+def records(property_file, building_file, onemap_cache_file, bridge_url, minimum_interval=1.05,
+            max_onemap_requests=500):
     properties = load_properties(property_file)
     buildings = load_buildings(building_file)
     onemap_cache = load_onemap_cache(onemap_cache_file)
     output = []
     candidate_count = 0
     resolved_count = 0
+    onemap_request_count = 0
     failure = None
     for key in sorted(properties):
         property_rows = properties[key]
@@ -237,7 +260,15 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
         if len(building_rows) == 1:
             building, longitude, latitude = building_rows[0]
             resolved_count += 1
-        elif failure is None or f"{clean(row.get('blk_no'))} {clean(row.get('street'))}" in onemap_cache:
+        else:
+            query = f"{clean(row.get('blk_no'))} {clean(row.get('street'))}"
+            if query not in onemap_cache:
+                if failure is not None:
+                    continue
+                if onemap_request_count >= max_onemap_requests:
+                    failure = TemporaryOnemapFailure("request_budget")
+                    continue
+                onemap_request_count += 1
             try:
                 building = onemap_result(row, bridge_url, onemap_cache, onemap_cache_file, minimum_interval)
             except TemporaryOnemapFailure as error:
@@ -247,8 +278,6 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
             if not building:
                 continue
             longitude, latitude = building["longitude"], building["latitude"]
-        else:
-            continue
         town_code = clean(row.get("bldg_contract_town")).upper()
         town = TOWNS.get(town_code)
         if not town:
@@ -282,6 +311,7 @@ def records(property_file, building_file, onemap_cache_file, bridge_url, minimum
         resolved_count,
         failure.kind if failure else None,
         failure.next_available_at if failure else None,
+        onemap_request_count,
     )
 
 
@@ -309,14 +339,16 @@ def main():
     parser.add_argument("--onemap-cache", required=True)
     parser.add_argument("--onemap-bridge-url", required=True)
     parser.add_argument("--state-output", required=True)
-    parser.add_argument("--minimum-interval", type=float, default=0.2)
+    parser.add_argument("--minimum-interval", type=float, default=1.05)
+    parser.add_argument("--max-onemap-requests", type=int, default=500)
     parser.add_argument("--max-records", type=int, required=True)
     parser.add_argument("--per-locality", type=int, required=True)
     args = parser.parse_args()
-    if args.max_records < 1 or args.per_locality < 1 or args.minimum_interval < 0:
+    if (args.max_records < 1 or args.per_locality < 1 or args.minimum_interval < 0
+            or args.max_onemap_requests < 1):
         raise ValueError("Invalid export limits")
     batch = records(args.property_csv, args.building_geojson, args.onemap_cache,
-                    args.onemap_bridge_url, args.minimum_interval)
+                    args.onemap_bridge_url, args.minimum_interval, args.max_onemap_requests)
     selected = select_balanced(batch, args.max_records, args.per_locality)
     with open(args.output, "w", encoding="utf-8", newline="\n") as output:
         for value in selected:
@@ -331,6 +363,7 @@ def main():
         "selected_count": len(selected),
         "temporary_failure": batch.temporary_failure,
         "next_available_at": batch.next_available_at,
+        "onemap_request_count": batch.onemap_request_count,
     }
     absolute = os.path.abspath(args.state_output)
     os.makedirs(os.path.dirname(absolute), exist_ok=True)

@@ -52,7 +52,7 @@ x-production-api: &production-api
     <<: *production-environment
     API_HOST: 0.0.0.0
     API_PORT: 8787
-    SYNC_CONTROL_URL: http://sync:8791
+    SYNC_CONTROL_URL: http://address-sync-control:8791
   healthcheck:
     test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/ready').then(r=>{if(!r.ok||r.headers.get('x-address-release')!==process.env.ADDRESS_RELEASE)process.exit(1)}).catch(()=>process.exit(1))"]
     interval: 5s
@@ -106,7 +106,7 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_BLUE_RELEASE:?Set ADDRESS_BLUE_RELEASE}
       API_HOST: 0.0.0.0
       API_PORT: 8787
-      SYNC_CONTROL_URL: http://sync:8791
+      SYNC_CONTROL_URL: http://address-sync-control:8791
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,7 +137,7 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_GREEN_RELEASE:?Set ADDRESS_GREEN_RELEASE}
       API_HOST: 0.0.0.0
       API_PORT: 8787
-      SYNC_CONTROL_URL: http://sync:8791
+      SYNC_CONTROL_URL: http://address-sync-control:8791
     depends_on:
       postgres:
         condition: service_healthy

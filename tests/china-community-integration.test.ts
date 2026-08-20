@@ -233,7 +233,12 @@ describe('China community storage integration', () => {
     const address = await pickChinaCommunityAddress(addressDb, { region: '北京市', city: '北京市' }, 'seed');
     expect(address).toMatchObject({
       countryCode: 'CN', propertyType: 'apartment', coordinates: { latitude: 39.989, longitude: 116.463 },
-      components: { buildingName: '望京花园', district: '朝阳区' }
+      components: { houseNumber: '6号', street: '阜通东大街', buildingName: '望京花园', district: '朝阳区' },
+      componentVariants: {
+        native: { houseNumber: '6号', street: '阜通东大街' },
+        en: { houseNumber: '6', street: 'Fu tong dong da jie' },
+        'zh-CN': { houseNumber: '6号', street: '阜通东大街' }
+      }
     });
     expect(address?.nativeAddress).toContain('阜通东大街6号');
     expect(address?.verificationLevel).toBe('L2');
@@ -244,6 +249,67 @@ describe('China community storage integration', () => {
       .toMatchObject({ components: { district: '朝阳区' } });
     expect(await pickChinaCommunityAddress(addressDb, { region: '北京市', city: '北京市', district: '海淀区' }, 'seed'))
       .toBeUndefined();
+  });
+
+  it('does not publish a China provider address whose trailing text prevents deterministic house-number splitting', async () => {
+    const now = new Date().toISOString();
+    await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
+      provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'community-ambiguous-delivery', '光明小区', '光明', '河北省', '唐山市', '丰润区', '丰润镇',
+      '文化路18号光明小区', 118.162, 39.832, 'L1', 1, now, now, now
+    ).run();
+    await addressDb.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
+      raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'amap', 'ambiguous-delivery', 'community-ambiguous-delivery', '光明小区', '文化路18号光明小区',
+      118.168, 39.838, 'GCJ-02', 'ambiguous-hash', now, now
+    ).run();
+
+    expect(await countChinaCommunities(addressDb)).toBe(0);
+    expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'ambiguous-delivery')).toBeUndefined();
+  });
+
+  it('does not publish Taiwan communities through the mainland China pool', async () => {
+    const now = new Date().toISOString();
+    await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
+      provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'community-taiwan', '明驼新城', '明驼新城', '台湾省', '台中市', '潭子区', '',
+      '台中市潭子区明驼新城1号', 120.7, 24.2, 'L1', 1, now, now, now
+    ).run();
+    await addressDb.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
+      raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'amap', 'poi-community-taiwan', 'community-taiwan', '明驼新城', '台中市潭子区明驼新城1号',
+      120.7, 24.2, 'GCJ-02', 'hash-community-taiwan', now, now
+    ).run();
+
+    expect(await countChinaCommunities(addressDb)).toBe(0);
+    expect(await pickChinaCommunityAddress(addressDb, {}, 'strict-mainland')).toBeUndefined();
+  });
+
+  it('publishes China block identifiers but rejects mixed-language names and streets', async () => {
+    const now = new Date().toISOString();
+    const rows = [
+      ['mixed-name', 'OASIS绿洲', '文昌街8号'],
+      ['mixed-street', '长林花园', '六O南大道109号'],
+      ['block-label', '学府悦园F组团', '崇贤路1号']
+    ];
+    for (const [id, name, providerAddress] of rows) {
+      await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
+        provider_address,longitude,latitude,verification_level,source_count,first_seen_at,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        id, name, name, '重庆市', '重庆市', '沙坪坝区', '', providerAddress,
+        106.45, 29.55, 'L1', 1, now, now, now
+      ).run();
+      await addressDb.prepare(`INSERT INTO cn_community_sources(provider,provider_poi_id,community_id,raw_name,raw_address,
+        raw_longitude,raw_latitude,raw_crs,response_hash,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        'amap', `poi-${id}`, id, name, providerAddress, 106.45, 29.55, 'GCJ-02', `hash-${id}`, now, now
+      ).run();
+    }
+
+    expect(await countChinaCommunities(addressDb)).toBe(1);
+    expect(await pickChinaCommunityAddress(addressDb, {}, 'strict-native-language'))
+      .toMatchObject({ components: { buildingName: '学府悦园F组团', street: '崇贤路' } });
   });
 
   it('publishes one strict Amap record without treating duplicate POIs as cross-provider evidence', async () => {
@@ -324,8 +390,9 @@ describe('China community storage integration', () => {
     expect(rows).toHaveLength(rowCount);
     expect(rows.every((row) => row.verification_level === 'L1' && row.source_count === 1)).toBe(true);
     expect(await countChinaCommunities(addressDb)).toBe(1);
+    const expected = firstAddress.match(/^(.+?)([0-9]+(?:(?:弄|巷)[0-9]+)?(?:[-之][0-9]+)?号)$/u);
     expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'conflict')).toMatchObject({
-      verificationLevel: 'L1', components: { street: firstAddress }
+      verificationLevel: 'L1', components: { street: expected?.[1], houseNumber: expected?.[2] }
     });
   });
 
@@ -338,7 +405,7 @@ describe('China community storage integration', () => {
     expect(await addressDb.prepare('SELECT verification_level FROM cn_communities_v2').first('verification_level')).toBe('L2');
     expect(await countChinaCommunities(addressDb)).toBe(1);
     expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'matching')).toMatchObject({
-      components: { street: '丰润区文化路18号', buildingName: '光明小区' }, verificationLevel: 'L2'
+      components: { street: '丰润区文化路', houseNumber: '18号', buildingName: '光明小区' }, verificationLevel: 'L2'
     });
   });
 
@@ -357,9 +424,9 @@ describe('China community storage integration', () => {
   });
 
   it.each([
-    ['an expired community', daysAgo(181), daysAgo(1), daysAgo(1), 'L2', 0],
+    ['an expired community', daysAgo(181), daysAgo(1), daysAgo(1), 'L2', 1],
     ['an invalid community date', 'not-a-date', daysAgo(1), daysAgo(1), 'L2', 0],
-    ['one expired secondary source', daysAgo(1), daysAgo(1), daysAgo(181), 'L1', 1],
+    ['one expired secondary source', daysAgo(1), daysAgo(1), daysAgo(181), 'L2', 1],
     ['one invalid secondary source date', daysAgo(1), daysAgo(1), 'not-a-date', 'L1', 1]
   ])('applies source freshness correctly for %s', async (_label, communitySeen, firstSeen, secondSeen, expectedLevel, published) => {
     await addressDb.prepare(`INSERT INTO cn_communities_v2(id,canonical_name,normalized_name,province,city,district,township,
@@ -381,10 +448,14 @@ describe('China community storage integration', () => {
     expect(await addressDb.prepare('SELECT verification_level FROM cn_communities_v2 WHERE id=?')
       .bind('freshness-community').first('verification_level')).toBe(expectedLevel);
     expect(await countChinaCommunities(addressDb)).toBe(published);
-    if (published) expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toMatchObject({ verificationLevel: 'L1' });
+    if (published) expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toMatchObject({ verificationLevel: expectedLevel });
     else expect(await pickChinaCommunityAddress(addressDb, { city: '唐山市' }, 'stale')).toBeUndefined();
     expect(await targetCount(service)).toBe(published);
-    expect(await service.status()).toMatchObject({ total: published, cross_verified: 0, cities: published });
+    expect(await service.status()).toMatchObject({
+      total: published,
+      cross_verified: published && expectedLevel === 'L2' ? 1 : 0,
+      cities: published
+    });
   });
 
   it('publishes and counts a community backed by two fresh independent providers', async () => {

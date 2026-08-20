@@ -90,4 +90,14 @@ describe('provider credential pool', () => {
     await pool.report(credential.id, 'success');
     expect(await pool.acquire('geoapify')).toBeNull();
   });
+
+  it('counts a Google monthly usage baseline before new synchronized requests', async () => {
+    const id = await store.addCredential({
+      provider: 'google-geocoding', label: 'Google', secret: 'google-secret',
+      qpsLimit: 10_000, quotaLimit: 3, quotaUsedBaseline: 2
+    });
+    expect((await pool.acquire('google-geocoding')).id).toBe(id);
+    await pool.report(id, 'success');
+    expect(await pool.acquire('google-geocoding')).toBeNull();
+  });
 });

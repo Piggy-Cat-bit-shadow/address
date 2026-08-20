@@ -138,9 +138,6 @@ const cityAvailability = async (db: Database, country: CountryCode, rows: CityRo
 // residential path so displayed availability matches generatable records.
 const residentialPoolClause = (alias = 'address'): string => `${alias}.active=1
   AND ${alias}.property_type IN ('residential','apartment') AND ${alias}.quality_score>=0.7
-  AND (${alias}.expires_at IS NULL OR CASE
-    WHEN ${alias}.expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-    THEN ${alias}.expires_at::timestamptz>CURRENT_TIMESTAMP ELSE FALSE END)
   AND EXISTS (SELECT 1 FROM address_pool_evidence evidence WHERE evidence.address_id=${alias}.id
     AND evidence.evidence_type='address_existence' AND evidence.is_current=1)
   AND EXISTS (SELECT 1 FROM address_pool_evidence evidence WHERE evidence.address_id=${alias}.id

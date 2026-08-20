@@ -9,7 +9,7 @@ import { sourceAdapterRevisions } from '../server/sync/source-adapters.mjs';
 import {
   computeQueueSnapshot, countryFingerprint, createQueueSources, createSyncQueue, evaluateAttempt,
   estimateDuration, executionFailureFingerprint, legacyCountryFingerprint, nextQuotaResetTime, nextWakeAt, orderRunnable,
-  PostgresQueueStateStore, QueueStateStore
+  PostgresQueueStateStore, QueueStateStore, sourceCapabilityRevision
 } from '../server/sync/queue.mjs';
 
 const directories = [];
@@ -131,6 +131,20 @@ describe('attempt evaluation and latching', () => {
     });
   });
 
+  it('retries a request-budget checkpoint without treating it as source exhaustion', () => {
+    const result = evaluateAttempt({
+      ...base,
+      jobSucceeded: true,
+      netGrowth: 10,
+      sourceComplete: false,
+      checkpointToken: 'checkpoint-budget-2',
+      previousCheckpointToken: 'checkpoint-budget-1',
+      checkpointStage: 'request_budget'
+    });
+    expect(result).toMatchObject({ action: 'checked', reason: 'source_partial_checkpoint' });
+    expect(result.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 60_000));
+  });
+
   it('continues when a partial checkpoint advances and suspends after three identical checkpoints', () => {
     const progressed = evaluateAttempt({
       ...base, jobSucceeded: true, netGrowth: 0, sourceComplete: false,
@@ -139,6 +153,7 @@ describe('attempt evaluation and latching', () => {
     expect(progressed).toMatchObject({
       action: 'checked', reason: 'source_partial_checkpoint', checkpointToken: 'checkpoint-2', consecutiveFailures: 0
     });
+    expect(progressed.nextAttemptAt).toBe(iso(Date.parse(base.completedAt) + 60_000));
 
     const first = evaluateAttempt({
       ...base, jobSucceeded: true, netGrowth: 0, sourceComplete: false,
@@ -159,6 +174,64 @@ describe('attempt evaluation and latching', () => {
     expect(third).toMatchObject({
       action: 'suspend', reason: 'source_partial_stalled', failureCode: 'SOURCE_PARTIAL_STALLED',
       checkpointToken: 'checkpoint-2', consecutiveFailures: 3
+    });
+  });
+
+  it('latches a checkpointed source after three evaluated batches make no publish or goal progress', () => {
+    const attempt = (partialStalls) => evaluateAttempt({
+      ...base,
+      jobSucceeded: true,
+      netGrowth: 0,
+      sourceComplete: false,
+      checkpointToken: `checkpoint-${partialStalls + 2}`,
+      previousCheckpointToken: `checkpoint-${partialStalls + 1}`,
+      partialStalls,
+      partialWorkCount: 25,
+      partialProgressEvaluationReady: true,
+      maxPartialStalls: 3
+    });
+    expect(attempt(0)).toMatchObject({
+      action: 'checked', reason: 'source_partial_checkpoint', consecutiveFailures: 1
+    });
+    expect(attempt(1)).toMatchObject({ action: 'checked', consecutiveFailures: 2 });
+    expect(attempt(2)).toMatchObject({
+      action: 'latch', reason: 'source_limited_cache', checkpointToken: 'checkpoint-4', consecutiveFailures: 3
+    });
+  });
+
+  it('does not classify a quota-only partial resume as source exhaustion', () => {
+    const result = evaluateAttempt({
+      ...base,
+      jobSucceeded: true,
+      netGrowth: 0,
+      sourceComplete: false,
+      checkpointToken: 'checkpoint-2',
+      previousCheckpointToken: 'checkpoint-2',
+      checkpointStage: 'credential',
+      partialStalls: 2,
+      partialWorkCount: 0,
+      partialProgressEvaluationReady: true
+    });
+    expect(result).toMatchObject({ action: 'checked', consecutiveFailures: 2 });
+    expect(result.waitReason).toBe('credential');
+    expect(result.reason).not.toBe('source_limited_cache');
+  });
+
+  it('counts Google no-progress stalls only after a meaningful evaluated batch', () => {
+    const smallBatch = evaluateAttempt({
+      ...base, jobSucceeded: true, netGrowth: 0, sourceComplete: false,
+      checkpointToken: 'checkpoint-2', previousCheckpointToken: 'checkpoint-1', partialStalls: 2,
+      partialWorkCount: 1, partialMinimumWorkCount: 50, partialProgressEvaluationReady: true
+    });
+    expect(smallBatch).toMatchObject({ action: 'checked', consecutiveFailures: 0 });
+
+    const evaluatedBatch = evaluateAttempt({
+      ...base, jobSucceeded: true, netGrowth: 0, sourceComplete: false,
+      checkpointToken: 'checkpoint-2', previousCheckpointToken: 'checkpoint-1', partialStalls: 2,
+      partialWorkCount: 50, partialMinimumWorkCount: 50, partialProgressEvaluationReady: true
+    });
+    expect(evaluatedBatch).toMatchObject({
+      action: 'latch', reason: 'source_limited_cache', consecutiveFailures: 3
     });
   });
 
@@ -306,6 +379,29 @@ describe('attempt evaluation and latching', () => {
 });
 
 describe('exhausted source metadata probes', () => {
+  it('does not periodically probe terminal sources unless explicitly enabled', async () => {
+    const facts = stubFacts();
+    facts.deficits.belowTarget = new Set(['US']);
+    facts.shards.US = [{ shardId: 'oa-us', status: 'ready', sourceVersion: 'v1', updatedAt: '' }];
+    const probeSource = vi.fn(async () => ({ version: 'v2' }));
+    const queue = createSyncQueue({
+      environment: {}, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
+      loadCatalog: async () => ({ shards: stubCatalogShards }), probeSource,
+      now: () => new Date('2026-08-02T10:00:00Z'), cooldownMs: 0,
+      log: { log: () => {}, error: () => {} }
+    });
+    await queue.store.apply('US', {
+      action: 'latch', fingerprint: countryFingerprint({
+        adapterRevisions: [['oa-us', '']], sourceVersions: [['oa-us', 'v1']]
+      }), latchedAt: '2026-08-01T00:00:00Z', nextAttemptAt: '2026-08-02T09:00:00Z'
+    }, '2026-08-01T00:00:00Z', 'oa-us');
+
+    await queue.tick();
+    expect(probeSource).not.toHaveBeenCalled();
+    expect((await queue.snapshot()).entries.find(({ countryCode }) => countryCode === 'US'))
+      .toMatchObject({ state: 'source_limited', reason: 'source_limited_cache' });
+  });
+
   it('keeps an unchanged source exhausted and unlocks only a newer upstream version', async () => {
     const facts = stubFacts();
     facts.deficits.belowTarget = new Set(['US']);
@@ -323,7 +419,7 @@ describe('exhausted source metadata probes', () => {
     let current = new Date('2026-08-02T10:00:00Z');
     let upstreamVersion = 'v1';
     const queue = createSyncQueue({
-      environment: {}, coordinator, stateDir: stateDir(), sources: stubSources(facts, {}),
+      environment: {}, enableSourceProbes: true, coordinator, stateDir: stateDir(), sources: stubSources(facts, {}),
       loadCatalog: async () => ({ shards: stubCatalogShards }),
       probeSource: async () => ({ version: upstreamVersion }),
       now: () => current,
@@ -363,7 +459,7 @@ describe('exhausted source metadata probes', () => {
     let current = new Date('2026-08-02T10:00:00Z');
     let probeVersion = '2026-08-01-p2222222222222222';
     const queue = createSyncQueue({
-      environment: {}, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
+      environment: {}, enableSourceProbes: true, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
       loadCatalog: async () => ({ shards: [{
         id: 'oa-nl', countryCode: 'NL', source: { adapter: 'geofabrik' }
       }] }),
@@ -408,7 +504,7 @@ describe('exhausted source metadata probes', () => {
     };
     const probeSource = vi.fn(async () => ({ version: 'v1' }));
     const queue = createSyncQueue({
-      environment: {}, coordinator, stateDir: stateDir(), sources: stubSources(facts, {}),
+      environment: {}, enableSourceProbes: true, coordinator, stateDir: stateDir(), sources: stubSources(facts, {}),
       loadCatalog: async () => ({ shards: [
         { id: 'oa-nl', countryCode: 'NL' }, { id: 'nl-new', countryCode: 'NL' }
       ] }),
@@ -437,7 +533,7 @@ describe('exhausted source metadata probes', () => {
     facts.shards = { NL: facts.shards.NL };
     let current = new Date('2026-08-02T10:00:00Z');
     const queue = createSyncQueue({
-      environment: {}, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
+      environment: {}, enableSourceProbes: true, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
       loadCatalog: async () => ({ shards: [{ id: 'oa-nl', countryCode: 'NL', intervalDays: 1 }] }),
       probeSource: vi.fn(async () => { throw new Error('fixture probe failure'); }),
       now: () => current, cooldownMs: 0, log: { log: () => {}, error: () => {} }
@@ -468,7 +564,7 @@ describe('exhausted source metadata probes', () => {
     facts.shards = { SG: facts.shards.SG };
     const probeSource = vi.fn(async () => ({ version: 'v2' }));
     const queue = createSyncQueue({
-      environment: {}, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
+      environment: {}, enableSourceProbes: true, coordinator: { currentJob: null }, stateDir: stateDir(), sources: stubSources(facts, {}),
       loadCatalog: async () => ({ shards: [{ id: 'sg-hdb', countryCode: 'SG' }] }), probeSource,
       now: () => new Date('2026-08-02T10:00:00Z'), cooldownMs: 0,
       log: { log: () => {}, error: () => {} }
@@ -531,6 +627,14 @@ describe('PostgreSQL queue state', () => {
     expect(await store.load()).toMatchObject({ countries: { NL: { shards: { 'oa-nl': {
       state: 'backoff', fingerprint: 'failure-fp', consecutiveFailures: 1
     } } } } });
+    await store.apply('NL', { action: 'checked', reason: 'source_partial_checkpoint', fingerprint: 'fp-nl',
+      checkpointToken: 'checkpoint-2', waitReason: 'quota', nextAttemptAt: '2026-09-01T00:00:00Z' },
+    '2026-08-02T00:01:00Z', 'oa-nl');
+    expect(await store.load()).toMatchObject({ countries: { NL: { shards: { 'oa-nl': {
+      state: 'checked', waitReason: 'quota', checkpointToken: 'checkpoint-2'
+    } } } } });
+    expect(await database.prepare(`SELECT wait_reason FROM sync_source_execution_state
+      WHERE country_code='NL' AND source_id='oa-nl'`).first('wait_reason')).toBe('quota');
     database.close();
   });
 
@@ -872,6 +976,141 @@ describe('queue snapshot', () => {
       sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now
     });
     expect(afterPolicyEdit.entries.find((entry) => entry.countryCode === 'NL').state).toBe('source_limited');
+  });
+
+  it('requeues a checked source when its opted-in extraction capability changes', async () => {
+    const facts = stubFacts();
+    const oldCatalog = [{
+      id: 'oa-us', countryCode: 'US', source: { adapter: 'overture', capabilityInputs: { maxRecords: 15_000 } }
+    }];
+    const oldFingerprint = countryFingerprint({
+      adapterRevisions: [['oa-us', sourceCapabilityRevision(oldCatalog[0])]],
+      sourceVersions: [['oa-us', 'v1']]
+    });
+    const queueState = { schemaVersion: 1, countries: { US: { shards: {
+      'oa-us': { state: 'checked', reason: 'source_version_checked', fingerprint: oldFingerprint,
+        nextAttemptAt: '2026-08-20T00:00:00Z' }
+    } } } };
+    const currentCatalog = [{
+      id: 'oa-us', countryCode: 'US', source: { adapter: 'overture', capabilityInputs: { maxRecords: 80_000 } }
+    }];
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: currentCatalog, queueState, now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'US')).toMatchObject({
+      state: 'queued', runnableShardId: 'oa-us'
+    });
+  });
+
+  it('resumes a due partial checkpoint without enabling periodic source probes', async () => {
+    const facts = stubFacts();
+    const shard = stubCatalogShards.find((candidate) => candidate.id === 'oa-us');
+    const fingerprint = countryFingerprint({
+      adapterRevisions: [['oa-us', sourceCapabilityRevision(shard)]],
+      sourceVersions: [['oa-us', 'v1']]
+    });
+    const queueState = { schemaVersion: 1, countries: { US: { shards: {
+      'oa-us': {
+        state: 'checked', reason: 'source_partial_checkpoint', fingerprint,
+        checkpointToken: 'checkpoint-1', nextAttemptAt: '2026-08-02T09:59:00Z'
+      }
+    } } } };
+
+    const due = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now,
+      enableSourceProbes: false
+    });
+    expect(due.entries.find((entry) => entry.countryCode === 'US')).toMatchObject({
+      state: 'queued', runnableShardId: 'oa-us'
+    });
+
+    queueState.countries.US.shards['oa-us'].reason = 'source_version_checked';
+    const terminal = await computeQueueSnapshot({
+      sources: stubSources(facts, {}), catalogShards: stubCatalogShards, queueState, now,
+      enableSourceProbes: false
+    });
+    expect(terminal.entries.find((entry) => entry.countryCode === 'US')).toMatchObject({
+      state: 'scheduled_wait', runnableShardId: null, reason: 'source_version_checked'
+    });
+  });
+
+  it('keeps credential-wait checkpoints visible and resumes them as soon as quota becomes available', async () => {
+    const facts = stubFacts();
+    const shard = stubCatalogShards.find((candidate) => candidate.id === 'korea-kapt-residential');
+    const fingerprint = countryFingerprint({
+      adapterRevisions: [[shard.id, sourceCapabilityRevision(shard)]],
+      sourceVersions: [[shard.id, 'v1']]
+    });
+    const queueState = { schemaVersion: 1, countries: { KR: { shards: {
+      [shard.id]: {
+        state: 'checked', reason: 'source_partial_checkpoint', waitReason: 'credential', fingerprint,
+        checkpointToken: 'checkpoint-1', nextAttemptAt: '2026-09-01T00:00:00Z'
+      }
+    } } } };
+    const waiting = await computeQueueSnapshot({
+      sources: stubSources(facts, { geoapify: {
+        provider: 'geoapify', known: true, available: false, waitState: 'quota_wait',
+        nextResetAt: '2026-09-01T00:00:00Z', revision: 'credential-v1'
+      } }),
+      catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(waiting.entries.find((entry) => entry.countryCode === 'KR')).toMatchObject({
+      state: 'quota_wait', runnableShardId: shard.id, nextAttemptAt: '2026-09-01T00:00:00Z'
+    });
+
+    const ready = await computeQueueSnapshot({
+      sources: stubSources(facts, { geoapify: {
+        provider: 'geoapify', known: true, available: true, nextResetAt: null, revision: 'credential-v1'
+      } }),
+      catalogShards: stubCatalogShards, queueState, now
+    });
+    expect(ready.entries.find((entry) => entry.countryCode === 'KR')).toMatchObject({
+      state: 'queued', runnableShardId: shard.id
+    });
+  });
+
+  it('recovers a legacy Google quota checkpoint after its stale monthly wake time', async () => {
+    const facts = stubFacts();
+    facts.policies.IN = { enabled: true, targetCount: 8_000, updatedAt: 'p-in' };
+    facts.counts.IN = 0;
+    facts.shards.IN = [{ shardId: 'google-residential-enrichment-in', status: 'ready', sourceVersion: 'v1' }];
+    facts.deficits.belowTarget.add('IN');
+    const shard = {
+      id: 'google-residential-enrichment-in', countryCode: 'IN', quotaProvider: 'google-geocoding',
+      source: { adapter: 'google-residential-enrichment' }
+    };
+    const fingerprint = countryFingerprint({
+      adapterRevisions: [[shard.id, sourceCapabilityRevision(shard)]],
+      sourceVersions: [[shard.id, 'v1']]
+    });
+    const queueState = { schemaVersion: 1, countries: { IN: { shards: {
+      [shard.id]: {
+        state: 'checked', reason: 'source_partial_checkpoint', fingerprint,
+        checkpointToken: 'google-checkpoint-1', nextAttemptAt: '2026-09-01T08:00:00Z'
+      }
+    } } } };
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {
+        'google-geocoding': { provider: 'google-geocoding', known: true, available: true, nextResetAt: null }
+      }),
+      catalogShards: [shard], queueState, now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'IN')).toMatchObject({
+      state: 'queued', runnableShardId: shard.id, quotaAvailable: true
+    });
+    const waiting = await computeQueueSnapshot({
+      sources: stubSources(facts, {
+        'google-geocoding': {
+          provider: 'google-geocoding', known: true, available: false,
+          waitState: 'quota_wait', nextResetAt: '2026-09-01T08:00:00Z'
+        }
+      }),
+      catalogShards: [shard], queueState, now
+    });
+    expect(waiting.entries.find((entry) => entry.countryCode === 'IN')).toMatchObject({
+      state: 'quota_wait', runnableShardId: shard.id, quotaAvailable: false,
+      nextAttemptAt: '2026-09-01T08:00:00Z'
+    });
   });
 
   it('does not migrate an old Netherlands BAG latch across an adapter capability revision', async () => {
@@ -1391,6 +1630,23 @@ describe('queue provider configuration', () => {
     await database.close();
   });
 
+  it('blocks an unconfigured Google Geocoding source with an explicit missing-key reason', async () => {
+    const database = openTestDatabase();
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    const sources = createQueueSources({
+      addressDatabase: database,
+      controlDatabase: database,
+      environment: {}
+    });
+    await expect(sources.quotaStatus('google-geocoding', new Date('2026-08-02T10:00:00Z'))).resolves.toMatchObject({
+      known: false,
+      available: false,
+      waitState: 'blocked',
+      reason: 'missing_api_key:google-geocoding'
+    });
+    await database.close();
+  });
+
   it('does not dispatch numbered environment credentials before the API imports them', async () => {
     const database = openTestDatabase();
     await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
@@ -1423,6 +1679,7 @@ describe('queue provider configuration', () => {
       waitForIdle: async () => {},
       getJob: async () => null
     };
+    const onIdle = vi.fn(async () => {});
     const queue = createSyncQueue({
       environment: {}, coordinator, stateDir: stateDir(),
       sources: stubSources(facts, {
@@ -1432,11 +1689,13 @@ describe('queue provider configuration', () => {
         }
       }),
       loadCatalog: async () => ({ shards: [stubCatalogShards[2]] }),
+      onIdle,
       cooldownMs: 0,
       log: { log: () => {}, error: () => {} }
     });
     await queue.tick();
     expect(coordinator.calls).toEqual([]);
+    expect(onIdle).toHaveBeenCalledOnce();
   });
 
   it('runs artifact cleanup after a recovered job becomes idle', async () => {

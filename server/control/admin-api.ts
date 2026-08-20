@@ -107,11 +107,17 @@ export const testServiceCredential = async (
     ? 'https://api.geoapify.com/v1/geocode/reverse?lat=51.50735&lon=-0.12776&limit=1&format=json'
     : provider === 'mappls'
       ? 'https://search.mappls.com/search/places/nearby/json?keywords=coffee&refLocation=28.631460,77.217423&region=IND&radius=500'
-      : 'https://maps.googleapis.com/maps/api/geocode/json?address=London');
-  url.searchParams.set(provider === 'geoapify' ? 'apiKey' : provider === 'mappls' ? 'access_token' : 'key', secret);
+      : 'https://geocode.googleapis.com/v4/geocode/location?location.latitude=37.4219999&location.longitude=-122.0840575&languageCode=en&regionCode=US&types=street_address&types=premise&types=subpremise&granularity=ROOFTOP&granularity=GEOMETRIC_CENTER');
+  if (provider !== 'google-geocoding') url.searchParams.set(provider === 'geoapify' ? 'apiKey' : 'access_token', secret);
   let response: Response;
   try {
-    response = await fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+    response = await fetcher(url, { headers: {
+      Accept: 'application/json',
+      ...(provider === 'google-geocoding' ? {
+        'X-Goog-Api-Key': secret,
+        'X-Goog-FieldMask': 'results.placeId,results.types,results.addressComponents,results.postalAddress,results.location,results.granularity'
+      } : {})
+    }, signal: AbortSignal.timeout(15000) });
   } catch {
     throw new ProviderRequestError('network', 'NETWORK_ERROR');
   }
@@ -119,10 +125,9 @@ export const testServiceCredential = async (
   if (response.status === 401 || response.status === 403) throw new ProviderRequestError('auth', `HTTP_${response.status}`);
   if (!response.ok) throw new ProviderRequestError('network', `HTTP_${response.status}`);
   if (provider === 'google-geocoding') {
-    const body = await response.json().catch(() => ({})) as { status?: string };
-    if (body.status === 'REQUEST_DENIED') throw new ProviderRequestError('auth', 'REQUEST_DENIED');
-    if (body.status === 'OVER_QUERY_LIMIT' || body.status === 'OVER_DAILY_LIMIT') throw new ProviderRequestError('quota', body.status);
-    if (body.status !== 'OK' && body.status !== 'ZERO_RESULTS') throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+    const body = await response.json().catch(() => ({})) as { results?: unknown[] };
+    if (!Array.isArray(body.results)) throw new ProviderRequestError('invalid', 'INVALID_RESPONSE');
+    return { success: true, resultCount: body.results.length };
   }
   if (provider === 'mappls') {
     const body = await response.json().catch(() => null) as { suggestedLocations?: unknown[] } | null;
@@ -778,6 +783,9 @@ export const createAdminApi = ({
   });
   app.post('/admin/api/providers/:id/reveal', async (context) => {
     return context.json({ data: await control.revealCredential(context.req.param('id')) });
+  });
+  app.post('/admin/api/providers/:id/reveal-fields', async (context) => {
+    return context.json({ data: await control.revealYoudaoCredential(context.req.param('id')) });
   });
   app.post('/admin/api/providers/:credential/test', async (context) => {
     const value = context.req.param('credential');

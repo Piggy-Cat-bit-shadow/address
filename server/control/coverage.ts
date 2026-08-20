@@ -77,9 +77,6 @@ export const refreshAddressCoverage = async (database: Database): Promise<void> 
       FROM address_pool
       WHERE address_pool.active=1 AND address_pool.property_type IN ('residential','apartment')
         AND address_pool.quality_score>=0.7 AND ${completenessClause('address_pool.')}
-        AND (address_pool.expires_at IS NULL OR CASE
-          WHEN address_pool.expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-          THEN address_pool.expires_at::timestamptz>CURRENT_TIMESTAMP ELSE FALSE END)
         AND address_pool.id IN (${evidencedAddressIds('address_existence')})
         AND address_pool.id IN (${evidencedAddressIds('residential_use')})`),
     database.prepare('DELETE FROM admin_coverage_stats')

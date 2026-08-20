@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS credential_broker_requests (
   id BIGSERIAL PRIMARY KEY,
   client_id TEXT NOT NULL CHECK (client_id IN ('production','test')),
   request_id TEXT NOT NULL,
-  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','mappls')),
+  provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','google-geocoding','mappls')),
   operation TEXT NOT NULL,
   parameters_hash TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending','completed','failed','unknown')),
@@ -231,7 +231,7 @@ CREATE TABLE IF NOT EXISTS credential_broker_requests (
 CREATE TABLE IF NOT EXISTS credential_broker_dispatches (
   id BIGSERIAL PRIMARY KEY,
   request_key BIGINT NOT NULL REFERENCES credential_broker_requests(id) ON DELETE CASCADE,
-  credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE RESTRICT,
+  credential_id TEXT REFERENCES provider_credentials(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK (status IN ('dispatched','success','rejected','unknown')),
   outcome TEXT,
   reserved_at TEXT NOT NULL,
@@ -270,7 +270,14 @@ ALTER TABLE provider_credentials ADD CONSTRAINT provider_credentials_provider_ch
 
 ALTER TABLE credential_broker_requests DROP CONSTRAINT IF EXISTS credential_broker_requests_provider_check;
 ALTER TABLE credential_broker_requests ADD CONSTRAINT credential_broker_requests_provider_check
-  CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','mappls'));
+  CHECK (provider IN ('amap','baidu','tencent','onemap','geoapify','google-geocoding','mappls'));
+
+ALTER TABLE credential_broker_dispatches
+  DROP CONSTRAINT IF EXISTS credential_broker_dispatches_credential_id_fkey;
+ALTER TABLE credential_broker_dispatches ALTER COLUMN credential_id DROP NOT NULL;
+ALTER TABLE credential_broker_dispatches
+  ADD CONSTRAINT credential_broker_dispatches_credential_id_fkey
+  FOREIGN KEY (credential_id) REFERENCES provider_credentials(id) ON DELETE SET NULL;
 
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS candidate_count INTEGER;
 ALTER TABLE sync_run_countries ADD COLUMN IF NOT EXISTS accepted_count INTEGER;
@@ -295,5 +302,5 @@ FROM provider_credentials
 ON CONFLICT (credential_id,service,period) DO NOTHING;
 
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 16) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 18) AS version
 ON CONFLICT (version) DO NOTHING;

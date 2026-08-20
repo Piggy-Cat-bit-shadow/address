@@ -241,4 +241,11 @@ describe('POST /api/v1/address-translation', () => {
     expect(limited?.status).toBe(429);
     expect(limited?.headers.get('Retry-After')).toBe('60');
   });
+
+  it('uses the API token limit without adding the anonymous translation bucket', async () => {
+    const responses = await Promise.all(Array.from({ length: 31 }, () => post({
+      addressId: 'pool-v2-missing', targetLocale: 'zh-CN'
+    }, { API_TOKEN_AUTHENTICATED: true })));
+    expect(responses.every((response) => response.status !== 429)).toBe(true);
+  });
 });

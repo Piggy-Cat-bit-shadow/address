@@ -21,7 +21,9 @@ describe('hierarchical address policies', () => {
     expect((await listCountryPolicies(database))).toHaveLength(Object.keys(ADDRESS_POLICY_DEFAULTS).length);
     expect(ADDRESS_POLICY_DEFAULTS).toMatchObject({
       HK: { target: 20_000, limits: [10_000, 2_000, 300, 0] },
-      JP: { target: 20_000 }, KR: { target: 20_000, limits: [3_000, 500, 100, 0] },
+      CA: { target: 80_000 }, FR: { target: 80_000, limits: [80_000, 1_500, 300, 0] },
+      ES: { target: 80_000, limits: [80_000, 70_000, 300, 0] },
+      JP: { target: 20_000 }, KR: { target: 30_000, limits: [5_000, 800, 150, 0] },
       TW: { target: 10_000 }, ZA: { target: 8_000 }
     });
     await expect(updateRuntimePolicy(database, { prepareConcurrency: 11, cpuConcurrency: 2 }))
@@ -56,12 +58,18 @@ describe('hierarchical address policies', () => {
       database.prepare(`INSERT INTO sync_country_policies(
         country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,updated_at
       ) VALUES ('KR',1,10000,1500,250,60,0,'2026-07-01T00:00:00Z')`),
+      database.prepare(`INSERT INTO sync_country_policies(
+        country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,updated_at
+      ) VALUES ('FR',1,80000,12000,1500,300,0,'2026-08-16T00:00:00Z')`),
+      database.prepare(`INSERT INTO sync_country_policies(
+        country_code,enabled,target_count,level1_limit,level2_limit,level3_limit,level4_limit,updated_at
+      ) VALUES ('ES',1,80000,12000,1500,300,0,'2026-08-16T00:00:00Z')`),
       database.prepare(`INSERT INTO sync_runtime_settings(id,prepare_concurrency,cpu_concurrency,updated_at)
         VALUES (1,10,3,'2026-07-01T00:00:00Z')`)
     ]);
     await ensureAddressPolicies(database, '2026-07-29T00:00:00Z');
     expect(await database.prepare('SELECT target_count FROM sync_country_policies WHERE country_code=?')
-      .bind('CA').first('target_count')).toBe(15_000);
+      .bind('CA').first('target_count')).toBe(80_000);
     expect(await database.prepare('SELECT target_count FROM sync_country_policies WHERE country_code=?')
       .bind('MX').first('target_count')).toBe(12_345);
     expect(await database.prepare('SELECT target_count FROM sync_country_policies WHERE country_code=?')
@@ -76,7 +84,13 @@ describe('hierarchical address policies', () => {
       .toMatchObject({ target_count: 50_000, level1_limit: 5_000, level2_limit: 700, level3_limit: 120, level1_min: 1_000 });
     expect(await database.prepare(`SELECT target_count,level1_limit,level2_limit,level3_limit
       FROM sync_country_policies WHERE country_code=?`).bind('KR').first())
-      .toMatchObject({ target_count: 20_000, level1_limit: 3_000, level2_limit: 500, level3_limit: 100 });
+      .toMatchObject({ target_count: 30_000, level1_limit: 5_000, level2_limit: 800, level3_limit: 150 });
+    expect(await database.prepare(`SELECT level1_limit,level2_limit,level3_limit
+      FROM sync_country_policies WHERE country_code=?`).bind('FR').first())
+      .toMatchObject({ level1_limit: 80_000, level2_limit: 1_500, level3_limit: 300 });
+    expect(await database.prepare(`SELECT level1_limit,level2_limit,level3_limit
+      FROM sync_country_policies WHERE country_code=?`).bind('ES').first())
+      .toMatchObject({ level1_limit: 80_000, level2_limit: 70_000, level3_limit: 300 });
     expect(await database.prepare(`SELECT level1_limit,level2_limit,level3_limit,level4_limit
       FROM sync_country_policies WHERE country_code=?`).bind('SG').first())
       .toMatchObject({ level1_limit: 12_000, level2_limit: 1_000, level3_limit: 100, level4_limit: 0 });

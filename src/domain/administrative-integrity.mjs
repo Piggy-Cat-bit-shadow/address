@@ -1,3 +1,5 @@
+import { validateHongKongAdministrativeHierarchy } from './hk-administrative-divisions.mjs';
+
 const usSubdivisions = [
   ['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'],
   ['CA', 'California'], ['CO', 'Colorado'], ['CT', 'Connecticut'], ['DE', 'Delaware'],
@@ -34,6 +36,7 @@ for (const alias of ['Washington DC', 'Washington D.C.', 'Washington, D.C.']) {
 for (const alias of ['US Virgin Islands', 'Virgin Islands']) subdivisionCodes.set(normalize(alias), 'VI');
 
 const subdivisionCode = (value) => subdivisionCodes.get(normalize(value));
+export const canonicalUsSubdivisionCode = (value) => subdivisionCode(value) || '';
 
 export const normalizeAddressComponents = (countryCode, components) => {
   if (String(countryCode || '').toUpperCase() !== 'US' || !/^112\d{2}$/u.test(String(components?.postcode || ''))) {
@@ -44,8 +47,10 @@ export const normalizeAddressComponents = (countryCode, components) => {
   return components.postalLocality === postalLocality ? components : { ...components, postalLocality };
 };
 
-export const validateAdministrativeHierarchy = ({ countryCode, admin1, admin1Code } = {}) => {
-  if (String(countryCode || '').toUpperCase() !== 'US') return { valid: true };
+export const validateAdministrativeHierarchy = ({ countryCode, admin1, admin1Code, locality } = {}) => {
+  const country = String(countryCode || '').toUpperCase();
+  if (country === 'HK') return validateHongKongAdministrativeHierarchy(admin1, locality);
+  if (country !== 'US') return { valid: true };
   const nameCode = subdivisionCode(admin1);
   const explicitCode = subdivisionCode(admin1Code);
   if (admin1 && !nameCode) return { valid: false, reason: 'invalid-us-admin1' };

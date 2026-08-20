@@ -73,9 +73,6 @@ export const refreshResidentialCoverage = async (database, countryCode, now = ne
       WHERE address.country_code=? AND address.active=1
         AND address.property_type IN ('residential','apartment') AND address.quality_score>=0.7
         AND ${addressQualitySqlClause('address.')}
-        AND (address.expires_at IS NULL OR CASE
-          WHEN address.expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-          THEN address.expires_at::timestamptz>CURRENT_TIMESTAMP ELSE FALSE END)
         AND ${evidenceClause('address_existence')} AND ${evidenceClause('residential_use')}
       GROUP BY address.admin1,address.admin1_code,COALESCE(NULLIF(address.postal_locality,''),address.locality)`)
       .bind(country).all()

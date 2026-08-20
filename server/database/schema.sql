@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS address_datasets (
   accepted_count INTEGER NOT NULL DEFAULT 0 CHECK (accepted_count >= 0),
   rejected_count INTEGER NOT NULL DEFAULT 0 CHECK (rejected_count >= 0),
   active_count INTEGER NOT NULL DEFAULT 0 CHECK (active_count >= 0),
+  source_complete INTEGER NOT NULL DEFAULT 1 CHECK (source_complete IN (0, 1)),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'retired', 'failed')),
   UNIQUE (source_id, country_code, version, input_checksum)
 );
@@ -83,6 +84,11 @@ CREATE TABLE IF NOT EXISTS address_pool (
   expires_at TEXT,
   retired_at TEXT,
   CHECK (active = 1 OR retired_at IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS address_pool_revisions (
+  kind TEXT PRIMARY KEY,
+  version TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS address_pool_evidence (
@@ -249,6 +255,7 @@ CREATE TABLE IF NOT EXISTS sync_source_execution_state (
   failure_phase TEXT,
   failure_signature TEXT,
   checkpoint_token TEXT,
+  wait_reason TEXT CHECK (wait_reason IS NULL OR wait_reason IN ('quota','credential','network')),
   probe_failures INTEGER NOT NULL DEFAULT 0 CHECK (probe_failures >= 0),
   probe_version TEXT,
   next_attempt_at TEXT,
@@ -259,6 +266,7 @@ CREATE TABLE IF NOT EXISTS sync_source_execution_state (
 );
 
 ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS checkpoint_token TEXT;
+ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS wait_reason TEXT;
 ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS probe_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS probe_version TEXT;
 
@@ -428,10 +436,39 @@ CREATE TABLE IF NOT EXISTS sync_runtime_settings (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS publication_validation_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  revision TEXT NOT NULL,
+  country_code TEXT NOT NULL DEFAULT '',
+  last_id TEXT NOT NULL DEFAULT '',
+  completed_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_address_pool_country_random ON address_pool(country_code, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_property_random ON address_pool(country_code, property_type, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_residential_random ON address_pool(country_code, active, random_key, id)
   WHERE property_type IN ('residential','apartment');
+CREATE INDEX IF NOT EXISTS idx_address_pool_zh_han_id ON address_pool(country_code, id)
+  WHERE active=1 AND (
+    (component_variants_json::jsonb -> 'zh-CN' ->> 'street') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'locality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'postalLocality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'district') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'dependentLocality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'admin1') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'buildingName') ~ '[一-龥]'
+  );
+CREATE INDEX IF NOT EXISTS idx_address_pool_zh_han_random ON address_pool(country_code, random_key, id)
+  WHERE active=1 AND (
+    (component_variants_json::jsonb -> 'zh-CN' ->> 'street') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'locality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'postalLocality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'district') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'dependentLocality') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'admin1') ~ '[一-龥]'
+    OR (component_variants_json::jsonb -> 'zh-CN' ->> 'buildingName') ~ '[一-龥]'
+  );
 CREATE INDEX IF NOT EXISTS idx_address_pool_admin1_random ON address_pool(country_code, admin1_key, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_locality_random ON address_pool(country_code, locality_key, active, random_key, id);
 CREATE INDEX IF NOT EXISTS idx_address_pool_postal_locality_random ON address_pool(country_code, postal_locality_key, active, random_key, id);
@@ -463,6 +500,8 @@ CREATE INDEX IF NOT EXISTS idx_residential_country_region_city ON residential_co
 CREATE INDEX IF NOT EXISTS idx_residential_region_id ON residential_coverage(country_code, region_id);
 CREATE INDEX IF NOT EXISTS idx_residential_city_id ON residential_coverage(country_code, city_id);
 CREATE INDEX IF NOT EXISTS idx_sync_country_due ON sync_country_state(status, next_sync_at, country_code);
+ALTER TABLE address_datasets ADD COLUMN IF NOT EXISTS source_complete INTEGER NOT NULL DEFAULT 1
+  CHECK (source_complete IN (0, 1));
 CREATE INDEX IF NOT EXISTS idx_sync_shard_due ON sync_shard_state(status, next_sync_at, country_code, shard_id);
 CREATE INDEX IF NOT EXISTS idx_sync_source_execution_due ON sync_source_execution_state(state,next_attempt_at);
 ALTER TABLE sync_source_execution_state ADD COLUMN IF NOT EXISTS adapter TEXT;
@@ -548,5 +587,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 13) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 17) AS version
 ON CONFLICT (version) DO NOTHING;

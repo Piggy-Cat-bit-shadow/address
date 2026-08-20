@@ -13,6 +13,8 @@ import {
   validateAdministrativeHierarchy
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
+import { requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
+import { storedVariantLooksLocalized } from '../../../src/domain/address-display';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
 
@@ -80,8 +82,16 @@ const normalize = (value: string | undefined): string => (value || '')
   .trim();
 
 const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
-const toTraditionalHan = createTraditionalizer({ from: 'cn', to: 'tw' });
+const toTraditionalHongKong = createTraditionalizer({ from: 'cn', to: 'hk' });
+const toTraditionalTaiwan = createTraditionalizer({ from: 'cn', to: 'tw' });
 const hanScript = /\p{Script=Han}/u;
+const latinScript = /\p{Script=Latin}/u;
+const nativeSemanticFields = new Set(['street', 'locality', 'postalLocality', 'district', 'dependentLocality', 'admin1', 'buildingName']);
+const hasHanSemanticContent = (components: AddressComponents): boolean => [...nativeSemanticFields]
+  .some((field) => hanScript.test(String(components[field as keyof AddressComponents] || '')));
+export const chineseVariantHasHanClause = (prefix = ''): string => `(${[...nativeSemanticFields]
+  .map((field) => `(${prefix}component_variants_json::jsonb -> 'zh-CN' ->> '${field}') ~ '[一-龥]'`)
+  .join(' OR ')})`;
 
 const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區', '都', '道', '府', '県'];
 const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
@@ -94,7 +104,12 @@ const aliases = (values: Array<string | undefined>): string[] => [...new Set(val
   }
   // Han values match across scripts (simplified 台中 <-> traditional 臺中) and
   // across admin-suffix presence (pool stores 臺中市, catalog stores 台中).
-  const scriptVariants = [...new Set([normalized, toSimplifiedHan(normalized), toTraditionalHan(normalized)])];
+  const scriptVariants = [...new Set([
+    normalized,
+    toSimplifiedHan(normalized),
+    toTraditionalHongKong(normalized),
+    toTraditionalTaiwan(normalized)
+  ])];
   return scriptVariants.flatMap((variant) => {
     const stem = variant.replace(adminSuffixPattern, '');
     if (!stem) return [variant];
@@ -153,14 +168,18 @@ export const repairHongKongNativeVariants = (
   country: CountryCode,
   variants: Record<'native' | 'en' | 'zh-CN', AddressComponents>
 ): Record<'native' | 'en' | 'zh-CN', AddressComponents> => {
-  if (country !== 'HK') return variants;
+  if (country !== 'HK' && country !== 'TW') return variants;
   const nativeText = Object.values(variants.native).join(' ');
-  const simplifiedText = Object.values(variants['zh-CN']).join(' ');
-  if (hanScript.test(nativeText) || !hanScript.test(simplifiedText)) return variants;
-  const native = Object.fromEntries(Object.entries(variants['zh-CN']).map(([field, value]) => [
+  const source = hanScript.test(nativeText) ? variants.native : variants['zh-CN'];
+  if (!hanScript.test(Object.values(source).join(' '))) return variants;
+  const traditionalize = country === 'HK' ? toTraditionalHongKong : toTraditionalTaiwan;
+  const native = Object.fromEntries(Object.entries(source).map(([field, value]) => [
     field,
-    typeof value === 'string' ? toTraditionalHan(value) : value
+    typeof value === 'string' && nativeSemanticFields.has(field)
+      ? traditionalize(value).replace(/[\p{Script=Latin}][\p{Script=Latin}\p{N}' .&/-]*/gu, ' ').replace(/\s+/gu, ' ').trim()
+      : value
   ])) as unknown as AddressComponents;
+  if (latinScript.test([...nativeSemanticFields].map((field) => native[field as keyof AddressComponents] || '').join(' '))) return variants;
   return { ...variants, native };
 };
 
@@ -174,32 +193,54 @@ const storedAddress = (components: AddressComponents, country: CountryCode): str
   country === 'CN' || country === 'HK' ? '' : components.postcode
 ].filter(Boolean).join(', ');
 
+const nativeStoredAddress = (components: AddressComponents, country: CountryCode): string => {
+  if (country === 'HK' || country === 'TW') return [
+    components.postcode,
+    components.admin1,
+    components.postalLocality || components.locality,
+    components.district || components.dependentLocality,
+    [components.houseNumber, components.street].filter(Boolean).join(' '),
+    components.buildingName,
+    components.unit
+  ].filter(Boolean).join(', ');
+  return storedAddress(components, country);
+};
+
 const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undefined => {
   if (!row.source_id || !row.source_name || !row.source_url) return undefined;
   if (!validateAdministrativeHierarchy({
-    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code
+    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code, locality: row.locality
   }).valid) return undefined;
   const fallback = fallbackComponents(row);
   const fallbackAddress = [row.house_number, row.street, row.postal_locality || row.locality, row.admin1_code || row.admin1, row.postcode]
     .filter(Boolean).join(', ');
   const parsedComponents = parseVariants(row.component_variants_json, fallback);
   for (const language of ['native', 'en', 'zh-CN'] as const) {
-    parsedComponents[language] = { ...fallback, ...parsedComponents[language] };
+    const stored = parsedComponents[language];
+    parsedComponents[language] = { ...fallback, ...stored };
+    if (!Object.hasOwn(stored, 'dependentLocality')) {
+      if (stored.district) parsedComponents[language].dependentLocality = stored.district;
+      else delete parsedComponents[language].dependentLocality;
+    }
   }
   const componentVariants = repairHongKongNativeVariants(row.country_code, {
     native: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.native)),
     en: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.en)),
     'zh-CN': normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents['zh-CN']))
   });
+  if (!storedVariantLooksLocalized(componentVariants.en, 'en')
+    || !storedVariantLooksLocalized(componentVariants['zh-CN'], 'zh-CN')
+    || !hasHanSemanticContent(componentVariants['zh-CN'])) return undefined;
+  if (!validateAddressContract(row.country_code, componentVariants.native, { strict: true, requireAdminCode: false }).valid) return undefined;
   if (!validateAddressQuality({
     countryCode: row.country_code, components: componentVariants.native,
     latitude: row.latitude, longitude: row.longitude
   }).valid) return undefined;
   const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
-  const addressVariants = row.country_code === 'HK' && hanScript.test(Object.values(componentVariants.native).join(' '))
+  const addressVariants = ['HK', 'TW'].includes(row.country_code) && hanScript.test(Object.values(componentVariants.native).join(' '))
     ? {
         ...parsedAddresses,
-        native: storedAddress(componentVariants.native, row.country_code)
+        native: nativeStoredAddress(componentVariants.native, row.country_code)
       }
     : /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
     ? {
@@ -281,11 +322,17 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     sourceVersion: `${row.dataset_id || row.source_id}:${row.dataset_version || row.generation}`,
     sourceUpdatedAt,
     verifiedAt: now.toISOString(),
-    expiresAt: row.expires_at || new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000).toISOString(),
+    expiresAt: '9999-12-31T23:59:59.999Z',
     evidence,
     exclusionFlags: row.quality_score < 0.7 ? ['low_quality_score'] : []
   };
 };
+
+export const storedAddressPoolV2RowIsPublishable = (
+  row: AddressPoolV2Row,
+  now = new Date()
+): boolean => Boolean(rowToAddress(row, now))
+  && (!row.expires_at || new Date(row.expires_at).getTime() > now.getTime());
 
 const missingSchema = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
@@ -469,6 +516,11 @@ export const enrichPickedAddress = async (db: Database, address: VerifiedAddress
   };
 };
 
+const enrichPublishableAddress = async (db: Database, address: VerifiedAddress): Promise<VerifiedAddress | undefined> => {
+  const enriched = await enrichPickedAddress(db, address);
+  return requiresAdminCode(enriched.countryCode) && !enriched.components.admin1Code ? undefined : enriched;
+};
+
 const geographicDistanceKm = (
   left: { latitude: number; longitude: number },
   right: { latitude: number; longitude: number }
@@ -502,10 +554,9 @@ export const pickNearestAddressPoolV2Address = async (
     'active = 1',
     'quality_score >= 0.7',
     completenessClause(),
-    `(expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-      THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END)`
+    chineseVariantHasHanClause()
   ];
-  const baseBindings: unknown[] = [country, now.toISOString()];
+  const baseBindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`, 'residential_evidence = 1');
   const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
   const radii = [...new Set([Math.min(25, maximumDistanceKm), maximumDistanceKm])].filter((radius) => radius > 0);
@@ -541,7 +592,8 @@ export const pickNearestAddressPoolV2Address = async (
       }).filter((candidate) => candidate.distanceKm <= radiusKm);
       if (candidates.length) {
         const picked = candidates[hashSeed(`${country}:${seed}:ip-nearest`) % Math.min(8, candidates.length)];
-        return { ...picked, address: await enrichPickedAddress(db, picked.address) };
+        const address = await enrichPublishableAddress(db, picked.address);
+        if (address) return { ...picked, address };
       }
     }
     return undefined;
@@ -562,7 +614,7 @@ export const loadAddressPoolV2AddressById = async (
       .bind(addressId.slice('pool-v2-'.length).split(':')[0]).first<AddressPoolV2Row>();
     if (!row) return undefined;
     const address = rowToAddress(row, now);
-    return address ? enrichPickedAddress(db, address) : undefined;
+    return address ? enrichPublishableAddress(db, address) : undefined;
   } catch (error) {
     if (missingSchema(error)) return undefined;
     throw error;
@@ -579,8 +631,8 @@ export const pickAddressPoolV2Address = async (
   now = new Date()
 ): Promise<VerifiedAddress | undefined> => {
   if (!db) return undefined;
-  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), `(expires_at IS NULL OR CASE WHEN expires_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' THEN expires_at::timestamptz > ?::timestamptz ELSE FALSE END)`];
-  const bindings: unknown[] = [country, now.toISOString()];
+  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), chineseVariantHasHanClause()];
+  const bindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`);
 
   const regionClause = aliasClause(
@@ -620,7 +672,10 @@ export const pickAddressPoolV2Address = async (
       for (const { id } of identifiers) {
         const row = byId.get(id);
         const address = row ? rowToAddress(row, now) : undefined;
-        if (address) return enrichPickedAddress(db, address);
+        if (address) {
+          const enriched = await enrichPublishableAddress(db, address);
+          if (enriched) return enriched;
+        }
       }
       return undefined;
     };

@@ -29,6 +29,7 @@ x-app: &app
     ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
     TRUST_PROXY: ${TRUST_PROXY:-false}
     SYNC_SCHEDULER_ENABLED: "true"
+    TRANSLATION_BACKFILL_ENABLED: ${TRANSLATION_BACKFILL_ENABLED:-true}
   secrets: &app-secrets
     - postgres_password
     - config_master_key
@@ -85,7 +86,7 @@ services:
       <<: *app-environment
       API_HOST: 0.0.0.0
       API_PORT: 8787
-      SYNC_CONTROL_URL: http://sync:8791
+      SYNC_CONTROL_URL: http://address-sync-control:8791
     command: [node, node_modules/tsx/dist/cli.mjs, server/api/server.ts]
     ports:
       - ${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8787}:8787
@@ -111,7 +112,12 @@ services:
       <<: *app-environment
       SYNC_HOST: 0.0.0.0
       SYNC_PORT: 8791
-    command: [node, server/sync/index.mjs]
+    command: [node, node_modules/tsx/dist/cli.mjs, server/sync/index.mjs]
+    networks:
+      internal:
+        aliases:
+          - address-sync-control
+      egress: {}
     depends_on:
       postgres:
         condition: service_healthy

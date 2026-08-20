@@ -189,7 +189,7 @@ const server = serve({
           }));
         }
       }
-      return securityHeaders(await app.fetch(request, { ...await requestEnvironment(), ...node }));
+      return securityHeaders(await app.fetch(request, { ...await requestEnvironment(), ...node, API_TOKEN_AUTHENTICATED: true }));
     }
     const localizedPublicPage = /^\/(?:en|zh-CN|zh-TW|ja|ko|de|fr|es|pt)\/(?:admin|access)(?:\/|$)/u.test(url.pathname);
     const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access') || localizedPublicPage

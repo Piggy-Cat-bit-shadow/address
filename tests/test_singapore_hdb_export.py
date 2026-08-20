@@ -49,6 +49,28 @@ class SingaporeHdbExportTest(unittest.TestCase):
             self.assertEqual(raised.exception.next_available_at, "2026-08-11T00:00:00Z")
             self.assertFalse(cache_file.exists())
 
+    def test_short_rate_limit_is_retried_without_marking_daily_quota_exhausted(self):
+        pathlib.Path(".data-cache").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
+            cache_file = pathlib.Path(directory) / "onemap.jsonl"
+            rate_body = io.BytesIO(json.dumps({
+                "code": "SOURCE_RATE_LIMITED", "nextAvailableAt": None
+            }).encode("utf-8"))
+            rate_error = urllib.error.HTTPError("http://127.0.0.1/bridge", 429, "limited", {}, rate_body)
+            success = io.BytesIO(json.dumps({"results": [{
+                "BLK_NO": "1", "ROAD_NAME": "TEST ROAD", "POSTAL": "123456",
+                "LONGITUDE": "103.8", "LATITUDE": "1.3"
+            }]}).encode("utf-8"))
+            with patch.object(MODULE.urllib.request, "urlopen", side_effect=[rate_error, success]) as request, \
+                    patch.object(MODULE.time, "sleep") as sleep:
+                result = MODULE.onemap_result(
+                    {"blk_no": "1", "street": "TEST ROAD"},
+                    "http://127.0.0.1/bridge", {}, cache_file, 0
+                )
+            self.assertEqual(result["POSTAL_COD"], "123456")
+            self.assertEqual(request.call_count, 2)
+            sleep.assert_called()
+
     def test_records_preserve_official_results_when_onemap_is_partial(self):
         properties = {
             ("1", "A"): [{"blk_no": "1", "street": "ALPHA ROAD", "bldg_contract_town": "AMK"}],
@@ -71,6 +93,42 @@ class SingaporeHdbExportTest(unittest.TestCase):
         self.assertEqual(batch.candidate_count, 2)
         self.assertEqual(batch.resolved_count, 1)
         self.assertEqual([value["postcode"] for value in batch], ["460002"])
+
+    def test_request_budget_checkpoints_and_resumes_from_persistent_cache(self):
+        properties = {
+            ("1", "A"): [{"blk_no": "1", "street": "ALPHA ROAD", "bldg_contract_town": "AMK"}],
+            ("2", "B"): [{"blk_no": "2", "street": "BETA ROAD", "bldg_contract_town": "BD"}],
+        }
+        responses = [io.BytesIO(json.dumps({"results": [{
+            "BLK_NO": str(number), "ROAD_NAME": road, "POSTAL": postcode,
+            "LONGITUDE": "103.8", "LATITUDE": "1.3"
+        }]}).encode("utf-8")) for number, road, postcode in [
+            (1, "ALPHA ROAD", "560001"), (2, "BETA ROAD", "460002")
+        ]]
+        pathlib.Path(".data-cache").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=".data-cache") as directory:
+            cache_file = pathlib.Path(directory) / "onemap.jsonl"
+            with patch.object(MODULE, "load_properties", return_value=properties), \
+                    patch.object(MODULE, "load_buildings", return_value={}), \
+                    patch.object(MODULE.urllib.request, "urlopen", side_effect=responses) as request:
+                first = MODULE.records(
+                    "properties.csv", "buildings.json", cache_file,
+                    "http://127.0.0.1/bridge", 0, max_onemap_requests=1
+                )
+                second = MODULE.records(
+                    "properties.csv", "buildings.json", cache_file,
+                    "http://127.0.0.1/bridge", 0, max_onemap_requests=1
+                )
+        self.assertFalse(first.source_complete)
+        self.assertEqual(first.temporary_failure, "request_budget")
+        self.assertTrue(first.checkpoint_token)
+        self.assertEqual(first.resolved_count, 1)
+        self.assertEqual([value["postcode"] for value in first], ["560001"])
+        self.assertTrue(second.source_complete)
+        self.assertIsNone(second.checkpoint_token)
+        self.assertEqual(second.resolved_count, 2)
+        self.assertEqual([value["postcode"] for value in second], ["560001", "460002"])
+        self.assertEqual(request.call_count, 2)
 
     def test_cli_writes_partial_checkpoint_state_atomically(self):
         value = {

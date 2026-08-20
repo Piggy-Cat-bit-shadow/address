@@ -3,8 +3,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent
 } from 'react';
 import {
-  Activity, ArrowDown, ArrowUp, Braces, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Database, Globe2, History, House, KeyRound, Languages,
-  LayoutDashboard, ListOrdered, LogOut, MapPin, Maximize2, RefreshCw, RotateCcw, Save, Search, ShieldBan,
+  Activity, ArrowDown, ArrowUp, Braces, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Database, FlaskConical, Globe2, History, House, KeyRound, Languages,
+  LayoutDashboard, ListOrdered, LogOut, MapPin, Maximize2, Pencil, Plus, Power, RefreshCw, RotateCcw, Save, Search, ShieldBan,
   ShieldCheck, Target, Trash2, TrendingUp, X
 } from 'lucide-react';
 import { generatedAdminErrors } from '../domain/admin-errors.generated';
@@ -25,7 +25,9 @@ export type AdminLocale = Locale;
 interface SyncAdminProps { locale: Locale }
 interface Credential {
   id: string; provider: string; label: string; mask: string; enabled: boolean; status: string; expiresAt?: string;
+  fieldMasks?: { appKey: string; appSecret: string };
   quotaService: string; quotaPeriod: 'day' | 'month'; quotaUsed: number; quotaLimit: number; quotaRemaining: number;
+  officialQuotaLimit?: number; quotaBaseline?: number;
   quotaResetAt: string; quotaUsageSource: 'provider' | 'local'; providerReportedAt?: string | null; lastSuccessAt?: string;
   quotaWindows?: Array<{ service: string; period: 'day' | 'month'; used: number; limit: number; remaining: number; resetAt: string; usageSource: 'provider' | 'local'; exhausted: boolean }>;
 }
@@ -43,8 +45,7 @@ interface DashboardData { nodes: CoverageNode[]; countries: CoverageNode[]; metr
 interface AmapBrowserStatus { configured: boolean; enabled: boolean; label: string; mask: string; securityMask: string; status: string; lastUsedAt: string | null; updatedAt: string | null }
 interface MapSettings { google: { china: boolean; international: boolean }; amap: { china: boolean; international: boolean }; amapBrowser: AmapBrowserStatus }
 interface TranslationSettings { googleTranslationEnabled: boolean }
-interface YoudaoStatus { configured: boolean; appKeyMask: string }
-interface ProviderViewData { credentials: Credential[]; maps: MapSettings; translation: TranslationSettings; youdao: YoudaoStatus }
+interface ProviderViewData { credentials: Credential[]; maps: MapSettings; translation: TranslationSettings }
 interface ApiTokenView { id: string; name: string; scopes: string[]; rate_limit_per_minute: number; expires_at: string | null; revoked_at: string | null; token_mask: string; token_revealable: boolean }
 type Mutate = <T = unknown>(path: string, method: string, body?: unknown, success?: string) => Promise<T | undefined>;
 type Reveal = (path: string) => Promise<Record<string, string>>;
@@ -119,17 +120,17 @@ interface SyncQueueData {
 const baseAdminText = {
   'zh-CN': {
     labels: { dashboard: '仪表盘', blacklist: '地址黑名单', providers: '地图密钥', china: '中国同步', access: '访问与安全', tokens: '接口令牌' },
-    providers: { amap: '高德地图的 Web服务', baidu: '百度的 Web服务API', tencent: '腾讯地图的 Web服务', onemap: 'OneMap', youdao: '有道智云翻译', geoapify: 'Geoapify 地理编码', 'google-geocoding': '谷歌地理编码', mappls: 'Mappls 搜索 API' },
+    providers: { amap: '高德地图', baidu: '百度地图', tencent: '腾讯地图', onemap: 'OneMap', youdao: '有道翻译', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' },
     brandName: '地址', brand: '管理系统', loginTitle: '管理员登录', password: '管理员密码', login: '登录', loggingIn: '登录中…', backGenerator: '返回生成器',
     bootstrap: '请先在服务器配置管理员初始密码并重启服务。', loading: '正在加载…', retry: '重新加载', logout: '退出登录', language: '英文',
     dashboardTitle: '地址数据总览', dashboardDescription: '全面掌握全球真实地址数据的分布与增长情况', totalResidential: '真实住宅总量', countriesCovered: '国家数', regionsCovered: '行政区覆盖率', qualifiedRegions: '今日更新', countryRanking: 'Top 国家排行', coverageDetails: '行政区覆盖明细', allCountries: '全部国家', region: '区域', level: '行政层级', residential: '真实住宅', children: '下级区域', administrativeCoverage: '行政区覆盖', qualifiedCoverage: '至少5条', updated: '更新数据', noSubregions: '暂无下级数据', noAddressData: '暂无地址数据', emptyDashboard: '当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。',
     globalDistribution: '全球地址分布', rankByResidential: '按真实住宅总量', viewAllCountries: '全部国家', countryDataList: '国家数据列表', countryCountSuffix: '个国家', searchCountry: '搜索国家', continentFilter: '大洲筛选', allContinents: '全部大洲', asia: '亚洲', europe: '欧洲', northAmerica: '北美洲', southAmerica: '南美洲', africa: '非洲', oceania: '大洋洲', sortBy: '排序方式', sortResidentialDesc: '地址数量：从高到低', sortResidentialAsc: '地址数量：从低到高', sortCountryName: '国家名称', sortCoverageDesc: '行政区覆盖率', exportData: '导出数据', filter: '筛选', allData: '全部数据', coveredOnly: '仅有数据', uncoveredOnly: '仅无数据', country: '国家', coverageColumns: '行政区覆盖', operation: '操作', previous: '上一页', next: '下一页', apiRequestsToday: 'API 请求（今日）', databaseSize: '数据库大小', lastDataUpdate: '最后数据更新', systemStatus: '系统状态', runningNormally: '运行正常', administratorRole: '超级管理员', searchPlaceholder: '搜索国家、城市或邮编…', simplifiedChinese: '简体中文',
     blacklistTitle: '地址黑名单', blacklistDescription: '内置机构规则固定启用；可在下方追加全局排除关键词。', builtinRules: '内置排除规则', customKeywords: '自定义关键词', customKeywordHint: '一行一个关键词，匹配小区名、建筑名、街道或完整地址；最多 500 条。', blacklistSaved: '地址黑名单已保存', saveBlacklist: '保存黑名单', noCustomKeywords: '当前没有自定义关键词',
     accessTitle: '访问策略', accessDescription: '设置前端访问方式和管理员密码。', frontendPasswordEnabled: '启用前端访问密码', newFrontendPassword: '新前端密码', confirmFrontendPassword: '重复前端密码', newAdminPassword: '新管理员密码', confirmAdminPassword: '重复管理员密码', passwordSection: '密码设置', policySection: '访问控制', keepUnchanged: '留空则保持不变', saveSettings: '保存设置', settingsSaved: '访问设置已保存', passwordMismatch: '两次输入的密码不一致。', changeFrontendPassword: '修改前端密码', changeAdminPassword: '修改管理员密码', passwordDialogHint: '请输入新密码并再次确认；保存后输入内容会被清空。', passwordNew: '新密码', passwordConfirm: '重复确认', showPassword: '显示', hidePassword: '隐藏', savePassword: '保存密码',
-    providersTitle: '地图密钥', providersDescription: '管理地图 API 凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: 'API 名称', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaProvider: 'API 实时', quotaLocal: '本地统计', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功',
+    providersTitle: '地图密钥', providersDescription: '管理地图 API 凭据；密钥默认隐藏，仅按需显示。', addKey: '添加密钥', addMapKey: '添加地图密钥', provider: 'API 名称', optionalName: '名称（可选）', autoName: '留空自动命名', key: '密钥', cancel: '取消', save: '保存', keySaved: '地图密钥已保存', stop: '停用', enable: '启用', test: '测试', testSuccess: '密钥测试成功', remove: '删除', noKeys: '尚未添加地图密钥', quotaUsage: '额度', quotaDay: '每日', quotaMonth: '每月', quotaReset: '重置', quotaRemaining: '剩余', lastSuccess: '最近成功', quotaBaseline: '本月已有用量', quotaBaselineHint: '填写接入本项目之前在同一 Google 结算账户产生的 Geocoding 用量。', googleOfficialQuota: 'Google 官方免费用量：每个结算账户每月 10,000 次；项目自动同步默认最多使用 9,000 次。', googleSyncBudget: '自动同步月度预算',
     youdaoAppKey: '应用 ID（AppKey）', youdaoAppSecret: '应用密钥（AppSecret）', youdaoSaved: '有道翻译密钥已保存', youdaoConfigured: '已配置', youdaoNotConfigured: '未配置', translationTitle: '在线翻译', googleTranslationToggle: '启用谷歌翻译', translationSaved: '在线翻译设置已保存', geoapifyWorkerHint: '此处保存的 Geoapify Key 会用于韩国住宅地址同步和 API 查询，并按额度与冷却状态自动轮换。',
     mapDisplayTitle: '前端地图显示', mapChina: '中国地址', mapInternational: '国外地址', googleMap: '谷歌地图', amapMap: '高德地图', mapDisplaySaved: '地图显示设置已保存', mapDisplayHint: '关闭的平台不会在前端加载脚本、框架或发起地图请求。',
-    amapBrowserTitle: '高德地图的 Web端密钥', configureAmapBrowser: '配置密钥', editAmapBrowser: '修改密钥', amapBrowserDialog: '配置高德地图的 Web端密钥', amapBrowserLabel: '密钥名称', amapBrowserPlaceholder: '高德地图 Web端', amapApiKey: 'Web端 API Key', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德地图的 Web端密钥已保存', amapBrowserRemoved: '高德地图的 Web端密钥已删除', amapBrowserEmpty: '尚未配置高德地图的 Web端密钥', amapBrowserSecurity: '用于在前台地址结果页加载高德 JavaScript 地图，并与安全密钥配套使用。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德地图的 Web端密钥吗？',
+    amapBrowserTitle: '高德前端地图凭据', configureAmapBrowser: '配置凭据', editAmapBrowser: '修改凭据', amapBrowserDialog: '配置高德前端地图凭据', amapBrowserLabel: '凭据名称', amapBrowserPlaceholder: '高德前端地图', amapApiKey: 'JS API Key', amapSecurityCode: '安全密钥', amapBrowserSaved: '高德前端地图凭据已保存', amapBrowserRemoved: '高德前端地图凭据已删除', amapBrowserEmpty: '尚未配置高德前端地图凭据', amapBrowserSecurity: '用于在地址结果页加载高德 JavaScript 地图，与服务端地址同步使用的高德地图密钥相互独立。', replaceSecret: '留空则保留当前值', amapUpdated: '更新时间', amapLastUsed: '最近使用', confirmRemoveAmap: '确定删除高德前端地图凭据吗？',
     chinaTitle: '中国同步', chinaDescription: '查看合格住宅小区和行政区覆盖。', chinaTotal: '合格住宅小区', cities: '覆盖城市', districts: '覆盖区县', districtCoverage: '区县覆盖', province: '省级', city: '城市', district: '区县', currentCommunities: '当前小区', target: '基础目标', covered: '已覆盖', pending: '待补齐', noAreas: '暂无区县数据', allProvinces: '全部省级', allCities: '全部城市', allDistricts: '全部区县', pageSize: '每页数量', previousPage: '上一页', nextPage: '下一页', pageSummary: '第 {page} / {pages} 页，共 {total} 条',
     tokensTitle: '接口令牌', tokensDescription: '创建、查看、修改和撤销外部接口访问令牌。', addToken: '添加令牌', tokenDialog: '添加接口令牌', editTokenDialog: '修改接口令牌', tokenCreatedTitle: '令牌已创建', tokenCreatedHint: '令牌内容只在管理员会话内显示；请使用复制按钮保存。', name: '名称', tokenValue: '令牌内容', tokenValueHint: '留空时由服务端安全生成', generateToken: '生成令牌', perMinute: '每分钟请求数', prefix: '前缀', scopes: '权限范围', scopeRead: '读取', scopeGenerate: '生成', scopeAll: '全部', scopeHint: '当前接口支持读取和生成；选择全部可同时使用两项能力。', expires: '到期时间', neverExpires: '无限', lastUsed: '最近使用', create: '创建', update: '保存修改', tokenCreated: '令牌已创建', tokenUpdated: '令牌设置已更新', noTokens: '尚未创建接口令牌', revoked: '已撤销', valid: '有效', revoke: '撤销', edit: '编辑', tokenUnavailable: '仅可鉴权', confirmRevokeToken: '确定撤销这个令牌吗？',
     administrator: '管理员', statusLabel: '状态', actions: '操作', close: '关闭', showSecret: '显示', hideSecret: '隐藏', copySecret: '复制', copied: '已复制', revealFailed: '密钥读取失败，请重试。',
@@ -137,17 +138,17 @@ const baseAdminText = {
   },
   en: {
     labels: { dashboard: 'Dashboard', blacklist: 'Address Blacklist', providers: 'Map Keys', china: 'China Sync', access: 'Access & Security', tokens: 'API Tokens' },
-    providers: { amap: 'AMap Web Service API', baidu: 'Baidu Web Service API', tencent: 'Tencent Web Service API', onemap: 'OneMap Singapore API', youdao: 'Youdao Translation API', geoapify: 'Geoapify Geocoding API', 'google-geocoding': 'Google Geocoding API', mappls: 'Mappls Search API' },
+    providers: { amap: 'AMap', baidu: 'Baidu Maps', tencent: 'Tencent Maps', onemap: 'OneMap', youdao: 'Youdao Translate', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' },
     brandName: 'ADDRESS', brand: 'Admin Console', loginTitle: 'Administrator sign in', password: 'Administrator password', login: 'Sign in', loggingIn: 'Signing in…', backGenerator: 'Back to generator',
     bootstrap: 'Set ADMIN_BOOTSTRAP_PASSWORD on the server and restart the service first.', loading: 'Loading…', retry: 'Reload', logout: 'Sign out', language: 'Chinese',
     dashboardTitle: 'Address Data Overview', dashboardDescription: 'Monitor the distribution and growth of verified global address data', totalResidential: 'Verified residences', countriesCovered: 'Countries', regionsCovered: 'Administrative coverage', qualifiedRegions: 'Updated today', countryRanking: 'Top countries', coverageDetails: 'Administrative coverage', allCountries: 'All countries', region: 'Region', level: 'Administrative level', residential: 'Verified residential', children: 'Child regions', administrativeCoverage: 'Administrative coverage', qualifiedCoverage: 'At least 5', updated: 'Updated', noSubregions: 'No child regions', noAddressData: 'No address data', emptyDashboard: 'This database has no address records yet. Import or sync data to drill into countries, regions, and districts.',
     globalDistribution: 'Global address distribution', rankByResidential: 'By verified residences', viewAllCountries: 'All countries', countryDataList: 'Country data', countryCountSuffix: 'countries', searchCountry: 'Search countries', continentFilter: 'Filter by continent', allContinents: 'All continents', asia: 'Asia', europe: 'Europe', northAmerica: 'North America', southAmerica: 'South America', africa: 'Africa', oceania: 'Oceania', sortBy: 'Sort countries', sortResidentialDesc: 'Addresses: high to low', sortResidentialAsc: 'Addresses: low to high', sortCountryName: 'Country name', sortCoverageDesc: 'Administrative coverage', exportData: 'Export data', filter: 'Filter', allData: 'All data', coveredOnly: 'With data', uncoveredOnly: 'Without data', country: 'Country', coverageColumns: 'Administrative coverage', operation: 'Action', previous: 'Previous', next: 'Next', apiRequestsToday: 'API requests today', databaseSize: 'Database size', lastDataUpdate: 'Last data update', systemStatus: 'System status', runningNormally: 'Operational', administratorRole: 'Super administrator', searchPlaceholder: 'Search countries, cities, or postcodes…', simplifiedChinese: 'Simplified Chinese',
     blacklistTitle: 'Address blacklist', blacklistDescription: 'Built-in institution rules remain enabled. Add global exclusion keywords below.', builtinRules: 'Built-in exclusion rules', customKeywords: 'Custom keywords', customKeywordHint: 'One keyword per line. Matches community, building, street, or complete address. Maximum 500.', blacklistSaved: 'Address blacklist saved', saveBlacklist: 'Save blacklist', noCustomKeywords: 'No custom keywords configured',
     accessTitle: 'Access policy', accessDescription: 'Configure frontend access and administrator passwords.', frontendPasswordEnabled: 'Require a frontend password', newFrontendPassword: 'New frontend password', confirmFrontendPassword: 'Confirm frontend password', newAdminPassword: 'New administrator password', confirmAdminPassword: 'Confirm administrator password', passwordSection: 'Password settings', policySection: 'Access controls', keepUnchanged: 'Leave blank to keep the current value', saveSettings: 'Save settings', settingsSaved: 'Access settings saved', passwordMismatch: 'The two password entries do not match.', changeFrontendPassword: 'Change frontend password', changeAdminPassword: 'Change administrator password', passwordDialogHint: 'Enter the new password twice. The fields are cleared after saving.', passwordNew: 'New password', passwordConfirm: 'Confirm password', showPassword: 'Show', hidePassword: 'Hide', savePassword: 'Save password',
-    providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaProvider: 'Provider live', quotaLocal: 'Local count', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success',
+    providersTitle: 'Map keys', providersDescription: 'Manage map credentials; values stay hidden until explicitly revealed.', addKey: 'Add key', addMapKey: 'Add map key', provider: 'Provider', optionalName: 'Name (optional)', autoName: 'Leave blank to name automatically', key: 'Key', cancel: 'Cancel', save: 'Save', keySaved: 'Map key saved', stop: 'Disable', enable: 'Enable', test: 'Test', testSuccess: 'Key test succeeded', remove: 'Delete', noKeys: 'No map keys configured', quotaUsage: 'Quota', quotaDay: 'Daily', quotaMonth: 'Monthly', quotaReset: 'Resets', quotaRemaining: 'remaining', lastSuccess: 'Last success', quotaBaseline: 'Usage before setup', quotaBaselineHint: 'Enter Geocoding usage already incurred this month under the same Google billing account.', googleOfficialQuota: 'Google free usage: 10,000 monthly events per billing account; automatic sync uses at most 9,000 by default.', googleSyncBudget: 'Monthly sync budget',
     youdaoAppKey: 'Application key', youdaoAppSecret: 'Application secret', youdaoSaved: 'Youdao credential saved', youdaoConfigured: 'Configured', youdaoNotConfigured: 'Not configured', translationTitle: 'Online translation', googleTranslationToggle: 'Enable Google translation', translationSaved: 'Translation settings saved', geoapifyWorkerHint: 'Geoapify keys saved here are used for Korea residential synchronization and API lookups, with automatic quota and cooldown rotation.',
     mapDisplayTitle: 'Frontend map display', mapChina: 'China addresses', mapInternational: 'International addresses', googleMap: 'Google Maps', amapMap: 'AMap', mapDisplaySaved: 'Map display settings saved', mapDisplayHint: 'A disabled provider loads no frontend script or frame and sends no map request.',
-    amapBrowserTitle: 'AMap Web credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap Web credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap Web map', amapApiKey: 'Web API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap Web credential saved', amapBrowserRemoved: 'AMap Web credential deleted', amapBrowserEmpty: 'No AMap Web credential configured', amapBrowserSecurity: 'Used to render AMap on address result pages. It is separate from the Web Service API keys used for server-side address synchronization.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap Web credential?',
+    amapBrowserTitle: 'AMap frontend map credential', configureAmapBrowser: 'Configure credential', editAmapBrowser: 'Edit credential', amapBrowserDialog: 'Configure AMap frontend map credential', amapBrowserLabel: 'Credential name', amapBrowserPlaceholder: 'AMap frontend map', amapApiKey: 'JS API key', amapSecurityCode: 'Security code', amapBrowserSaved: 'AMap frontend map credential saved', amapBrowserRemoved: 'AMap frontend map credential deleted', amapBrowserEmpty: 'No AMap frontend map credential configured', amapBrowserSecurity: 'Used to render AMap on address result pages. It is separate from the AMap keys used for server-side address synchronization.', replaceSecret: 'Leave blank to retain the current value', amapUpdated: 'Updated', amapLastUsed: 'Last used', confirmRemoveAmap: 'Delete the AMap frontend map credential?',
     chinaTitle: 'China sync', chinaDescription: 'Review qualified residential communities and administrative coverage.', chinaTotal: 'Qualified residential communities', cities: 'Cities covered', districts: 'Districts covered', districtCoverage: 'District coverage', province: 'Province', city: 'City', district: 'District', currentCommunities: 'Current communities', target: 'Base target', covered: 'Covered', pending: 'Pending', noAreas: 'No district data', allProvinces: 'All provinces', allCities: 'All cities', allDistricts: 'All districts', pageSize: 'Rows per page', previousPage: 'Previous', nextPage: 'Next', pageSummary: 'Page {page} of {pages}, {total} total',
     tokensTitle: 'API tokens', tokensDescription: 'Create, view, edit, and revoke external API access tokens.', addToken: 'Add token', tokenDialog: 'Add API token', editTokenDialog: 'Edit API token', tokenCreatedTitle: 'Token created', tokenCreatedHint: 'The token stays inside this administrator session. Use Copy to save it.', name: 'Name', tokenValue: 'Token value', tokenValueHint: 'Leave blank to let the server generate one', generateToken: 'Generate token', perMinute: 'Requests per minute', prefix: 'Prefix', scopes: 'Scopes', scopeRead: 'Read', scopeGenerate: 'Generate', scopeAll: 'All', scopeHint: 'This API currently supports Read and Generate. Select All to enable both.', expires: 'Expires', neverExpires: 'Never', lastUsed: 'Last used', create: 'Create', update: 'Save changes', tokenCreated: 'Token created', tokenUpdated: 'Token settings updated', noTokens: 'No API tokens created', revoked: 'Revoked', valid: 'Active', revoke: 'Revoke', edit: 'Edit', tokenUnavailable: 'Authentication only', confirmRevokeToken: 'Revoke this token?',
     administrator: 'Administrator', statusLabel: 'Status', actions: 'Actions', close: 'Close', showSecret: 'Show', hideSecret: 'Hide', copySecret: 'Copy', copied: 'Copied', revealFailed: 'The credential could not be revealed. Try again.',
@@ -238,17 +239,22 @@ const labelsFor = (locale: AdminLocale): Record<View, string> => ({
   tokens: adminText[locale].labels.tokens
 });
 const viewIcons = { dashboard: LayoutDashboard, blacklist: ShieldBan, providers: KeyRound, addressData: RefreshCw, syncQueue: ListOrdered, syncHistory: History, shortcuts: MapPin, access: ShieldCheck, tokens: Braces } as const;
-const providerLabel = (locale: AdminLocale, provider: string): string =>
-  adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']]
-  || (provider === 'mappls' ? 'Mappls Search API' : provider);
+const providerLabel = (locale: AdminLocale, provider: string): string => {
+  if (locale === 'zh-CN' || locale === 'en') return adminText[locale].providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
+  if (locale === 'zh-TW') {
+    const names: Record<string, string> = { amap: '高德地圖', baidu: '百度地圖', tencent: '騰訊地圖', onemap: 'OneMap', geoapify: 'Geoapify', 'google-geocoding': 'Google Geocoding', mappls: 'Mappls' };
+    return names[provider] || provider;
+  }
+  return adminText.en.providers[provider as keyof typeof adminText['zh-CN']['providers']] || provider;
+};
 const credentialDisplayLabel = (locale: AdminLocale, label: string): string => ({
-  AMAP_API_KEY: adminText[locale].providers.amap,
-  BAIDU_API_KEY: adminText[locale].providers.baidu,
-  TENCENT_API_KEY: adminText[locale].providers.tencent,
-  ONEMAP_ACCESS_TOKEN: adminText[locale].providers.onemap,
+  AMAP_API_KEY: providerLabel(locale, 'amap'),
+  BAIDU_API_KEY: providerLabel(locale, 'baidu'),
+  TENCENT_API_KEY: providerLabel(locale, 'tencent'),
+  ONEMAP_ACCESS_TOKEN: providerLabel(locale, 'onemap'),
   YOUDAO_APP_KEY: adminText[locale].providers.youdao,
-  GEOAPIFY_API_KEY: adminText[locale].providers.geoapify,
-  GOOGLE_GEOCODING_API_KEY: adminText[locale].providers['google-geocoding'],
+  GEOAPIFY_API_KEY: providerLabel(locale, 'geoapify'),
+  GOOGLE_GEOCODING_API_KEY: providerLabel(locale, 'google-geocoding'),
   MAPPLS_API_KEY: providerLabel(locale, 'mappls'),
   AMAP_JS_API_KEY: adminText[locale].amapBrowserTitle
 } as Record<string, string>)[label] || label;
@@ -427,9 +433,8 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
         ? await Promise.all([
           request('/providers', { signal: controller.signal }),
           request('/settings/maps', { signal: controller.signal }),
-          request('/settings/translation', { signal: controller.signal }),
-          request('/settings/youdao', { signal: controller.signal })
-        ]).then(([credentials, maps, translation, youdao]) => ({ credentials, maps, translation, youdao }))
+          request('/settings/translation', { signal: controller.signal })
+        ]).then(([credentials, maps, translation]) => ({ credentials, maps, translation }))
         : await request(paths[selected], { signal: controller.signal });
       if (id === loadIds.current[selected]) setDataByView((values) => ({ ...values, [selected]: result }));
       return true;
@@ -586,6 +591,8 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
 }) {
   const t = adminText[locale];
   const [providerDialog, setProviderDialog] = useState<'create' | Credential | null>(null);
+  const [youdaoDialog, setYoudaoDialog] = useState<'create' | Credential | null>(null);
+  const [newProvider, setNewProvider] = useState('amap');
   const [amapBrowserDialog, setAmapBrowserDialog] = useState(false);
   const [tokenEditor, setTokenEditor] = useState<{ mode: 'create' | 'edit'; value?: ApiTokenView } | null>(null);
   const [tokenSecret, setTokenSecret] = useState<string | null>(null);
@@ -603,14 +610,18 @@ function AdminView({ locale, view, data, busy, mutate, reveal, request, coverage
     const value = data as ProviderViewData;
     const credentials = (value.credentials || []).filter((credential) => credential.provider !== 'youdao')
       .slice().sort((left, right) => left.provider.localeCompare(right.provider) || left.label.localeCompare(right.label));
+    const youdaoCredentials = (value.credentials || []).filter((credential) => credential.provider === 'youdao')
+      .slice().sort((left, right) => left.label.localeCompare(right.label));
     const maps = value.maps;
-    return <><MapDisplayPanel value={maps} locale={locale} busy={busy} mutate={mutate} />
-      <Panel title={t.amapBrowserTitle} actions={<button className="primary-action" onClick={() => setAmapBrowserDialog(true)}>{maps.amapBrowser.configured ? t.editAmapBrowser : `+ ${t.configureAmapBrowser}`}</button>}>
-        <AmapBrowserSummary value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} reveal={reveal} />
+    return <><MapDisplayPanel value={maps} locale={locale} busy={busy} mutate={mutate} openAmapBrowser={() => setAmapBrowserDialog(true)} />
+      <Panel title={t.amapBrowserTitle} actions={<button type="button" className="primary-action" onClick={() => setAmapBrowserDialog(true)}>{maps.amapBrowser.configured ? t.editAmapBrowser : t.configureAmapBrowser}</button>}>
+        <AmapBrowserSummary value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} reveal={reveal} openEditor={() => setAmapBrowserDialog(true)} />
       </Panel>
-      <Panel title={t.providersTitle} actions={<button className="primary-action" onClick={() => setProviderDialog('create')}>+ {t.addKey}</button>}>
-      <CredentialTable values={credentials} locale={locale} reveal={reveal} actions={(credential) => <><button disabled={busy} onClick={() => setProviderDialog(credential)}>{t.edit}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}`, 'PUT', { enabled: !credential.enabled }, credential.enabled ? t.stop : t.enable)}>{credential.enabled ? t.stop : t.enable}</button><button disabled={busy} onClick={() => void mutate(`/providers/${credential.id}/test`, 'POST', undefined, t.testSuccess)}>{t.test}</button><button disabled={busy} className="danger" onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, credential.label))) void mutate(`/providers/${credential.id}`, 'DELETE', undefined, t.remove); }}>{t.remove}</button></>} />
-    </Panel><TranslationSettingsPanel value={value.translation} youdao={value.youdao} locale={locale} busy={busy} mutate={mutate} />{amapBrowserDialog && <AmapBrowserDialog value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} close={() => setAmapBrowserDialog(false)} />}{providerDialog && <ProviderCredentialDialog value={providerDialog === 'create' ? undefined : providerDialog} locale={locale} busy={busy} mutate={mutate} close={() => setProviderDialog(null)} />}</>;
+      <ProviderCredentialsPanel values={credentials} locale={locale} reveal={reveal} busy={busy} mutate={mutate} openEditor={setProviderDialog} openProvider={(provider) => { setNewProvider(provider); setProviderDialog('create'); }} />
+      <TranslationSettingsPanel value={value.translation} credentials={youdaoCredentials} locale={locale} busy={busy} mutate={mutate} reveal={reveal} openEditor={setYoudaoDialog} />
+      {amapBrowserDialog && <AmapBrowserDialog value={maps.amapBrowser} locale={locale} busy={busy} mutate={mutate} close={() => setAmapBrowserDialog(false)} />}
+      {youdaoDialog && <YoudaoCredentialDialog value={youdaoDialog === 'create' ? undefined : youdaoDialog} locale={locale} busy={busy} mutate={mutate} close={() => setYoudaoDialog(null)} />}
+      {providerDialog && <ProviderCredentialDialog value={providerDialog === 'create' ? undefined : providerDialog} initialProvider={newProvider} locale={locale} busy={busy} mutate={mutate} close={() => setProviderDialog(null)} />}</>;
   }
   if (view === 'addressData') {
     return <AddressDataSettings values={data as AddressDataCountry[]} locale={locale} busy={busy} mutate={mutate} request={request} />;
@@ -934,11 +945,12 @@ function TokenSecretDialog({ value, locale, close }: { value: string; locale: Ad
   return <Dialog title={t.tokenCreatedTitle} close={close} locale={locale}><div className="token-secret-dialog"><p>{t.tokenCreatedHint}</p><code>{visible ? value : '••••••••••••'}</code><div className="secret-actions"><button type="button" className="compact-action" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button><button type="button" className="compact-action" onClick={() => void copy()}>{copied ? t.copied : t.copySecret}</button></div><div className="dialog-actions"><button type="button" className="primary-action" onClick={close}>{t.close}</button></div></div></Dialog>;
 }
 
-function MapDisplayPanel({ value, locale, busy, mutate }: { value: MapSettings; locale: AdminLocale; busy: boolean; mutate: Mutate }) {
+function MapDisplayPanel({ value, locale, busy, mutate, openAmapBrowser }: { value: MapSettings; locale: AdminLocale; busy: boolean; mutate: Mutate; openAmapBrowser: () => void }) {
   const t = adminText[locale];
-  const [config, setConfig] = useState(() => ({ google: { ...value.google }, amap: { ...value.amap } }));
-  useEffect(() => setConfig({ google: { ...value.google }, amap: { ...value.amap } }), [
-    value.google.china, value.google.international, value.amap.china, value.amap.international
+  const amapReady = value.amapBrowser.configured && value.amapBrowser.enabled;
+  const [config, setConfig] = useState(() => ({ google: { ...value.google }, amap: amapReady ? { ...value.amap } : { china: false, international: false } }));
+  useEffect(() => setConfig({ google: { ...value.google }, amap: amapReady ? { ...value.amap } : { china: false, international: false } }), [
+    value.google.china, value.google.international, value.amap.china, value.amap.international, amapReady
   ]);
   const toggle = (provider: 'google' | 'amap', scope: 'china' | 'international', enabled: boolean) =>
     setConfig((current) => ({ ...current, [provider]: { ...current[provider], [scope]: enabled } }));
@@ -954,28 +966,25 @@ function MapDisplayPanel({ value, locale, busy, mutate }: { value: MapSettings; 
       <label className="switch-field"><input name="googleChina" type="checkbox" checked={config.google.china} onChange={(event) => toggle('google', 'china', event.target.checked)} /><span /></label>
       <label className="switch-field"><input name="googleInternational" type="checkbox" checked={config.google.international} onChange={(event) => toggle('google', 'international', event.target.checked)} /><span /></label>
       <strong>{t.amapMap}</strong>
-      <label className="switch-field"><input name="amapChina" type="checkbox" checked={config.amap.china} onChange={(event) => toggle('amap', 'china', event.target.checked)} /><span /></label>
-      <label className="switch-field"><input name="amapInternational" type="checkbox" checked={config.amap.international} onChange={(event) => toggle('amap', 'international', event.target.checked)} /><span /></label>
+      <label className={`switch-field${amapReady ? '' : ' is-disabled'}`}><input name="amapChina" type="checkbox" checked={config.amap.china} disabled={!amapReady || busy} onChange={(event) => toggle('amap', 'china', event.target.checked)} /><span /></label>
+      <label className={`switch-field${amapReady ? '' : ' is-disabled'}`}><input name="amapInternational" type="checkbox" checked={config.amap.international} disabled={!amapReady || busy} onChange={(event) => toggle('amap', 'international', event.target.checked)} /><span /></label>
     </div>
+    {!amapReady && <div className="map-prerequisite"><div><KeyRound size={17} aria-hidden="true" /><span><strong>{t.amapBrowserEmpty}</strong><small>{t.amapBrowserSecurity}</small></span></div><button type="button" className="secondary-action" onClick={openAmapBrowser}>{t.configureAmapBrowser}</button></div>}
     <div className="panel-footer"><p>{t.mapDisplayHint}</p><button className="primary-action" disabled={busy}>{t.saveSettings}</button></div>
   </form></Panel>;
 }
 
-function AmapBrowserSummary({ value, locale, busy, mutate, reveal }: { value: AmapBrowserStatus; locale: AdminLocale; busy: boolean; mutate: Mutate; reveal: Reveal }) {
+function AmapBrowserSummary({ value, locale, busy, mutate, reveal, openEditor }: { value: AmapBrowserStatus; locale: AdminLocale; busy: boolean; mutate: Mutate; reveal: Reveal; openEditor: () => void }) {
   const t = adminText[locale];
-  if (!value.configured) return <div className="credential-summary empty"><span className="empty-hint-icon" aria-hidden="true"><KeyRound size={19} /></span><div><p>{t.amapBrowserEmpty}</p><small>{t.amapBrowserSecurity}</small></div></div>;
-  return <div className="credential-summary">
-    <div><span>{t.amapBrowserLabel}</span><b>{credentialDisplayLabel(locale, value.label)}</b></div>
-    <div><span>{t.amapApiKey}</span><SecretCell mask={value.mask} locale={locale} reveal={reveal} path="/maps/amap-browser/reveal" field="apiKey" /></div>
-    <div><span>{t.amapSecurityCode}</span><SecretCell mask={value.securityMask || '••••'} locale={locale} reveal={reveal} path="/maps/amap-browser/reveal" field="securityCode" /></div>
-    <div><span>{t.statusLabel}</span><span className={`badge ${value.status}`}>{t.status[value.status as keyof typeof t.status] || value.status}</span></div>
-    <div><span>{t.amapLastUsed}</span><b>{dateTime(value.lastUsedAt, locale)}</b></div>
-    <div><span>{t.amapUpdated}</span><b>{dateTime(value.updatedAt, locale)}</b></div>
-    <div className="credential-summary-actions"><button disabled={busy} onClick={() => void mutate('/maps/amap-browser', 'PUT', { enabled: !value.enabled }, value.enabled ? t.stop : t.enable)}>{value.enabled ? t.stop : t.enable}</button><button className="danger" disabled={busy} onClick={() => {
+  if (!value.configured) return <article className="amap-browser-empty"><div><span className="credential-type-badge">{t.mapDisplayTitle}</span><strong>{t.amapBrowserTitle}</strong><small>{t.amapBrowserSecurity}</small></div><span className="badge disabled">{t.youdaoNotConfigured}</span><button type="button" className="secondary-action" onClick={openEditor}>{t.configureAmapBrowser}</button></article>;
+  return <article className="provider-key-row amap-browser-row">
+    <div className="provider-key-identity"><span className="credential-type-badge">{t.mapDisplayTitle}</span><strong>{credentialDisplayLabel(locale, value.label)}</strong><small>{t.amapBrowserSecurity}</small></div>
+    <div className="amap-browser-secrets"><div><span>{t.amapApiKey}</span><SecretCell mask={value.mask} locale={locale} reveal={reveal} path="/maps/amap-browser/reveal" field="apiKey" /></div><div><span>{t.amapSecurityCode}</span><SecretCell mask={value.securityMask || '••••'} locale={locale} reveal={reveal} path="/maps/amap-browser/reveal" field="securityCode" /></div></div>
+    <div className="provider-key-status"><span className={`badge ${value.status}`}>{t.status[value.status as keyof typeof t.status] || value.status}</span><small>{t.amapLastUsed}: {dateTime(value.lastUsedAt, locale)}</small><small>{t.amapUpdated}: {dateTime(value.updatedAt, locale)}</small></div>
+    <div className="row-actions provider-key-actions"><button type="button" className="provider-action" title={t.edit} aria-label={t.edit} disabled={busy} onClick={openEditor}><Pencil size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={value.enabled ? t.stop : t.enable} aria-label={value.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate('/maps/amap-browser', 'PUT', { enabled: !value.enabled }, value.enabled ? t.stop : t.enable)}><Power size={14} aria-hidden="true" /></button><button type="button" className="provider-action danger" title={t.remove} aria-label={t.remove} disabled={busy} onClick={() => {
       if (window.confirm(t.confirmRemoveAmap)) void mutate('/maps/amap-browser', 'DELETE', undefined, t.amapBrowserRemoved);
-    }}>{t.remove}</button></div>
-    <small>{t.amapBrowserSecurity}</small>
-  </div>;
+    }}><Trash2 size={14} aria-hidden="true" /></button></div>
+  </article>;
 }
 
 function AmapBrowserDialog({ value, locale, busy, mutate, close }: { value: AmapBrowserStatus; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void }) {
@@ -1002,52 +1011,94 @@ function AmapBrowserDialog({ value, locale, busy, mutate, close }: { value: Amap
 }
 
 const providerQuotaDefaults: Record<string, number> = {
-  amap: 5_000, baidu: 100, tencent: 10_000, onemap: 100, geoapify: 3_000, mappls: 1_000
+  amap: 5_000, baidu: 100, tencent: 10_000, onemap: 100_000_000,
+  youdao: 100_000, geoapify: 3_000, 'google-geocoding': 9_000, mappls: 1_000
 };
 const providerQuotaPeriods: Record<string, 'day' | 'month'> = {
-  amap: 'month', baidu: 'day', tencent: 'day', onemap: 'day', geoapify: 'day', mappls: 'day'
+  amap: 'month', baidu: 'day', tencent: 'day', onemap: 'day', geoapify: 'day',
+  youdao: 'month', 'google-geocoding': 'month', mappls: 'day'
 };
+const googleQuotaText = (locale: AdminLocale) => locale === 'zh-CN'
+  ? { budget: '自动同步月度预算', baseline: '本月已有用量', hint: '填写接入本项目之前在同一 Google 结算账户产生的 Geocoding 用量。', official: 'Google 官方免费用量：每个结算账户每月 10,000 次；项目自动同步默认最多使用 9,000 次。' }
+  : locale === 'zh-TW'
+    ? { budget: '自動同步月度預算', baseline: '本月已有用量', hint: '填寫接入本專案之前在同一 Google 結算帳戶產生的 Geocoding 用量。', official: 'Google 官方免費用量：每個結算帳戶每月 10,000 次；專案自動同步預設最多使用 9,000 次。' }
+    : { budget: 'Monthly sync budget', baseline: 'Usage before setup', hint: 'Enter Geocoding usage already incurred this month under the same Google billing account.', official: 'Google free usage: 10,000 monthly events per billing account; automatic sync uses at most 9,000 by default.' };
 
-function TranslationSettingsPanel({ value, youdao, locale, busy, mutate }: {
-  value: TranslationSettings; youdao: YoudaoStatus; locale: AdminLocale; busy: boolean; mutate: Mutate;
+function TranslationSettingsPanel({ value, credentials, locale, busy, mutate, reveal, openEditor }: {
+  value: TranslationSettings; credentials: Credential[]; locale: AdminLocale; busy: boolean; mutate: Mutate; reveal: Reveal;
+  openEditor: (value: 'create' | Credential) => void;
 }) {
   const t = adminText[locale];
-  const [appKey, setAppKey] = useState('');
-  const [appSecret, setAppSecret] = useState('');
-  const [visible, setVisible] = useState(false);
   return <Panel title={t.translationTitle}>
-    <label className="check"><input name="googleTranslationEnabled" type="checkbox" checked={value.googleTranslationEnabled} disabled={busy}
-      onChange={(event) => void mutate('/settings/translation', 'PUT', { googleTranslationEnabled: event.target.checked }, t.translationSaved)} />{t.googleTranslationToggle}</label>
-    <form className="admin-form youdao-settings" onSubmit={async (event) => {
-      event.preventDefault();
-      const result = await mutate('/settings/youdao', 'PUT', { appKey: appKey.trim(), appSecret: appSecret.trim() }, t.youdaoSaved);
-      if (result) { setAppKey(''); setAppSecret(''); setVisible(false); }
-    }}>
-      <h3>{t.providers.youdao}</h3>
-      <p className="youdao-status">{youdao.configured ? `${t.youdaoConfigured} · ${youdao.appKeyMask}` : t.youdaoNotConfigured}</p>
-      <label className="secret-input-field"><span>{t.youdaoAppKey}</span><div><input name="youdaoAppKey" type={visible ? 'text' : 'password'} value={appKey} required autoComplete="new-password" placeholder={youdao.configured ? t.replaceSecret : ''} onChange={(event) => setAppKey(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
-      <label className="secret-input-field"><span>{t.youdaoAppSecret}</span><div><input name="youdaoAppSecret" type={visible ? 'text' : 'password'} value={appSecret} required autoComplete="new-password" placeholder={youdao.configured ? t.replaceSecret : ''} onChange={(event) => setAppSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
-      <div className="dialog-actions"><button className="primary-action" disabled={busy}>{t.save}</button>{youdao.configured && <button type="button" disabled={busy} onClick={() => void mutate('/providers/youdao/test', 'POST', undefined, t.testSuccess)}>{t.test}</button>}</div>
-    </form>
+    <div className="translation-settings">
+      <div className="translation-toggle-row"><strong>{t.googleTranslationToggle}</strong><button type="button" className="toggle-switch" role="switch" aria-label={t.googleTranslationToggle} aria-checked={value.googleTranslationEnabled} disabled={busy}
+        onClick={() => void mutate('/settings/translation', 'PUT', { googleTranslationEnabled: !value.googleTranslationEnabled }, t.translationSaved)}><span aria-hidden="true" /></button></div>
+      <section className="translation-provider">
+        <header className="translation-provider-header"><div className="translation-provider-title"><span className="provider-group-icon" aria-hidden="true"><Languages size={18} /></span><div><h3>{t.providers.youdao}</h3><span className={`provider-key-count${credentials.length ? '' : ' is-empty'}`}>{providerCredentialCount(locale, credentials.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openEditor('create')}><Plus size={14} aria-hidden="true" />{t.addKey}</button></header>
+        {credentials.length ? <div className="provider-key-list youdao-key-list">{credentials.map((credential) => <CredentialRowCompact key={credential.id} item={credential} locale={locale} reveal={reveal} revealPath={`/providers/${credential.id}/reveal-fields`} secrets={[
+          { label: t.youdaoAppKey, mask: credential.fieldMasks?.appKey || credential.mask, field: 'appKey' },
+          { label: t.youdaoAppSecret, mask: credential.fieldMasks?.appSecret || credential.mask, field: 'appSecret' }
+        ]} actions={(item) => <><button type="button" className="provider-action" title={t.edit} aria-label={t.edit} disabled={busy} onClick={() => openEditor(item)}><Pencil size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={item.enabled ? t.stop : t.enable} aria-label={item.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate(`/providers/${item.id}`, 'PUT', { enabled: !item.enabled }, item.enabled ? t.stop : t.enable)}><Power size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={t.test} aria-label={t.test} disabled={busy} onClick={() => void mutate(`/providers/${item.id}/test`, 'POST', undefined, t.testSuccess)}><FlaskConical size={14} aria-hidden="true" /></button><button type="button" className="provider-action danger" title={t.remove} aria-label={t.remove} disabled={busy} onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, item.label))) void mutate(`/providers/${item.id}`, 'DELETE', undefined, t.remove); }}><Trash2 size={14} aria-hidden="true" /></button></>} />)}</div> : <div className="provider-empty-state translation-empty-state"><KeyRound size={15} aria-hidden="true" /><span>{t.youdaoNotConfigured}</span></div>}
+      </section>
+    </div>
   </Panel>;
 }
 
-function ProviderCredentialDialog({ value, locale, busy, mutate, close }: {
+function YoudaoCredentialDialog({ value, locale, busy, mutate, close }: {
   value?: Credential; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;
 }) {
   const t = adminText[locale];
-  const [provider, setProvider] = useState(value?.provider || 'amap');
+  const creating = !value;
+  const [label, setLabel] = useState(value?.label || '');
+  const [appKey, setAppKey] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [visibleKey, setVisibleKey] = useState(false);
+  const [visibleSecret, setVisibleSecret] = useState(false);
+  const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults.youdao));
+  const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
+  const [enabled, setEnabled] = useState(value?.enabled ?? true);
+  return <Dialog title={creating ? t.addKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
+    event.preventDefault();
+    const key = appKey.trim();
+    const secret = appSecret.trim();
+    if (creating ? (!key || !secret) : Boolean(key) !== Boolean(secret)) return;
+    const body = {
+      provider: 'youdao', label: label.trim() || `${t.providers.youdao} ${t.key}`,
+      ...(key && secret ? { secret: JSON.stringify({ appKey: key, appSecret: secret }) } : {}),
+      quotaLimit: Number(quotaLimit), quotaPeriod, enabled
+    };
+    const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.youdaoSaved);
+    if (result) close();
+  }}>
+    <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
+    <label className="secret-input-field"><span>{t.youdaoAppKey}</span><div><input name="youdaoAppKey" type={visibleKey ? 'text' : 'password'} value={appKey} required={creating || Boolean(appSecret)} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setAppKey(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisibleKey((current) => !current)}>{visibleKey ? t.hideSecret : t.showSecret}</button></div></label>
+    <label className="secret-input-field"><span>{t.youdaoAppSecret}</span><div><input name="youdaoAppSecret" type={visibleSecret ? 'text' : 'password'} value={appSecret} required={creating || Boolean(appKey)} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setAppSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisibleSecret((current) => !current)}>{visibleSecret ? t.hideSecret : t.showSecret}</button></div></label>
+    <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
+    <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>
+    <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
+    <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
+  </form></Dialog>;
+}
+
+function ProviderCredentialDialog({ value, initialProvider = 'amap', locale, busy, mutate, close }: {
+  value?: Credential; initialProvider?: string; locale: AdminLocale; busy: boolean; mutate: Mutate; close: () => void;
+}) {
+  const t = adminText[locale];
+  const googleQuota = googleQuotaText(locale);
+  const [provider, setProvider] = useState(value?.provider || initialProvider);
   const [label, setLabel] = useState(value?.label || '');
   const [secret, setSecret] = useState('');
   const [visible, setVisible] = useState(false);
-  const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults.amap));
+  const [quotaLimit, setQuotaLimit] = useState(String(value?.quotaLimit || providerQuotaDefaults[initialProvider] || providerQuotaDefaults.amap));
   const [quotaPeriod, setQuotaPeriod] = useState<'day' | 'month'>(value?.quotaPeriod || 'month');
+  const [quotaUsedBaseline, setQuotaUsedBaseline] = useState(String(value?.quotaBaseline || 0));
   const [enabled, setEnabled] = useState(value?.enabled ?? true);
   const creating = !value;
   const changeProvider = (next: string) => {
     setProvider(next);
     setQuotaLimit(String(providerQuotaDefaults[next] || 100));
     setQuotaPeriod(providerQuotaPeriods[next] || 'day');
+    setQuotaUsedBaseline('0');
   };
   return <Dialog title={creating ? t.addMapKey : t.edit} close={close} locale={locale}><form className="dialog-form" onSubmit={async (event) => {
     event.preventDefault();
@@ -1056,17 +1107,20 @@ function ProviderCredentialDialog({ value, locale, busy, mutate, close }: {
       provider,
       label: label.trim() || `${providerLabel(locale, provider)} ${t.key}`,
       ...(secretValue ? { secret: secretValue } : {}),
-      quotaLimit: Number(quotaLimit), quotaPeriod, enabled
+      quotaLimit: Number(quotaLimit), quotaPeriod,
+      ...(provider === 'google-geocoding' ? { quotaUsedBaseline: Number(quotaUsedBaseline) } : {}), enabled
     };
     const result = await mutate(creating ? '/providers' : `/providers/${value.id}`, creating ? 'POST' : 'PUT', body, t.keySaved);
     if (result) close();
   }}>
-    <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{t.providers.amap}</option><option value="baidu">{t.providers.baidu}</option><option value="tencent">{t.providers.tencent}</option><option value="onemap">{t.providers.onemap}</option><option value="geoapify">{t.providers.geoapify}</option><option value="mappls">{providerLabel(locale, 'mappls')}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'mappls'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>
+    <label><span>{t.provider}</span><select name="provider" value={provider} disabled={!creating} onChange={(event) => changeProvider(event.target.value)}><option value="amap">{providerLabel(locale, 'amap')}</option><option value="baidu">{providerLabel(locale, 'baidu')}</option><option value="tencent">{providerLabel(locale, 'tencent')}</option><option value="onemap">{providerLabel(locale, 'onemap')}</option><option value="geoapify">{providerLabel(locale, 'geoapify')}</option><option value="google-geocoding">{providerLabel(locale, 'google-geocoding')}</option><option value="mappls">{providerLabel(locale, 'mappls')}</option>{!creating && !['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'].includes(provider) && <option value={provider}>{providerLabel(locale, provider)}</option>}</select></label>
     <label><span>{t.name}</span><input name="label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder={t.autoName} /></label>
     <label className="secret-input-field"><span>{t.key}</span><div><input name="secret" type={visible ? 'text' : 'password'} value={secret} required={creating} autoComplete="new-password" placeholder={creating ? '' : t.replaceSecret} onChange={(event) => setSecret(event.target.value)} /><button type="button" className="inline-toggle" onClick={() => setVisible((current) => !current)}>{visible ? t.hideSecret : t.showSecret}</button></div></label>
     {provider === 'geoapify' && <p className="security-note">{t.geoapifyWorkerHint}</p>}
-    <label><span>{t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
+    {provider === 'google-geocoding' && <p className="security-note">{googleQuota.official}</p>}
+    <label><span>{provider === 'google-geocoding' ? googleQuota.budget : t.quotaUsage}</span><input name="quotaLimit" type="number" min="1" max="100000000" required value={quotaLimit} onChange={(event) => setQuotaLimit(event.target.value)} /></label>
     <label><span>{t.quotaReset}</span><select name="quotaPeriod" value={quotaPeriod} onChange={(event) => setQuotaPeriod(event.target.value as 'day' | 'month')}><option value="day">{t.quotaDay}</option><option value="month">{t.quotaMonth}</option></select></label>
+    {provider === 'google-geocoding' && <label><span>{googleQuota.baseline}</span><input name="quotaUsedBaseline" type="number" min="0" max={quotaLimit || '9000'} required value={quotaUsedBaseline} onChange={(event) => setQuotaUsedBaseline(event.target.value)} /><small>{googleQuota.hint}</small></label>}
     <label className="check"><input name="enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t.enable}</label>
     <div className="dialog-actions"><button type="button" onClick={close}>{t.cancel}</button><button className="primary-action" disabled={busy}>{t.save}</button></div>
   </form></Dialog>;
@@ -1186,25 +1240,44 @@ const CoverageTable = ({ values, open, locale }: { values: CoverageNode[]; open:
     <td>{item.coverageLevels?.length ? <div className="coverage-ratios">{item.coverageLevels.map((level) => <span key={level.key} title={`${t.qualifiedCoverage}: ${level.qualified.toLocaleString()} / ${level.total.toLocaleString()}`}><b>{locale === 'zh-CN' ? level.labelZh : level.labelEn}</b>{level.covered.toLocaleString()} / {level.total.toLocaleString()}</span>)}</div> : item.childCount.toLocaleString()}</td>
   </tr>)}</tbody></table>{!values.length && <p className="admin-empty">{t.noSubregions}</p>}</div>;
 };
-const CredentialTable = ({ values, locale, reveal, actions }: { values: Credential[]; locale: AdminLocale; reveal: Reveal; actions?: (value: Credential) => ReactNode }) => {
+const providerCredentialOrder = ['amap', 'baidu', 'tencent', 'onemap', 'geoapify', 'google-geocoding', 'mappls'] as const;
+const providerCredentialCount = (locale: AdminLocale, count: number): string => {
+  if (locale === 'zh-CN') return `${count} 个密钥`;
+  if (locale === 'zh-TW') return `${count} 個金鑰`;
+  return `${count} ${count === 1 ? 'key' : 'keys'}`;
+};
+interface CredentialSecretField { label: string; mask: string; field: string }
+const CredentialRowCompact = ({ item, locale, reveal, actions, secrets, revealPath }: {
+  item: Credential; locale: AdminLocale; reveal: Reveal; actions: (value: Credential) => ReactNode; secrets?: CredentialSecretField[]; revealPath?: string;
+}) => {
   const t = adminText[locale];
-  return <div className="table-scroll"><table><thead><tr><th>{t.provider}</th><th>{t.name}</th><th>{t.key}</th><th>{t.statusLabel}</th><th>{t.quotaUsage}</th><th>{t.lastSuccess}</th>{actions && <th>{t.actions}</th>}</tr></thead><tbody>{values.map((item) => {
-    const windows = item.quotaWindows?.length ? item.quotaWindows : [{
-      service: item.quotaService, period: item.quotaPeriod, used: item.quotaUsed, limit: item.quotaLimit,
-      remaining: item.quotaRemaining, resetAt: item.quotaResetAt, usageSource: item.quotaUsageSource, exhausted: item.quotaUsed >= item.quotaLimit
-    }];
-    return <tr key={item.id}>
-    <td>{providerLabel(locale, item.provider)}</td><td>{credentialDisplayLabel(locale, item.label)}</td>
-    <td><SecretCell mask={item.mask} locale={locale} reveal={reveal} path={`/providers/${item.id}/reveal`} field="secret" /></td>
-    <td><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small> · {dateTime(item.expiresAt, locale)}</small>}</td>
-    <td><div className="quota-cell">{windows.map((window) => <div className="quota-window" key={`${window.service}-${window.period}`}>
-      <div><strong>{window.period === 'month' ? t.quotaMonth : t.quotaDay}</strong><b>{window.used.toLocaleString(locale)} / {window.limit.toLocaleString(locale)}</b></div>
+  const secretFields = secrets || [{ label: t.key, mask: item.mask, field: 'secret' }];
+  const windows = item.quotaWindows?.length ? item.quotaWindows : [{
+    service: item.quotaService, period: item.quotaPeriod, used: item.quotaUsed, limit: item.quotaLimit,
+    remaining: item.quotaRemaining, resetAt: item.quotaResetAt, usageSource: item.quotaUsageSource, exhausted: item.quotaUsed >= item.quotaLimit
+  }];
+  return <article className="provider-key-row">
+    <div className="provider-key-name"><span>{t.name}</span><strong>{credentialDisplayLabel(locale, item.label)}</strong></div>
+    <div className={`provider-key-secrets${secretFields.length > 1 ? ' is-paired' : ''}`}>{secretFields.map((secret) => <div className="provider-key-secret" key={secret.field}><span>{secret.label}</span><SecretCell mask={secret.mask} locale={locale} reveal={reveal} path={revealPath || `/providers/${item.id}/reveal`} field={secret.field} /></div>)}</div>
+    <div className="provider-key-status"><span className={`badge ${item.status}`}>{t.status[item.status as keyof typeof t.status] || item.status}</span>{item.expiresAt && <small>{dateTime(item.expiresAt, locale)}</small>}<small>{t.lastSuccess}: {dateTime(item.lastSuccessAt, locale)}</small></div>
+    <div className="quota-cell">{windows.map((window) => <div className="quota-window" key={`${window.service}-${window.period}`}>
+      <b>{window.used.toLocaleString(locale)}/{window.limit.toLocaleString(locale)} {window.period === 'month' ? t.quotaMonth : t.quotaDay}</b>
       <span className={`quota-bar${usagePercent(window.used, window.limit) >= 100 ? ' full' : usagePercent(window.used, window.limit) >= 80 ? ' high' : ''}`}><i style={{ width: `${usagePercent(window.used, window.limit)}%` }} /></span>
-      <small>{window.remaining.toLocaleString(locale)} {t.quotaRemaining} · {window.usageSource === 'provider' ? t.quotaProvider : t.quotaLocal}</small>
+      <small>{window.remaining.toLocaleString(locale)} {t.quotaRemaining}</small>
       <small>{t.quotaReset} {dateTime(window.resetAt, locale)}</small>
-    </div>)}</div></td>
-    <td>{dateTime(item.lastSuccessAt, locale)}</td>{actions && <td className="row-actions">{actions(item)}</td>}
-  </tr>})}</tbody></table>{!values.length && <EmptyState icon={KeyRound} text={t.noKeys} />}</div>;
+    </div>)}</div>
+    <div className="row-actions provider-key-actions">{actions(item)}</div>
+  </article>;
+};
+const ProviderCredentialsPanel = ({ values, locale, reveal, busy, mutate, openEditor, openProvider }: { values: Credential[]; locale: AdminLocale; reveal: Reveal; busy: boolean; mutate: Mutate; openEditor: (value: Credential) => void; openProvider: (provider: string) => void }) => {
+  const t = adminText[locale];
+  return <Panel title={t.providersTitle}><div className="provider-groups">{providerCredentialOrder.map((provider) => {
+    const items = values.filter((credential) => credential.provider === provider);
+    return <section className="provider-group" key={provider}>
+      <header className="provider-group-header"><div className="provider-group-title"><span className="provider-group-icon" aria-hidden="true"><KeyRound size={18} /></span><div><h3>{providerLabel(locale, provider)}</h3><span className={`provider-key-count${items.length ? '' : ' is-empty'}`}>{providerCredentialCount(locale, items.length)}</span></div></div><button type="button" className="secondary-action" disabled={busy} onClick={() => openProvider(provider)}><Plus size={14} aria-hidden="true" />{t.addKey}</button></header>
+      {items.length ? <div className="provider-key-list">{items.map((item) => <CredentialRowCompact key={item.id} item={item} locale={locale} reveal={reveal} actions={(credential) => <><button type="button" className="provider-action" title={t.edit} aria-label={t.edit} disabled={busy} onClick={() => openEditor(credential)}><Pencil size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={credential.enabled ? t.stop : t.enable} aria-label={credential.enabled ? t.stop : t.enable} disabled={busy} onClick={() => void mutate(`/providers/${credential.id}`, 'PUT', { enabled: !credential.enabled }, credential.enabled ? t.stop : t.enable)}><Power size={14} aria-hidden="true" /></button><button type="button" className="provider-action" title={t.test} aria-label={t.test} disabled={busy} onClick={() => void mutate(`/providers/${credential.id}/test`, 'POST', undefined, t.testSuccess)}><FlaskConical size={14} aria-hidden="true" /></button><button type="button" className="provider-action danger" title={t.remove} aria-label={t.remove} disabled={busy} onClick={() => { if (window.confirm(credentialRemovalPrompt(locale, credential.label))) void mutate(`/providers/${credential.id}`, 'DELETE', undefined, t.remove); }}><Trash2 size={14} aria-hidden="true" /></button></>} />)}</div> : <div className="provider-empty-state"><KeyRound size={15} aria-hidden="true" /><span>{t.noKeys}</span></div>}
+    </section>;
+  })}</div></Panel>;
 };
 function ChinaAreaCoverage({ locale, request }: { locale: AdminLocale; request: RequestData }) {
   const t = adminText[locale];
@@ -1303,6 +1376,11 @@ const queueReasonText = (reason: string | null | undefined, locale: AdminLocale)
     const provider = reason.split(':')[1] || '';
     const name = provider === 'geoapify' ? 'GEOAPIFY_API_KEY' : provider === 'mappls' ? 'MAPPLS_API_KEY' : provider;
     return locale.startsWith('zh') ? `API Key 不可用，请在地图密钥中检查：${name}` : `API key unavailable; review it under Map Keys: ${name}`;
+  }
+  if (reason.startsWith('api_key_expired:')) {
+    const provider = reason.slice('api_key_expired:'.length);
+    const name = provider === 'onemap' ? 'ONEMAP_ACCESS_TOKEN' : provider;
+    return locale.startsWith('zh') ? `API Key 已过期，请在地图密钥中更新：${name}` : `API key expired; update it under Map Keys: ${name}`;
   }
   if (reason.startsWith('credential_import_pending:')) {
     const provider = reason.split(':')[1] || '';

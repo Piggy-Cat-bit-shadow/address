@@ -11,6 +11,7 @@ import { runAddressSync, syncPostgresStatementTimeout } from './run-address-sync
 import { startDailyScheduler } from './scheduler.mjs';
 import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
 import { ensureAddressPolicies } from './address-policy.mjs';
+import { validatePublishedPoolBatch } from '../database/published-pool.mjs';
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -20,6 +21,46 @@ const integer = (value, fallback, minimum, maximum) => {
   return number;
 };
 const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
+
+export const createPublicationValidationWorker = ({
+  validate,
+  intervalMs = 1_000,
+  log = console
+}) => {
+  let stopped = true;
+  let completed = false;
+  let timer;
+  let running;
+
+  const run = async () => {
+    if (stopped || completed || running) return;
+    running = Promise.resolve()
+      .then(validate)
+      .then((result) => {
+        if (result.retired || result.countryCompleted) {
+          log.log?.(`[publication-validation] country=${result.countryCode} scanned=${result.scanned} retired=${result.retired}`);
+        }
+        completed = Boolean(result.completed);
+      })
+      .catch((error) => log.error?.('[publication-validation] batch failed', error))
+      .finally(() => { running = undefined; });
+    await running;
+    if (!stopped && !completed) timer = setTimeout(() => { void run(); }, intervalMs);
+  };
+
+  return {
+    start: () => {
+      if (!stopped) return;
+      stopped = false;
+      void run();
+    },
+    stop: async () => {
+      stopped = true;
+      clearTimeout(timer);
+      await running;
+    }
+  };
+};
 
 const stripPrefix = (request) => {
   const url = new URL(request.url);
@@ -96,6 +137,13 @@ export const createSyncRuntime = async ({
     retainRaw: enabled(environment.ADDRESS_SYNC_RETAIN_RAW)
   }) : null;
   artifactCleanup?.start();
+  const publicationValidationWorker = createPublicationValidationWorker({
+    validate: () => validatePublishedPoolBatch(queueDatabase),
+    intervalMs: integer(environment.PUBLICATION_VALIDATION_INTERVAL_MS, 1_000, 100, 60_000)
+  });
+  const runIdleMaintenance = async () => {
+    await artifactCleanup?.runOnce();
+  };
   const queue = createSyncQueue({
     environment,
     coordinator,
@@ -111,7 +159,7 @@ export const createSyncRuntime = async ({
         syncMode: 'probe',
         cacheDir: environment.ADDRESS_SYNC_CACHE_DIR
       }),
-    onIdle: () => artifactCleanup?.runOnce()
+    onIdle: runIdleMaintenance
   });
   const handler = createSyncApi({
     coordinator,
@@ -130,6 +178,7 @@ export const createSyncRuntime = async ({
     startScheduler: ({ startup = true } = {}) => {
       if (!enabled(environment.SYNC_SCHEDULER_ENABLED)) return () => {};
       if (stopScheduler) return stopScheduler;
+      publicationValidationWorker.start();
       stopQueue = queue.start();
       stopScheduler = startDailyScheduler({
         coordinator,
@@ -156,6 +205,7 @@ export const createSyncRuntime = async ({
       await artifactCleanup?.stop();
       await queue.stop();
       await coordinator.waitForIdle();
+      await publicationValidationWorker.stop();
       testDatabase?.close();
       await postgresPool?.end();
     }

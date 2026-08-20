@@ -6,6 +6,12 @@ const components = {
   houseNumber: '1', street: "Queen's Road East", locality: 'Wan Chai',
   admin1: 'Hong Kong', admin1Code: 'HK', postcode: ''
 };
+const nativeComponents = {
+  houseNumber: '1號', street: '皇后大道東', locality: '灣仔', admin1: '香港島', admin1Code: 'HK', postcode: ''
+};
+const simplifiedComponents = {
+  houseNumber: '1号', street: '皇后大道东', locality: '湾仔', admin1: '香港岛', admin1Code: 'HK', postcode: ''
+};
 
 const addressRow = {
   id: 'hk-nearby', country_code: 'HK', admin1: components.admin1, admin1_code: components.admin1Code,
@@ -14,7 +20,7 @@ const addressRow = {
   latitude: 22.276, longitude: 114.175, native_language: 'zh-TW', property_type: 'residential',
   generation: 'test', quality_score: 0.95, first_seen_at: '2026-07-15T00:00:00Z',
   expires_at: '2027-07-15T00:00:00Z',
-  component_variants_json: JSON.stringify({ native: components, en: components, 'zh-CN': components }),
+  component_variants_json: JSON.stringify({ native: nativeComponents, en: components, 'zh-CN': simplifiedComponents }),
   address_variants_json: JSON.stringify({
     native: '香港灣仔皇后大道東1號', en: "1 Queen's Road East, Wan Chai, Hong Kong",
     'zh-CN': '香港湾仔皇后大道东1号'
