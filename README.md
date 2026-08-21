@@ -169,6 +169,10 @@ See the [deployment guide](docs/DEPLOYMENT.md) for complete instructions.
 | [Address formats](docs/address-formats.md) | Country formatting and field behavior |
 | [Country strategies](docs/strategies/) | Source, evidence, coordinates, deduplication, validation, and update policy |
 
+## Community
+
+- [linux.do: Learn AI at L-Site!!!](https://linux.do/)
+
 ## License
 
 Project source code is licensed under [MIT](LICENSE). Upstream datasets retain their own licenses and attribution requirements.
