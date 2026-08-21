@@ -169,6 +169,10 @@ docker compose up -d
 | [地址格式](docs/address-formats.md) | 各国格式与字段行为 |
 | [国家策略](docs/strategies/) | 数据源、证据、坐标、去重、验证和更新策略 |
 
+## 社区
+
+- [linux.do](https://linux.do): **Learn AI at L-Site!!!**
+
 ## 许可证
 
 项目源码使用 [MIT](LICENSE)。上游数据集保留各自的许可与署名要求。
