@@ -171,7 +171,7 @@ See the [deployment guide](docs/DEPLOYMENT.md) for complete instructions.
 
 ## Community
 
-- [linux.do: Learn AI at L-Site!!!](https://linux.do/)
+- [linux.do](https://linux.do): **Learn AI at L-Site!!!**
 
 ## License
 
