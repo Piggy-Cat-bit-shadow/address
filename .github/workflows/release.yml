@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v2.0.3
+        description: Release version, for example v2.0.4
         required: true
-        default: v2.0.3
+        default: v2.0.4
 
 permissions:
   contents: read
@@ -112,20 +112,23 @@ jobs:
         run: |
           version='${{ steps.version.outputs.value }}'
           cat > release/RELEASE_NOTES.md <<NOTES
-          This release strengthens automated synchronization, credential quota coordination, recoverable imports, and deployment reliability.
+          This release improves generation throughput and keeps resource use predictable under load.
 
-          ### Features
+          ### Performance
+          - Added a lightweight PostgreSQL generation index so the API no longer loads the full address pool into application memory at startup.
+          - Address generation now uses indexed random pivots across all eligible records instead of a fixed sequence or cached subset.
+          - Added bounded PostgreSQL pools and generation concurrency controls for stable CPU and memory usage.
+          - Added in-flight request protection that returns `429` with `Retry-After` when generation capacity is saturated.
+
+          ### Synchronization
           - Added synchronization history with country, source, execution window, duration, result, and address growth.
-          - Added an independent credential broker for shared quota, cooldown, and key rotation management across production and isolated test environments.
-          - Added persistent checkpoints for long-running Japan, South Korea, and Singapore imports, with automatic continuation after quota recovery.
-
-          ### Improvements
+          - Added persistent checkpoints for long-running imports, with automatic continuation after quota recovery.
           - Persisted source version, exhaustion, failure, and next-check state independently so unchanged sources stop repeating full synchronization after producing no growth.
           - Separated daily and monthly quotas, short-term rate limits, and cooldowns; keys rotate in order and resume at the earliest available recovery time.
           - Separated queue priority, three-rule completion, and source execution eligibility to prevent exhausted countries from consuming workers.
           - Consolidated PostgreSQL initialization, migration, and isolated Docker Compose deployment behavior.
 
-          ### Fixes
+          ### Reliability fixes
           - Fixed South Korea K-apt continuation after Geoapify rate limits or daily quota exhaustion.
           - Fixed jobs becoming stuck after abnormal termination, expired leases, or stale checkpoints.
           - Fixed repeated downloads of no-growth sources, failed shards, and unchanged source versions.

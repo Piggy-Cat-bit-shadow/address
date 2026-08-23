@@ -5,7 +5,7 @@ import { initializePostgres, PostgresDatabase, postgresPoolOptions } from '../se
 describe('PostgreSQL database adapter', () => {
   it('skips repeated schema DDL when both schemas are current', async () => {
     const query = vi.fn(async () => ({
-      rows: [{ address_version: 17, control_version: 18 }], fields: [], rowCount: 1
+      rows: [{ address_version: 18, control_version: 18 }], fields: [], rowCount: 1
     }));
     const release = vi.fn();
     await initializePostgres({ connect: async () => ({ query, release }) });
@@ -27,9 +27,9 @@ describe('PostgreSQL database adapter', () => {
   });
 
   it('uses a configurable high but finite pool ceiling', () => {
-    expect(postgresPoolOptions({}).max).toBe(64);
+    expect(postgresPoolOptions({}).max).toBe(16);
     expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '512' }).max).toBe(512);
-    expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '9999' }).max).toBe(64);
+    expect(postgresPoolOptions({ POSTGRES_POOL_MAX: '9999' }).max).toBe(16);
   });
 
   it('ships native PostgreSQL schemas', async () => {
@@ -41,7 +41,7 @@ describe('PostgreSQL database adapter', () => {
     }
     const addressSchema = await readFile('server/database/schema.sql', 'utf8');
     expect(addressSchema).toContain("native_name='Fryslân'");
-    expect(addressSchema).toContain("generate_series(1, 17)");
+    expect(addressSchema).toContain("generate_series(1, 18)");
     const controlSchema = await readFile('server/control/schema.sql', 'utf8');
     expect(controlSchema).toContain("generate_series(1, 18)");
   });

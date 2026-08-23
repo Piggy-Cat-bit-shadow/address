@@ -57,7 +57,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-address}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
-    command: [postgres, -c, max_connections=256, -c, shared_buffers=512MB, -c, effective_cache_size=2GB]
+    command:
+      - postgres
+      - -c
+      - "max_connections=${POSTGRES_MAX_CONNECTIONS:-96}"
+      - -c
+      - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}"
+      - -c
+      - "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-8GB}"
     secrets:
       - postgres_password
     volumes:
@@ -86,6 +93,10 @@ services:
       <<: *app-environment
       API_HOST: 0.0.0.0
       API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
       SYNC_CONTROL_URL: http://address-sync-control:8791
     command: [node, node_modules/tsx/dist/cli.mjs, server/api/server.ts]
     ports:
@@ -98,7 +109,7 @@ services:
       credential-broker:
         condition: service_healthy
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 8
@@ -112,6 +123,8 @@ services:
       <<: *app-environment
       SYNC_HOST: 0.0.0.0
       SYNC_PORT: 8791
+      POSTGRES_POOL_MAX: ${SYNC_POSTGRES_POOL_MAX:-6}
+      POSTGRES_POOL_MIN: ${SYNC_POSTGRES_POOL_MIN:-1}
     command: [node, node_modules/tsx/dist/cli.mjs, server/sync/index.mjs]
     networks:
       internal:
@@ -140,6 +153,8 @@ services:
       <<: *app-environment
       CREDENTIAL_BROKER_HOST: 0.0.0.0
       CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
       CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
       CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
     secrets:

@@ -336,7 +336,7 @@ export const storedAddressPoolV2RowIsPublishable = (
 
 const missingSchema = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
-  return /no such (?:table|view).*address_pool_runtime|(?:does not exist.*address_pool_runtime|address_pool_runtime.*does not exist)/i.test(message);
+  return /no such (?:table|view).*(?:address_pool_runtime|address_generation_index)|(?:does not exist.*(?:address_pool_runtime|address_generation_index)|(?:address_pool_runtime|address_generation_index).*does not exist)/i.test(message);
 };
 
 interface RegionNameRow { code: string; name: string; native_name: string; zh_name: string }
@@ -657,10 +657,36 @@ export const pickAddressPoolV2Address = async (
     bindings.push(`%${normalize(filters.q).replace(/[\\%_]/g, '\\$&')}%`);
   }
 
+  const generationClauses = ['country_code = ?', 'active = 1'];
+  const generationBindings: unknown[] = [country];
+  if (residential) generationClauses.push('residential_ready = 1');
+  const generationRegionClause = aliasClause(
+    ['admin1_key', 'admin1_code_key'],
+    aliases([filters.region, target?.region, target?.regionNative, target?.regionCode, ...target?.regionAliases || []]),
+    generationBindings
+  );
+  if ((filters.region || target?.region) && generationRegionClause) generationClauses.push(generationRegionClause);
+  const generationCityClause = aliasClause(
+    ['locality_key', 'postal_locality_key'],
+    aliases([filters.city, target?.city, target?.cityNative, ...target?.cityAliases || []]),
+    generationBindings
+  );
+  if ((filters.city || target?.city) && generationCityClause) generationClauses.push(generationCityClause);
+  const generationPostcode = filters.postcode || target?.postcode;
+  if (generationPostcode) {
+    generationClauses.push('postcode_key = ?');
+    generationBindings.push(normalize(generationPostcode).replace(/\s/gu, ''));
+  }
+  if (filters.q?.trim()) {
+    generationClauses.push(`search_text LIKE ? ESCAPE '\\'`);
+    generationBindings.push(`%${normalize(filters.q).replace(/[\\%_]/g, '\\$&')}%`);
+  }
+
   const pivot = hashSeed(`${country}:${seed}:address-pool-v2`) & 0x7fffffff;
   const candidateLimit = residential ? 16 : 64;
   try {
     const select = `SELECT id FROM address_pool WHERE ${clauses.join(' AND ')}${residential ? ` AND ${residentialEvidenceClause}` : ''}`;
+    const generationSelect = `SELECT address_id AS id FROM address_generation_index WHERE ${generationClauses.join(' AND ')}`;
     const pickEligible = async (sql: string, values: unknown[]): Promise<VerifiedAddress | undefined> => {
       const identifiers = (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
       if (!identifiers.length) return undefined;
@@ -679,6 +705,15 @@ export const pickAddressPoolV2Address = async (
       }
       return undefined;
     };
+    // Test doubles and older database adapters may not expose exec(); in that
+    // case use the original indexed address_pool query directly.
+    if (typeof (db as { exec?: unknown }).exec === 'function') {
+      const indexed = await pickEligible(`${generationSelect} AND random_key >= ? ORDER BY random_key, address_id LIMIT ${candidateLimit}`,
+        [...generationBindings, pivot]);
+      if (indexed) return indexed;
+      const indexedFallback = await pickEligible(`${generationSelect} ORDER BY random_key, address_id LIMIT ${candidateLimit}`, generationBindings);
+      if (indexedFallback) return indexedFallback;
+    }
     return await pickEligible(`${select} AND random_key >= ? ORDER BY random_key, id LIMIT ${candidateLimit}`, [...bindings, pivot])
       || await pickEligible(`${select} ORDER BY random_key, id LIMIT ${candidateLimit}`, bindings);
   } catch (error) {

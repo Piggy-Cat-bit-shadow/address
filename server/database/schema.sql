@@ -86,6 +86,30 @@ CREATE TABLE IF NOT EXISTS address_pool (
   CHECK (active = 1 OR retired_at IS NOT NULL)
 );
 
+CREATE TABLE IF NOT EXISTS address_generation_index (
+  address_id TEXT PRIMARY KEY REFERENCES address_pool(id) ON UPDATE CASCADE ON DELETE CASCADE,
+  country_code TEXT NOT NULL CHECK (length(country_code) = 2 AND country_code = upper(country_code)),
+  admin1_key TEXT NOT NULL DEFAULT '',
+  admin1_code_key TEXT NOT NULL DEFAULT '',
+  locality_key TEXT NOT NULL DEFAULT '',
+  postal_locality_key TEXT NOT NULL DEFAULT '',
+  district_key TEXT NOT NULL DEFAULT '',
+  postcode_key TEXT NOT NULL DEFAULT '',
+  locality TEXT NOT NULL DEFAULT '',
+  postal_locality TEXT NOT NULL DEFAULT '',
+  district TEXT NOT NULL DEFAULT '',
+  postcode TEXT NOT NULL DEFAULT '',
+  street TEXT NOT NULL DEFAULT '',
+  house_number TEXT NOT NULL DEFAULT '',
+  building_name TEXT NOT NULL DEFAULT '',
+  search_text TEXT NOT NULL DEFAULT '',
+  random_key INTEGER NOT NULL CHECK (random_key BETWEEN 0 AND 2147483647),
+  residential_ready INTEGER NOT NULL DEFAULT 0 CHECK (residential_ready IN (0, 1)),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  source_revision TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS address_pool_revisions (
   kind TEXT PRIMARY KEY,
   version TEXT NOT NULL
@@ -523,6 +547,23 @@ CREATE INDEX IF NOT EXISTS idx_admin_coverage_parent ON admin_coverage_stats(par
 CREATE INDEX IF NOT EXISTS idx_sync_node_overrides_country ON sync_node_overrides(country_code,level,node_key);
 CREATE INDEX IF NOT EXISTS idx_address_pool_coordinates
   ON address_pool(country_code,latitude,longitude) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_country_random
+  ON address_generation_index(country_code,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_country_residential_random
+  ON address_generation_index(country_code,residential_ready,active,random_key,address_id)
+  WHERE active=1 AND residential_ready=1;
+CREATE INDEX IF NOT EXISTS idx_generation_admin1_random
+  ON address_generation_index(country_code,admin1_key,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_admin1_code_random
+  ON address_generation_index(country_code,admin1_code_key,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_locality_random
+  ON address_generation_index(country_code,locality_key,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_postal_locality_random
+  ON address_generation_index(country_code,postal_locality_key,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_district_random
+  ON address_generation_index(country_code,district_key,active,random_key,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_postcode_random
+  ON address_generation_index(country_code,postcode_key,active,random_key,address_id) WHERE active=1;
 
 UPDATE catalog_regions SET native_name='Fryslân'
 WHERE country_code='NL' AND code='FR' AND native_name IN ('Frieland','Friesland');
@@ -587,5 +628,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 17) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 18) AS version
 ON CONFLICT (version) DO NOTHING;

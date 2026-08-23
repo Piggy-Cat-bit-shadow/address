@@ -1,7 +1,6 @@
 import { serve, type HttpBindings } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { resolve } from 'node:path';
-import { Worker } from 'node:worker_threads';
 import { Hono } from 'hono';
 import app from './index';
 import { openRuntimeDatabases } from '../database/runtime';
@@ -12,9 +11,8 @@ import {
   createAmapProxyRateLimiter, proxyAmapServiceRequest, requestClientAddress
 } from '../control/admin-api';
 import { ChinaDataService } from '../china/service';
-import { countries } from '../../src/domain/countries';
-import { DatabaseRandomAddressService } from './services/database-random-address';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
+import { InFlightLimiter, isGenerationPath } from './in-flight-limiter';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -43,6 +41,22 @@ const staticRoot = resolve(process.env.STATIC_ROOT || 'dist');
 const syncControlUrl = process.env.SYNC_CONTROL_URL || 'http://127.0.0.1:8791';
 const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
 const releaseId = process.env.ADDRESS_RELEASE?.trim() || 'development';
+const generationInFlightLimit = integer(process.env.API_MAX_INFLIGHT_GENERATIONS, 4);
+const generationLimiter = new InFlightLimiter(Math.min(generationInFlightLimit, 128));
+const runGenerationRequest = async (path: string, task: () => Promise<Response>): Promise<Response> => {
+  if (!isGenerationPath(path)) return task();
+  if (!generationLimiter.tryAcquire()) {
+    return Response.json({ error: 'GENERATION_BUSY' }, {
+      status: 429,
+      headers: { 'Cache-Control': 'no-store', 'Retry-After': '2' }
+    });
+  }
+  try {
+    return await task();
+  } finally {
+    generationLimiter.release();
+  }
+};
 const triggerCountrySync = async (countryCode: string): Promise<Record<string, unknown>> => {
   const token = process.env.SYNC_ADMIN_TOKEN?.trim();
   if (!token) throw new Error('SYNC_CONTROL_UNAVAILABLE');
@@ -61,28 +75,8 @@ const adminApi = createAdminApi({
   control, china, addressDb: database, trustProxy, triggerCountrySync,
   warmReadModels: true
 });
-const chinaTargetCount = Number(await database.prepare('SELECT COUNT(*) AS total FROM cn_sync_targets').first('total') || 0);
-let chinaInitialization: Worker | undefined;
-if (chinaTargetCount === 0) {
-  await china.initializeTargets();
-} else {
-  chinaInitialization = new Worker(new URL('../china/initialization-worker.ts', import.meta.url), {
-    execArgv: ['--import', 'tsx'],
-    workerData: {
-      postgresUrl: runtimeDatabases.postgresUrl,
-      masterKey,
-      dataRoot
-    }
-  });
-  chinaInitialization.once('message', (message: { type?: string }) => {
-    if (message?.type === 'done') void china.wake(1_000).catch(() => undefined);
-  });
-  chinaInitialization.once('error', (error) => console.error(`China initialization worker failed: ${error instanceof Error ? error.message : String(error)}`));
-}
 const accessApi = createAccessApi(control, { trustProxy, addressDb: database });
 const amapProxyRateLimit = createAmapProxyRateLimiter();
-const randomAddressPool = new DatabaseRandomAddressService(database, countries.map(({ code }) => code));
-await randomAddressPool.start();
 const securityHeaders = (response: Response): Response => {
   response.headers.set('X-Address-Release', releaseId);
   response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -99,7 +93,7 @@ staticApp.get('*', serveStatic({ root: staticRoot, path: 'index.html' }));
 const environment = {
   ADDRESS_DB: database,
   LOCATION_DB: database,
-  RANDOM_ADDRESS_SERVICE: randomAddressPool,
+  BATCH_GENERATION_CONCURRENCY: process.env.BATCH_GENERATION_CONCURRENCY || '4',
   ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN || '*',
   AMAP_API_KEY: process.env.AMAP_API_KEY,
   GEOAPIFY_API_KEY: process.env.GEOAPIFY_API_KEY,
@@ -134,9 +128,6 @@ const requestEnvironment = async () => {
 };
 
 await Promise.all([
-  ...countries.map(({ code }) => Promise.resolve(app.fetch(new Request(
-    `http://127.0.0.1/api/v1/generate?country=${code}&residential=false&strategy=instant&seed=startup-warmup-${code}&requestId=startup-warmup-${code}`
-  ), environment))),
   Promise.resolve(app.fetch(new Request('http://127.0.0.1/api/v1/countries'), environment)),
   Promise.resolve(app.fetch(new Request(
     'http://127.0.0.1/api/v1/locations/search?country=US&field=region&residential=true&limit=200'
@@ -176,7 +167,10 @@ const server = serve({
       if (!await authorizeWebRequest(control, request)) return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401 }));
       const target = new URL(request.url);
       target.pathname = target.pathname.replace(/^\/web-api\/v1/u, '/api/v1');
-      return securityHeaders(await app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node }));
+      return securityHeaders(await runGenerationRequest(
+        target.pathname,
+        async () => app.fetch(new Request(target, request), { ...await requestEnvironment(), ...node })
+      ));
     }
     if (url.pathname.startsWith('/api/')) {
       if (!['/api/v1/health', '/api/v1/ready', '/api/v1/openapi.json'].includes(url.pathname)) {
@@ -189,7 +183,10 @@ const server = serve({
           }));
         }
       }
-      return securityHeaders(await app.fetch(request, { ...await requestEnvironment(), ...node, API_TOKEN_AUTHENTICATED: true }));
+      return securityHeaders(await runGenerationRequest(
+        url.pathname,
+        async () => app.fetch(request, { ...await requestEnvironment(), ...node, API_TOKEN_AUTHENTICATED: true })
+      ));
     }
     const localizedPublicPage = /^\/(?:en|zh-CN|zh-TW|ja|ko|de|fr|es|pt)\/(?:admin|access)(?:\/|$)/u.test(url.pathname);
     const publicStatic = url.pathname.startsWith('/admin') || url.pathname.startsWith('/access') || localizedPublicPage
@@ -216,9 +213,8 @@ let stopping = false;
 const shutdown = (): void => {
   if (stopping) return;
   stopping = true;
-  if (chinaInitialization) void chinaInitialization.terminate().catch(() => undefined);
   server.close((error) => {
-    void china.close().finally(() => randomAddressPool.close()).finally(() => {
+    void china.close().finally(() => {
       void runtimeDatabases.close().finally(() => {
         if (error) {
           console.error(error);

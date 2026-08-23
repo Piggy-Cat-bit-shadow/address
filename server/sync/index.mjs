@@ -12,6 +12,9 @@ import { startDailyScheduler } from './scheduler.mjs';
 import { createSourceAdapters, loadSourceCatalog } from './source-adapters.mjs';
 import { ensureAddressPolicies } from './address-policy.mjs';
 import { validatePublishedPoolBatch } from '../database/published-pool.mjs';
+import { masterKeyFrom } from '../control/security';
+import { ControlStore } from '../control/store';
+import { ChinaDataService } from '../china/service';
 
 const integer = (value, fallback, minimum, maximum) => {
   const number = value === undefined || value === '' ? fallback : Number.parseInt(value, 10);
@@ -21,6 +24,20 @@ const integer = (value, fallback, minimum, maximum) => {
   return number;
 };
 const enabled = (value) => /^(1|true|yes)$/iu.test(String(value || ''));
+
+const ensureChinaTargets = async (database, environment, postgresUrl) => {
+  if (String(environment.NODE_ENV || '').toLowerCase() === 'test'
+    || !String(environment.CONFIG_MASTER_KEY || '').trim()) return;
+  const count = Number(await database.prepare('SELECT COUNT(*) AS total FROM cn_sync_targets').first('total') || 0);
+  if (count > 0) return;
+  const control = new ControlStore(database, masterKeyFrom(environment.CONFIG_MASTER_KEY));
+  const china = new ChinaDataService(database, control, resolve(environment.ADDRESS_DATA_ROOT || 'data'), {
+    postgresUrl,
+    masterKey: masterKeyFrom(environment.CONFIG_MASTER_KEY)
+  });
+  await china.initializeTargets({ scheduleContinuation: false });
+  await china.close();
+};
 
 export const createPublicationValidationWorker = ({
   validate,
@@ -93,6 +110,7 @@ export const createSyncRuntime = async ({
   const database = providedDatabase || new PostgresDatabase(postgresPool);
   const queueDatabase = providedDatabase || new PostgresDatabase(postgresPool);
   await ensureAddressPolicies(database);
+  await ensureChinaTargets(database, environment, environment.POSTGRES_URL || environment.DATABASE_URL || '');
   const scheduleStateFile = resolve(stateDir, 'daily-schedule.json');
   let catalogPromise;
   const catalogShards = () => {

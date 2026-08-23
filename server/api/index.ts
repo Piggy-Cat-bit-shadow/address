@@ -48,6 +48,7 @@ interface Bindings {
   YOUDAO_APP_SECRET?: string;
   TRUST_PROXY?: string;
   API_TOKEN_AUTHENTICATED?: boolean;
+  BATCH_GENERATION_CONCURRENCY?: string;
   incoming?: { socket?: { remoteAddress?: string } };
 }
 
@@ -568,21 +569,6 @@ app.get('/api/v1/generate', async (context) => {
   let resolvedTarget = target;
   let eligibleCount: number | undefined;
   const pooled = await measureStage(timings, 'pool', async () => {
-    if (!ipRegionMode && context.env.RANDOM_ADDRESS_SERVICE) {
-      const indexed = await toleratePoolFailure(() => context.env.RANDOM_ADDRESS_SERVICE!.pick({
-        countryCode: country.code,
-        filters,
-        target,
-        seed
-      }));
-      if (indexed?.ready) {
-        if (!indexed.result) return undefined;
-        pooledSource = indexed.result.source;
-        filterMatchLevel = 'exact';
-        eligibleCount = indexed.result.eligibleCount;
-        return indexed.result.address;
-      }
-    }
     if (country.code === 'CN' && residential) {
       const community = await toleratePoolFailure(() => pickChinaCommunityAddress(
         context.env.ADDRESS_DB,
@@ -646,6 +632,24 @@ app.get('/api/v1/generate', async (context) => {
       pooledSource = 'address-pool-v2';
       filterMatchLevel = 'exact';
       return current;
+    }
+    // Keep the legacy in-memory service as an opt-in compatibility fallback
+    // for tests and deployments that explicitly provide it. Production no
+    // longer starts that service, so normal reads remain DB-first.
+    if (context.env.RANDOM_ADDRESS_SERVICE) {
+      const indexed = await toleratePoolFailure(() => context.env.RANDOM_ADDRESS_SERVICE!.pick({
+        countryCode: country.code,
+        filters,
+        target,
+        seed
+      }));
+      if (indexed?.ready) {
+        if (!indexed.result) return undefined;
+        pooledSource = indexed.result.source;
+        filterMatchLevel = 'exact';
+        eligibleCount = indexed.result.eligibleCount;
+        return indexed.result.address;
+      }
     }
     // A location-filtered request is exact-or-empty. Nearby, region-only and
     // nationwide substitutions can silently return an address from the wrong
@@ -763,6 +767,7 @@ app.post('/api/v1/generate/batch', async (context) => {
     Number(count) * (unique ? 6 : 1),
     Number(count) + Math.min(excluded.size, Number(count) * 4)
   ));
+  const batchConcurrency = Math.max(1, Math.min(10, Number.parseInt(context.env.BATCH_GENERATION_CONCURRENCY || '4', 10) || 4));
   let attempts = 0;
 
   const generateOne = async (attempt: number): Promise<{ result?: GeneratedBundle; error?: { code: string; message: string; status: number } }> => {
@@ -782,7 +787,7 @@ app.post('/api/v1/generate/batch', async (context) => {
   };
 
   while (results.length < Number(count) && attempts < maximumAttempts) {
-    const roundSize = Math.min(10, maximumAttempts - attempts, Math.max(1, (Number(count) - results.length) * 2));
+    const roundSize = Math.min(batchConcurrency, maximumAttempts - attempts, Math.max(1, (Number(count) - results.length) * 2));
     const roundStart = attempts;
     attempts += roundSize;
     const round = await Promise.all(Array.from({ length: roundSize }, (_, index) => generateOne(roundStart + index)));

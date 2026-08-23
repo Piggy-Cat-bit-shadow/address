@@ -1,6 +1,6 @@
 {
   "name": "address",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -48,8 +48,8 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@faker-js/faker": "^10.5.0",
     "@hono/node-server": "latest",
-    "astro": "latest",
-    "hono": "latest",
+    "astro": "7.2.4",
+    "hono": "4.13.3",
     "lucide-react": "^1.28.0",
     "maplibre-gl": "^5.24.0",
     "opencc-js": "^1.4.1",

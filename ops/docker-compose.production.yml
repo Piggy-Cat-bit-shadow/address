@@ -52,9 +52,13 @@ x-production-api: &production-api
     <<: *production-environment
     API_HOST: 0.0.0.0
     API_PORT: 8787
+    POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+    POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+    BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+    API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
     SYNC_CONTROL_URL: http://address-sync-control:8791
   healthcheck:
-    test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/ready').then(r=>{if(!r.ok||r.headers.get('x-address-release')!==process.env.ADDRESS_RELEASE)process.exit(1)}).catch(()=>process.exit(1))"]
+    test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>{if(!r.ok||r.headers.get('x-address-release')!==process.env.ADDRESS_RELEASE)process.exit(1)}).catch(()=>process.exit(1))"]
     interval: 5s
     timeout: 5s
     retries: 24
@@ -69,6 +73,8 @@ x-production-broker: &production-broker
     <<: *production-environment
     CREDENTIAL_BROKER_HOST: 0.0.0.0
     CREDENTIAL_BROKER_PORT: 8792
+    POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+    POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
     CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
     CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
   secrets:
@@ -106,6 +112,10 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_BLUE_RELEASE:?Set ADDRESS_BLUE_RELEASE}
       API_HOST: 0.0.0.0
       API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
       SYNC_CONTROL_URL: http://address-sync-control:8791
     depends_on:
       postgres:
@@ -122,6 +132,8 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_BLUE_RELEASE:?Set ADDRESS_BLUE_RELEASE}
       CREDENTIAL_BROKER_HOST: 0.0.0.0
       CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
       CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
       CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
     depends_on:
@@ -137,6 +149,10 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_GREEN_RELEASE:?Set ADDRESS_GREEN_RELEASE}
       API_HOST: 0.0.0.0
       API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
       SYNC_CONTROL_URL: http://address-sync-control:8791
     depends_on:
       postgres:
@@ -153,6 +169,8 @@ services:
       ADDRESS_RELEASE: ${ADDRESS_GREEN_RELEASE:?Set ADDRESS_GREEN_RELEASE}
       CREDENTIAL_BROKER_HOST: 0.0.0.0
       CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
       CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
       CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
     depends_on:
@@ -181,6 +199,8 @@ services:
     image: ${ADDRESS_SYNC_IMAGE:?Set ADDRESS_SYNC_IMAGE}
     environment:
       CREDENTIAL_BROKER_URL: http://gateway:8792
+      POSTGRES_POOL_MAX: ${SYNC_POSTGRES_POOL_MAX:-6}
+      POSTGRES_POOL_MIN: ${SYNC_POSTGRES_POOL_MIN:-1}
     depends_on: !override
       postgres:
         condition: service_healthy

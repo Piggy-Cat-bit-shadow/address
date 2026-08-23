@@ -2,6 +2,7 @@ import { applyHierarchicalQuota } from './address-policy.mjs';
 import { validateAddressQuality } from '../../src/domain/address-quality.mjs';
 import { canonicalUsSubdivisionCode, validateAdministrativeHierarchy } from '../../src/domain/administrative-integrity.mjs';
 import { requiresAdminCode, validateAddressContract } from '../../src/domain/address-contracts.mjs';
+import { refreshAddressGenerationIndex } from '../database/generation-index.mjs';
 
 const cleanKey = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase('und');
 const postcodeKey = (value) => cleanKey(value).replace(/\s/gu, '');
@@ -698,6 +699,13 @@ export class PostgresAddressImporter {
     } catch (error) {
       await this.database.exec('ROLLBACK').catch(() => {});
       throw error;
+    }
+    try {
+      await refreshAddressGenerationIndex(this.database, shard.countryCode);
+    } catch (error) {
+      // The indexed path is an optimization; publication remains available
+      // through the bounded address_pool query when maintenance is delayed.
+      console.error('[address-generation-index] refresh failed', error instanceof Error ? error.message : String(error));
     }
     const residentialCount = localized.filter((record) => record.propertyType === 'residential' || record.propertyType === 'apartment').length;
     return {
