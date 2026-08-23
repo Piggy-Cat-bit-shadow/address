@@ -118,7 +118,7 @@ jobs:
           - Added a lightweight PostgreSQL generation index so the API no longer loads the full address pool into application memory at startup.
           - Address generation now uses indexed random pivots across all eligible records instead of a fixed sequence or cached subset.
           - Added bounded PostgreSQL pools and generation concurrency controls for stable CPU and memory usage.
-          - Added in-flight request protection that returns `429` with `Retry-After` when generation capacity is saturated.
+          - Added in-flight request protection that returns HTTP 429 with a Retry-After header when generation capacity is saturated.
 
           ### Synchronization
           - Added synchronization history with country, source, execution window, duration, result, and address growth.
