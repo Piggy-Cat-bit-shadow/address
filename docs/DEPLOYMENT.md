@@ -15,7 +15,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-The initialization script creates only relative directories and four random bootstrap secrets. It never overwrites existing files. Read the initial administrator password with:
+The initialization script creates only relative directories and six random bootstrap secrets. It never overwrites existing files. Read the initial administrator password with:
 
 ```bash
 cat config/secrets/admin_bootstrap_password
@@ -67,7 +67,7 @@ TRUST_PROXY=false
 COOKIE_SECURE=false
 ```
 
-For production behind HTTPS, set an exact `ALLOWED_ORIGIN` and set `TRUST_PROXY` and `COOKIE_SECURE` to `true`. Manage provider API keys and ordinary business settings in the administrator console. The empty, ignored `config/address.env` is reserved for advanced licensed-feed URLs, field mappings, and license gates that must exist before the sync process starts.
+For production behind HTTPS, set an exact `ALLOWED_ORIGIN` and set `TRUST_PROXY` and `COOKIE_SECURE` to `true`. Manage provider API keys and ordinary business settings in the administrator console. The empty, ignored `config/address.env` is reserved for advanced synchronization-adapter switches and limits that must exist before the sync process starts.
 
 ## Services and Network
 
@@ -75,6 +75,7 @@ For production behind HTTPS, set an exact `ALLOWED_ORIGIN` and set `TRUST_PROXY`
 - `migrate`: runs database migrations once before application startup
 - `api`: WebUI and API, bound to `127.0.0.1:8787` by default
 - `sync`: automatic synchronization on the private Compose network
+- `credential-broker`: encrypted credential rotation and quota coordination on the private Compose network
 
 Automatic synchronization is enabled by default. Queue discovery, timeouts, bounded retries, cooldowns, source exhaustion, and temporary-file cleanup are handled by the service.
 

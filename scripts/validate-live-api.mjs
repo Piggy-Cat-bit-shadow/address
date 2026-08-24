@@ -2,7 +2,6 @@ import manifest from '../src/domain/location-catalog.meta.json' with { type: 'js
 
 const base = process.env.API_BASE_URL || 'http://127.0.0.1:8787/api/v1';
 const authorization = process.env.API_TOKEN ? { Authorization: `Bearer ${process.env.API_TOKEN}` } : {};
-const unavailableCountries = new Set(['NG']);
 const maxMetadataMs = Number.parseInt(process.env.MAX_METADATA_MS || '3000', 10);
 const maxGenerationMs = Number.parseInt(process.env.MAX_ORDINARY_GENERATION_MS || '5000', 10);
 const maxGenerationServerMs = Number.parseInt(process.env.MAX_GENERATION_SERVER_P95_MS || '100', 10);
@@ -80,17 +79,22 @@ assert(shenzhen.cities.some((city) => /Shenzhen/i.test([city.value, city.en, cit
 
 const registry = await get('/countries');
 assert(registry.length === 27, `country registry exposes ${registry.length}/27 countries`);
+const availableCountries = new Set();
 for (const country of registry) {
-  if (unavailableCountries.has(country.code)) {
-    assert(country.generationMode === 'sync-required', `${country.code} should remain unavailable`);
-  } else {
+  const ordinaryAvailable = Number(country.addressCount) > 0;
+  const residentialAvailable = Number(country.residentialCount) > 0 && country.residentialAvailable;
+  if (ordinaryAvailable || residentialAvailable) {
+    assert(ordinaryAvailable && residentialAvailable, `${country.code} has a partially published pool`);
     assert(Number(country.addressCount) > 0, `${country.code} ordinary address count is empty`);
     assert(Number(country.residentialCount) > 0 && country.residentialAvailable, `${country.code} residential address count is empty`);
     assert(country.generationMode === 'synchronized-pool', `${country.code} is not using the synchronized pool`);
+    availableCountries.add(country.code);
+  } else {
+    assert(country.generationMode === 'sync-required', `${country.code} unavailable pool is not sync-required`);
   }
 }
 const residential = [];
-for (const country of registry.filter(({ code }) => !unavailableCountries.has(code))) {
+for (const country of registry.filter(({ code }) => availableCountries.has(code))) {
   const cities = await get(`/locations/search?country=${country.code}&field=city&residential=true&limit=20`);
   assert(cities.total > 0, `${country.code} residential city coverage is empty`);
   residential.push({ country: country.code, cities: cities.total });

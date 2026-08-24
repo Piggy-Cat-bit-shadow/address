@@ -55,6 +55,14 @@ describe('production blue-green deployment', () => {
     expect(deployClient).toContain('"${SSH_OPTIONS[@]}"');
   });
 
+  it('excludes tracked files deleted from the worktree when staging a release', () => {
+    expect(deployClient).toContain('[[ -f "$file" || -L "$file" ]]');
+  });
+
+  it('uses a unique release archive path across concurrent deploy attempts', () => {
+    expect(deployClient).toContain('TARBALL=$(mktemp "${TMPDIR:-/tmp}/address-$REL.XXXXXX.tar.gz")');
+  });
+
   it('keeps sync singleton with enough time to finish a hard-timeout job', () => {
     expect(overlay.match(/stop_grace_period: 95m/gmu)).toHaveLength(2);
     expect(overlay.match(/^  sync:/gmu)).toHaveLength(1);

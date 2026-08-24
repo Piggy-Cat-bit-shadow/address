@@ -6,14 +6,14 @@
 | 格式 / 邮编 | `<unit> <house> <street>, <suburb>, <city> <postcode>, ZA`；unit 缺失不补；4 位邮编仅接受 South African Post Office 官方表中 `PlaceName=suburb`、`Town=city` 且唯一的 `StrCode` |
 | 行政区 | eThekwini 使用 `DISTRICT/SUBURB` + KwaZulu-Natal；Cape Town 使用 SAPO 唯一 postal town + 官方 `OFC_SBRB_NAME` + Western Cape；冲突记录拒绝发布 |
 | 住宅证据 | eThekwini 地址点必须精确落入唯一住宅 zoning；Cape Town 仅接受同一官方地块的纯 `Residential 1/2` 或 `General Residential 1-6`，逗号拼接的混合 zoning 全部拒绝；Geofabrik 仍要求 OSM 明确住宅建筑 |
+| 真实字段 / 生成字段 | 官方/OSM 门牌、道路、suburb、城市、省、坐标及 SAPO 唯一匹配邮编均为真实字段；生成字段：无，不补单元号 |
+| 坐标 / 去重 | 官方地块代表点和 OSM 坐标统一为 WGS84；按官方地块/地址 ID、OSM ID 和规范化地址去重 |
 | 发布门禁 | 质量高于数量。仅发布 E3：地址存在与独立住宅用途证据同时成立；本国格式规定的必填组件缺一即淘汰，字段冲突拒绝合并；只允许可逆、可验证的格式规范化。 |
-| 同步频率 | 每月检查 eThekwini/SAPO；新快照通过门禁后原子切换，失败保留上一 active 快照 |
+| 同步方式 | 自动初始化一次；显式来源探测发现 eThekwini、Cape Town、SAPO 或 Geofabrik 版本变化时才构建新快照 |
 | 验证 / 排除 | 仅保留完整门牌字段与纯住宅 zoning，重复门牌按规范化键去重；数值道路、非标准门牌、多个邮编、混合/非住宅 zoning 和缺坐标记录全部拒绝。 |
+| 策略版本 / 状态 / 更新 | 1.9 / 官方双源 + 多规则完成下限 / 2026-08-24 |
 
 - 原文与英文变体保留来源语言；简体中文语义字段未完成自动翻译回填时不进入随机索引。英语原生记录也进入后台回填，地址同步繁忙时仍按有界批次推进，成功后自动刷新索引。
-| 许可 | eThekwini 与 City of Cape Town 官方 Open Data item 均指向各自专用条款（无 SPDX 代码）+ SAPO 官方邮编表；保留来源署名，不把条款标成 CC |
-| 策略版本 / 状态 / 更新 | 1.9 / 官方双源 + 多规则完成下限 / 2026-08-03 |
-
 - 默认 active 地址上限 8,000；省、市镇、地区单节点上限 4,000/3,800/60，后台可覆盖；只裁剪地址记录，行政区划与邮编目录保持完整。
 - eThekwini 只覆盖 KwaZulu-Natal；Cape Town 只覆盖 Western Cape，并使用官方 parcel centroid，不通过附近地块推断住宅用途。
 - Cape Town 来源依据：[Land Parcels 官方 item](https://www.arcgis.com/home/item.html?id=7c59bb7a1b724d11a70d3db591233df1)、[Street Address Numbers 官方 item](https://www.arcgis.com/home/item.html?id=c2101858187f424298f85e60f9706533)、[开放数据条款](https://www.capetown.gov.za/General/Terms-of-use-open-data) 与 [SAPO 邮编下载页](https://www.postoffice.co.za/questions/postalcode.html)。
@@ -33,6 +33,6 @@
 
 ## 运行时随机生成
 
-- 公开普通生成只从当前筛选范围内通过发布门禁的完整数据库候选集选择，不使用固定候选窗口、固定顺序或国家特例。
-- 服务启动后由最多 4 个按国家分区的只读 worker 建立地址引用与筛选索引；每次按 seed 从完整候选集选择引用，再按主键从 PostgreSQL 读取完整地址及证据。
+- 公开普通生成直接在 PostgreSQL 完整合格范围选择：支持连续生成序号的未筛选国家池按序号等概率选择，筛选范围使用有界循环索引窗口；不使用固定子集或固定顺序。
+- 每次按 seed 在有界候选窗口内执行独立偏移，再按主键读取完整地址与证据；API 不把完整地址池加载到进程内存，也不执行全表随机排序。
 - 未传入 seed 时由服务器为每个请求生成新 UUID；相同显式 seed 在同一数据库快照中可复现。数据库提交后，新 worker 快照全部就绪才原子替换旧快照。

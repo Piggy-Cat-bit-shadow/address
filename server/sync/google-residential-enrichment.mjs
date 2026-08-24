@@ -62,7 +62,7 @@ const metersBetween = (left, right) => {
   return Math.hypot(x, y) * 6_371_000;
 };
 
-const geometryMatches = (seed, result) => {
+export const pointMatchesSeedGeometry = (seed, result) => {
   const longitude = Number(result.location?.longitude ?? result.geometry?.location?.lng);
   const latitude = Number(result.location?.latitude ?? result.geometry?.location?.lat);
   if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return false;
@@ -141,7 +141,7 @@ export const evaluateGoogleResidentialResult = (payload, seed, countryCode) => {
       reason = 'insufficient_geometry_precision';
       continue;
     }
-    if (!geometryMatches(seed, result)) {
+    if (!pointMatchesSeedGeometry(seed, result)) {
       reason = 'geometry_mismatch';
       continue;
     }

@@ -799,14 +799,14 @@ describe('queue snapshot', () => {
     const facts = stubFacts();
     const catalog = stubCatalogShards.map((shard) => shard.id === 'oa-nl' ? {
       ...shard,
-      source: { configurationError: 'missing_source_configuration:ADDRESS_SYNC_VPOSTCODE_FEED_URL' }
+      source: { configurationError: 'missing_source_configuration:ADDRESS_SYNC_CUSTOM_FEED_URL' }
     } : shard);
     const snapshot = await computeQueueSnapshot({
       sources: stubSources(facts, {}), catalogShards: catalog,
       queueState: { schemaVersion: 1, countries: {} }, now
     });
     expect(snapshot.entries.find((entry) => entry.countryCode === 'NL')).toMatchObject({
-      state: 'blocked', reason: 'missing_source_configuration:ADDRESS_SYNC_VPOSTCODE_FEED_URL'
+      state: 'blocked', reason: 'missing_source_configuration:ADDRESS_SYNC_CUSTOM_FEED_URL'
     });
     expect(snapshot.entries.find((entry) => entry.countryCode === 'US')).toMatchObject({ state: 'queued' });
   });
@@ -1110,6 +1110,68 @@ describe('queue snapshot', () => {
     expect(waiting.entries.find((entry) => entry.countryCode === 'IN')).toMatchObject({
       state: 'quota_wait', runnableShardId: shard.id, quotaAvailable: false,
       nextAttemptAt: '2026-09-01T08:00:00Z'
+    });
+  });
+
+  it('uses an available source instead of a different source waiting for quota', async () => {
+    const facts = stubFacts();
+    facts.policies.IN = { enabled: true, targetCount: 8_000, updatedAt: 'p-in' };
+    facts.counts.IN = 0;
+    facts.deficits.belowTarget.add('IN');
+    const google = {
+      id: 'google-residential-enrichment-in', countryCode: 'IN', quotaProvider: 'google-geocoding',
+      source: { adapter: 'google-residential-enrichment', sourceVersion: 'google-v1' }
+    };
+    const mappls = {
+      id: 'mappls-in-residential', countryCode: 'IN', quotaProvider: 'mappls',
+      source: { adapter: 'mappls-residential', sourceVersion: 'mappls-v1' }
+    };
+    const googleFingerprint = countryFingerprint({
+      adapterRevisions: [[google.id, sourceCapabilityRevision(google)]],
+      sourceVersions: [[google.id, 'google-v1']]
+    });
+    const queueState = { schemaVersion: 1, countries: { IN: { shards: {
+      [google.id]: {
+        state: 'checked', reason: 'source_partial_checkpoint', waitReason: 'quota',
+        fingerprint: googleFingerprint, checkpointToken: 'google-checkpoint-1',
+        nextAttemptAt: '2026-09-01T08:00:00Z'
+      }
+    } } } };
+    const snapshot = await computeQueueSnapshot({
+      sources: stubSources(facts, {
+        'google-geocoding': {
+          provider: 'google-geocoding', known: true, available: false,
+          waitState: 'quota_wait', nextResetAt: '2026-09-01T08:00:00Z'
+        },
+        mappls: { provider: 'mappls', known: true, available: true, nextResetAt: null }
+      }),
+      catalogShards: [google, mappls], queueState, now
+    });
+    expect(snapshot.entries.find((entry) => entry.countryCode === 'IN')).toMatchObject({
+      state: 'queued', runnableShardId: mappls.id, quotaProvider: 'mappls', quotaAvailable: true
+    });
+
+    const mapplsFingerprint = countryFingerprint({
+      adapterRevisions: [[mappls.id, sourceCapabilityRevision(mappls)]],
+      sourceVersions: [[mappls.id, 'mappls-v1']]
+    });
+    queueState.countries.IN.shards[mappls.id] = {
+      state: 'checked', reason: 'source_partial_checkpoint', fingerprint: mapplsFingerprint,
+      checkpointToken: 'mappls-checkpoint-1', nextAttemptAt: '2026-08-02T10:01:00Z'
+    };
+    const delayed = await computeQueueSnapshot({
+      sources: stubSources(facts, {
+        'google-geocoding': {
+          provider: 'google-geocoding', known: true, available: false,
+          waitState: 'quota_wait', nextResetAt: '2026-09-01T08:00:00Z'
+        },
+        mappls: { provider: 'mappls', known: true, available: true, nextResetAt: null }
+      }),
+      catalogShards: [google, mappls], queueState, now
+    });
+    expect(delayed.entries.find((entry) => entry.countryCode === 'IN')).toMatchObject({
+      state: 'retry_wait', runnableShardId: mappls.id, quotaProvider: 'mappls', quotaAvailable: true,
+      nextAttemptAt: '2026-08-02T10:01:00.000Z'
     });
   });
 

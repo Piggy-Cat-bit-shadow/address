@@ -49,13 +49,13 @@
 | 国家/地区 | 当前地址数据来源 | 地址组成 | 真实/来源字段 | 合成或补全字段 | 住宅真实性依据 |
 |---|---|---|---|---|---|
 | 美国（US） | Overture Maps、Geofabrik OSM 州级分片 | 门牌、道路、城市、州、ZIP、坐标 | 全部地址字段及坐标 | 无；仅规范格式 | OSM/Overture 明确住宅建筑或用途 |
-| 加拿大（CA） | Overture Maps、Geofabrik OSM | 门牌、道路、城市、省、邮编、坐标 | 全部地址字段及坐标 | 无；仅规范邮编格式 | 明确住宅建筑或用途 |
+| 加拿大（CA） | Statistics Canada 全国地址登记、Overture Maps、Geofabrik OSM | 门牌、道路、城市、省、邮编、坐标 | NAR 或地图来源的地址字段及坐标 | 无；仅规范邮编格式 | NAR 住宅建筑用途或地图来源明确住宅用途 |
 | 墨西哥（MX） | INEGI 全国地址框架；同源标准化包仅补名称 | 门牌、道路、住区、市镇、州、邮编、坐标 | INEGI 原始门牌、道路、住区、行政区、邮编及坐标 | 州/城市名称可由同源记录确定性映射；不生成地址 | INEGI `TIPODOM=VIVIENDA` |
 | 英国（GB） | Geofabrik OSM；Postcodes.io/ONS 仅核验 | 单元/楼宇、门牌、道路、城镇、邮编、坐标 | OSM 中存在的全部地址字段及坐标 | 无；仅规范格式 | OSM/建筑数据明确住宅用途 |
 | 德国（DE） | Overture Maps、Geofabrik 16 州分片；OpenPLZ 辅助 | 门牌、道路、城市、邮编、坐标 | 全部地址字段及坐标 | 无；不补 Wohnung/Etage | 明确住宅建筑或用途 |
-| 法国（FR） | Overture Maps、Geofabrik 27 区域分片；BAN 仅核验存在性 | 门牌、道路、补充号、城市、邮编、坐标 | 全部地址字段及坐标 | 无；仅规范格式 | 明确住宅建筑或用途，BAN 本身不作为住宅证据 |
+| 法国（FR） | CSTB BDNB 与 BAN 关联数据、Overture Maps、Geofabrik 27 区域分片 | 门牌、道路、补充号、市镇、邮编、坐标 | BDNB/BAN 或地图来源的地址字段及坐标 | 无；仅规范格式 | BDNB 住宅用途及可靠 BAN 关联，或地图来源明确住宅用途 |
 | 意大利（IT） | Overture Maps、Geofabrik OSM | 门牌、道路、城市、省/大区、CAP、坐标 | 全部地址字段及坐标 | 无；不补内部号 | 明确住宅建筑或用途 |
-| 西班牙（ES） | Overture Maps、Geofabrik OSM | 门牌、道路、市镇、省、邮编、坐标 | 全部地址字段及坐标 | 无；只保留来源楼梯/门号 | 明确住宅建筑或用途 |
+| 西班牙（ES） | Catastro INSPIRE 地址/建筑数据、Overture Maps、Geofabrik OSM | 门牌、道路、市镇、省、邮编、坐标 | Catastro 或地图来源的地址字段及坐标 | 无；只保留来源楼梯/门号 | Catastro 住宅用途和住宅单元数，或地图来源明确住宅用途 |
 | 荷兰（NL） | Kadaster BAG（PDOK）及 Overture Maps | 门牌/字母/附加号、道路、城市、省、邮编、坐标 | BAG/来源全部地址字段及坐标 | 无；仅可逆组合门牌格式 | BAG 在用 `woonfunctie` 或 Overture 明确住宅用途 |
 | 俄罗斯（RU） | Geofabrik OSM | 门牌、道路、城市、联邦主体、邮编、坐标 | 全部地址字段及坐标 | 无；不补 корпус/квартира | OSM 明确住宅建筑 |
 | 中国（CN） | AreaCity/StatsGov；高德、百度、腾讯住宅小区 POI | 省、市、区县、街道/道路门牌、小区、栋/单元/楼层/室、坐标 | 行政区、小区名、道路门牌和平台坐标 | 仅栋、单元、楼层、室号为合成字段并标记 `synthetic`；不生成邮编 | 严格住宅分类、行政区一致、数字门牌和机构黑名单门禁 |
@@ -65,15 +65,15 @@
 | 韩国（KR） | K-apt、Juso/OpenAddresses 归档、Geofabrik/Overture | 市/道、市/郡/区、邑面洞、道路、建筑号、邮编、坐标 | K-apt 地番或 Juso 道路名地址字段及坐标 | 无；不生成栋、单元或室号 | K-apt 官方共同住宅，或 Juso 点与住宅建筑相交 |
 | 新加坡（SG） | HDB Property Information、Existing Building、OneMap、Geofabrik OSM | 楼栋号、道路、规划城镇、6 位邮编、坐标 | HDB 楼栋、道路、城镇；OneMap 唯一匹配的邮编和坐标 | 仅按同楼栋和道路唯一匹配补全，不生成门牌 | HDB `residential=Y` 且住宅单元数大于零，或 OSM 住宅建筑 |
 | 马来西亚（MY） | Geofabrik OSM 马来西亚分片 | 单元/地块、楼宇、道路、县区、城市、州、邮编、坐标 | OSM 中存在的全部地址字段及坐标 | 无；不补单元 | OSM 明确住宅建筑并排除商业 POI |
-| 泰国（TH） | Geofabrik OSM；DOPA 仅核验行政区 | 门牌、村、巷、道路、分区、县区、府、邮编、坐标 | OSM 中存在的全部地址字段及坐标 | 无；仅规范格式 | OSM 明确住宅建筑 |
+| 泰国（TH） | DPT 官方建筑图层、Geofabrik OSM | 门牌、村、道路、分区、县区、府、邮编、坐标 | DPT 或 OSM 的地址、行政区、邮编及几何字段 | 无；仅将建筑面转换为内部点并规范格式 | DPT 住宅建筑分类或 OSM 明确住宅建筑 |
 | 菲律宾（PH） | Geofabrik OSM、PHLPost；PSA PSGC 仅核验行政区 | 门牌、道路、Barangay、城市/市镇、省、邮编、坐标 | OSM 地址字段及坐标 | 缺邮编时仅按 PHLPost 省+城市/市镇唯一匹配补全 | OSM 明确住宅建筑 |
-| 越南（VN） | Geofabrik OSM；可选越南邮政 Vpostcode 授权 feed（取得许可并完成验收前默认关闭） | 门牌、道路、坊/社、省级城市/省、邮编、坐标 | 来源字段及坐标 | 无；仅接受来源五位邮编 | OSM 明确住宅建筑，或授权 feed 的住宅分类 |
+| 越南（VN） | Geofabrik OSM；Google Geocoding 补全 | 门牌、道路、坊/社、省级城市/省、邮编、坐标 | 来源字段及坐标 | 无；仅接受来源五位邮编 | OSM 明确住宅建筑 |
 | 土耳其（TR） | Geofabrik OSM、伊兹密尔官方 Building Identity | 门牌、道路、区、省、邮编、坐标 | 全部来源地址字段及坐标 | 无；仅规范格式 | OSM 住宅标签或官方 `Konut` 用途 |
 | 沙特阿拉伯（SA） | 全国地址点保全包、Overture、Geofabrik OSM | 楼宇/门牌、道路、区、城市、邮编、坐标 | 全国地址点的地址字段及坐标 | 无；仅规范格式 | 地址点与明确住宅建筑面精确关联 |
-| 印度（IN） | Geofabrik OSM；可选 Mappls Nearby + Place Details（取得许可并完成验收前默认关闭） | 门牌、道路/地点、县区、城市、邦、PIN、坐标 | 来源字段及坐标 | 无；不补公寓或楼层 | OSM 明确住宅建筑，或合同授权的 Mappls 住宅分类 |
+| 印度（IN） | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 补全 | 门牌、道路/地点、县区、城市、邦、PIN、坐标 | OSM 住宅建筑、门牌和道路；地理编码行政字段与 PIN | 无；不补公寓或楼层 | OSM 明确住宅建筑 |
 | 澳大利亚（AU） | Overture Maps、Geofabrik OSM | 单元、门牌、道路、郊区、州、邮编、坐标 | 全部来源地址字段及坐标 | 无；不补单元 | 明确住宅建筑或用途；地址存在本身不作为住宅证据 |
 | 巴西（BR） | Geofabrik OSM | 门牌、道路、街区、城市、州、CEP、坐标 | OSM 中存在的全部地址字段及坐标 | 无；不补 complemento | OSM 明确住宅建筑 |
-| 尼日利亚（NG） | 默认无可发布来源；可选 NIPOST 或 ProgIS 授权 feed（取得许可并完成验收前默认关闭） | 门牌、道路、地区、城市、州、邮编、坐标 | 授权来源字段及坐标 | 无；不推算缺失字段 | 逐条或合同级住宅分类；未授权或未验收时不发布 |
+| 尼日利亚（NG） | Geofabrik OSM；Google Geocoding 补全 | 门牌、道路、地区、城市、州、邮编、坐标 | 来源字段及坐标 | 无；不推算缺失字段 | OSM 明确住宅建筑 |
 | 南非（ZA） | eThekwini 官方地址与分区、Cape Town 官方地块、Geofabrik OSM、SAPO | 单元、门牌、道路、郊区、城市、邮编、坐标 | 官方地址/地块字段、OSM 补充字段、SAPO 唯一匹配邮编及坐标 | 无；不补单元 | 官方住宅 zoning 精确关联，或 OSM 明确住宅建筑 |
 
 更详细的数据源版本、坐标系、去重和发布门禁见[数据源文档](docs/data-sources.md)及[各国家/地区策略](docs/strategies/)。
@@ -156,14 +156,14 @@ docker compose up -d
 - 前端密码、管理员密码、API Token、平台密钥、额度和快捷区域均在管理员后台设置。
 - 平台密钥默认可选；只有所选同步策略需要时才必须配置。
 - 多个 Key 独立轮换。当前 Key 失败时先冷却并尝试其他 Key；全部不可用时等待最早恢复时间。
-- 各平台申请入口、变量名、限制和轮换规则见独立的 [API Key 配置文档](docs/API_KEYS.zh-CN.md)。
+- 各平台用途、官方申请入口和后台配置名称见独立的 [API Key 配置文档](docs/API_KEYS.zh-CN.md)。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [API 文档](docs/API.zh-CN.md) | Bearer 鉴权、生成、筛选、错误和监控 |
-| [API Key](docs/API_KEYS.zh-CN.md) | 平台申请、环境变量、加密、轮换和冷却 |
+| [API Key](docs/API_KEYS.zh-CN.md) | 平台用途、申请入口、所需产品和后台配置 |
 | [部署文档](docs/DEPLOYMENT.zh-CN.md) | PostgreSQL、VPS 目录、进程、Nginx、备份、恢复和升级 |
 | [开发文档](docs/DEVELOPMENT.zh-CN.md) | 架构、本地检查、扩展点和发布门禁 |
 | [地址格式](docs/address-formats.md) | 各国格式与字段行为 |

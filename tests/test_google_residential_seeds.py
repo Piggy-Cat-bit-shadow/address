@@ -10,7 +10,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def way(identifier, longitude, latitude):
+def way(identifier, longitude, latitude, address=False):
     ring = [
         (longitude - 0.001, latitude - 0.001),
         (longitude + 0.001, latitude - 0.001),
@@ -20,7 +20,10 @@ def way(identifier, longitude, latitude):
     ]
     return SimpleNamespace(
         id=identifier,
-        tags=[SimpleNamespace(k="building", v="house")],
+        tags=[SimpleNamespace(k=key, v=value) for key, value in {
+            "building": "house",
+            **({"addr:housenumber": "18", "addr:street": "MG Road"} if address else {})
+        }.items()],
         nodes=[SimpleNamespace(location=SimpleNamespace(
             lon=point[0], lat=point[1], valid=lambda: True
         )) for point in ring]
@@ -57,6 +60,16 @@ class GoogleResidentialSeedTest(unittest.TestCase):
         first = [record["id"] for record in sampler.selected()]
         self.assertEqual(len(first), 2)
         self.assertEqual(first, [record["id"] for record in sampler.selected()])
+
+    def test_source_address_mode_keeps_only_addressed_residential_buildings(self):
+        sampler = MODULE.SeedSampler(2, None, None, require_source_address=True)
+        sampler.way(way(1, 77.219, 28.632))
+        sampler.way(way(2, 77.220, 28.633, address=True))
+
+        selected = sampler.selected()
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["number"], "18")
+        self.assertEqual(selected[0]["street"], "MG Road")
 
 
 if __name__ == "__main__":

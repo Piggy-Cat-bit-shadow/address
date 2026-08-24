@@ -49,13 +49,13 @@
 | 國家/地區 | 目前位址資料來源 | 位址組成 | 真實/來源欄位 | 合成或補全欄位 | 住宅真實性依據 |
 |---|---|---|---|---|---|
 | 美國（US） | Overture Maps、Geofabrik OSM 州級分片 | 門牌、道路、城市、州、ZIP、座標 | 全部位址欄位及座標 | 無；僅規範格式 | OSM/Overture 明確住宅建築或用途 |
-| 加拿大（CA） | Overture Maps、Geofabrik OSM | 門牌、道路、城市、省、郵遞區號、座標 | 全部位址欄位及座標 | 無；僅規範郵遞區號格式 | 明確住宅建築或用途 |
+| 加拿大（CA） | Statistics Canada 全國地址登記、Overture Maps、Geofabrik OSM | 門牌、道路、城市、省、郵遞區號、座標 | NAR 或地圖來源的位址欄位及座標 | 無；僅規範郵遞區號格式 | NAR 住宅建築用途或地圖來源明確住宅用途 |
 | 墨西哥（MX） | INEGI 全國位址框架；同源標準化包僅補名稱 | 門牌、道路、住區、市鎮、州、郵遞區號、座標 | INEGI 原始門牌、道路、住區、行政區、郵遞區號及座標 | 州/城市名稱可由同源記錄確定性映射；不產生位址 | INEGI `TIPODOM=VIVIENDA` |
 | 英國（GB） | Geofabrik OSM；Postcodes.io/ONS 僅核驗 | 單位/樓宇、門牌、道路、城鎮、郵遞區號、座標 | OSM 中存在的全部位址欄位及座標 | 無；僅規範格式 | OSM/建築資料明確住宅用途 |
 | 德國（DE） | Overture Maps、Geofabrik 16 州分片；OpenPLZ 輔助 | 門牌、道路、城市、郵遞區號、座標 | 全部位址欄位及座標 | 無；不補 Wohnung/Etage | 明確住宅建築或用途 |
-| 法國（FR） | Overture Maps、Geofabrik 27 區域分片；BAN 僅核驗存在性 | 門牌、道路、補充號、城市、郵遞區號、座標 | 全部位址欄位及座標 | 無；僅規範格式 | 明確住宅建築或用途，BAN 本身不作為住宅證據 |
+| 法國（FR） | CSTB BDNB 與 BAN 關聯資料、Overture Maps、Geofabrik 27 區域分片 | 門牌、道路、補充號、市鎮、郵遞區號、座標 | BDNB/BAN 或地圖來源的位址欄位及座標 | 無；僅規範格式 | BDNB 住宅用途及可靠 BAN 關聯，或地圖來源明確住宅用途 |
 | 義大利（IT） | Overture Maps、Geofabrik OSM | 門牌、道路、城市、省/大區、CAP、座標 | 全部位址欄位及座標 | 無；不補內部號 | 明確住宅建築或用途 |
-| 西班牙（ES） | Overture Maps、Geofabrik OSM | 門牌、道路、市鎮、省、郵遞區號、座標 | 全部位址欄位及座標 | 無；只保留來源樓梯/門號 | 明確住宅建築或用途 |
+| 西班牙（ES） | Catastro INSPIRE 位址/建築資料、Overture Maps、Geofabrik OSM | 門牌、道路、市鎮、省、郵遞區號、座標 | Catastro 或地圖來源的位址欄位及座標 | 無；只保留來源樓梯/門號 | Catastro 住宅用途和住宅單元數，或地圖來源明確住宅用途 |
 | 荷蘭（NL） | Kadaster BAG（PDOK）及 Overture Maps | 門牌/字母/附加號、道路、城市、省、郵遞區號、座標 | BAG/來源全部位址欄位及座標 | 無；僅可逆組合門牌格式 | BAG 在用 `woonfunctie` 或 Overture 明確住宅用途 |
 | 俄羅斯（RU） | Geofabrik OSM | 門牌、道路、城市、聯邦主體、郵遞區號、座標 | 全部位址欄位及座標 | 無；不補 корпус/квартира | OSM 明確住宅建築 |
 | 中國（CN） | AreaCity/StatsGov；高德、百度、騰訊住宅社區 POI | 省、市、區縣、街道/道路門牌、社區、棟/單元/樓層/室、座標 | 行政區、社區名、道路門牌與平台座標 | 僅棟、單元、樓層、室號為合成欄位並標記 `synthetic`；不產生郵遞區號 | 嚴格住宅分類、行政區一致、數字門牌與機構黑名單門禁 |
@@ -65,15 +65,15 @@
 | 韓國（KR） | K-apt、Juso/OpenAddresses 歸檔、Geofabrik/Overture | 市/道、市/郡/區、邑面洞、道路、建築號、郵遞區號、座標 | K-apt 地番或 Juso 道路名位址欄位及座標 | 無；不產生棟、單元或室號 | K-apt 官方共同住宅，或 Juso 點與住宅建築相交 |
 | 新加坡（SG） | HDB Property Information、Existing Building、OneMap、Geofabrik OSM | 樓棟號、道路、規劃城鎮、6 位郵遞區號、座標 | HDB 樓棟、道路、城鎮；OneMap 唯一匹配的郵遞區號與座標 | 僅依同樓棟和道路唯一匹配補全，不產生門牌 | HDB `residential=Y` 且住宅單位數大於零，或 OSM 住宅建築 |
 | 馬來西亞（MY） | Geofabrik OSM 馬來西亞分片 | 單位/地塊、樓宇、道路、縣區、城市、州、郵遞區號、座標 | OSM 中存在的全部位址欄位及座標 | 無；不補單位 | OSM 明確住宅建築並排除商業 POI |
-| 泰國（TH） | Geofabrik OSM；DOPA 僅核驗行政區 | 門牌、村、巷、道路、分區、縣區、府、郵遞區號、座標 | OSM 中存在的全部位址欄位及座標 | 無；僅規範格式 | OSM 明確住宅建築 |
+| 泰國（TH） | DPT 官方建築圖層、Geofabrik OSM | 門牌、村、道路、分區、縣區、府、郵遞區號、座標 | DPT 或 OSM 的位址、行政區、郵遞區號及幾何欄位 | 無；僅將建築面轉換為內部點並規範格式 | DPT 住宅建築分類或 OSM 明確住宅建築 |
 | 菲律賓（PH） | Geofabrik OSM、PHLPost；PSA PSGC 僅核驗行政區 | 門牌、道路、Barangay、城市/市鎮、省、郵遞區號、座標 | OSM 位址欄位及座標 | 缺郵遞區號時僅依 PHLPost 省+城市/市鎮唯一匹配補全 | OSM 明確住宅建築 |
-| 越南（VN） | Geofabrik OSM；可選越南郵政 Vpostcode 授權 feed（取得許可並完成驗收前預設關閉） | 門牌、道路、坊/社、省級城市/省、郵遞區號、座標 | 來源欄位及座標 | 無；僅接受來源五位郵遞區號 | OSM 明確住宅建築，或授權 feed 的住宅分類 |
+| 越南（VN） | Geofabrik OSM；Google Geocoding 補全 | 門牌、道路、坊/社、省級城市/省、郵遞區號、座標 | 來源欄位及座標 | 無；僅接受來源五位郵遞區號 | OSM 明確住宅建築 |
 | 土耳其（TR） | Geofabrik OSM、伊茲密爾官方 Building Identity | 門牌、道路、區、省、郵遞區號、座標 | 全部來源位址欄位及座標 | 無；僅規範格式 | OSM 住宅標籤或官方 `Konut` 用途 |
 | 沙烏地阿拉伯（SA） | 全國位址點保全包、Overture、Geofabrik OSM | 樓宇/門牌、道路、區、城市、郵遞區號、座標 | 全國位址點的位址欄位及座標 | 無；僅規範格式 | 位址點與明確住宅建築面精確關聯 |
-| 印度（IN） | Geofabrik OSM；可選 Mappls Nearby + Place Details（取得許可並完成驗收前預設關閉） | 門牌、道路/地點、縣區、城市、邦、PIN、座標 | 來源欄位及座標 | 無；不補公寓或樓層 | OSM 明確住宅建築，或合約授權的 Mappls 住宅分類 |
+| 印度（IN） | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 補全 | 門牌、道路/地點、縣區、城市、邦、PIN、座標 | OSM 住宅建築、門牌及道路；地理編碼行政欄位與 PIN | 無；不補公寓或樓層 | OSM 明確住宅建築 |
 | 澳洲（AU） | Overture Maps、Geofabrik OSM | 單位、門牌、道路、郊區、州、郵遞區號、座標 | 全部來源位址欄位及座標 | 無；不補單位 | 明確住宅建築或用途；位址存在本身不作為住宅證據 |
 | 巴西（BR） | Geofabrik OSM | 門牌、道路、街區、城市、州、CEP、座標 | OSM 中存在的全部位址欄位及座標 | 無；不補 complemento | OSM 明確住宅建築 |
-| 奈及利亞（NG） | 預設無可發布來源；可選 NIPOST 或 ProgIS 授權 feed（取得許可並完成驗收前預設關閉） | 門牌、道路、地區、城市、州、郵遞區號、座標 | 授權來源欄位及座標 | 無；不推算缺失欄位 | 逐條或合約級住宅分類；未授權或未驗收時不發布 |
+| 奈及利亞（NG） | Geofabrik OSM；Google Geocoding 補全 | 門牌、道路、地區、城市、州、郵遞區號、座標 | 來源欄位及座標 | 無；不推算缺失欄位 | OSM 明確住宅建築 |
 | 南非（ZA） | eThekwini 官方位址與分區、Cape Town 官方地塊、Geofabrik OSM、SAPO | 單位、門牌、道路、郊區、城市、郵遞區號、座標 | 官方位址/地塊欄位、OSM 補充欄位、SAPO 唯一匹配郵遞區號及座標 | 無；不補單位 | 官方住宅 zoning 精確關聯，或 OSM 明確住宅建築 |
 
 更詳細的資料源版本、座標系、去重與發布門禁見[資料源文件](docs/data-sources.md)及[各國家/地區策略](docs/strategies/)。
@@ -156,14 +156,14 @@ docker compose up -d
 - 前端密碼、管理員密碼、API Token、平台金鑰、額度與快捷區域均在管理員後台設定。
 - 平台金鑰預設為選用；只有選定同步策略需要時才必須設定。
 - 多個 Key 獨立輪換。目前 Key 失敗時先冷卻並嘗試其他 Key；全部不可用時等待最早恢復時間。
-- 各平台申請入口、變數名稱、限制與輪換規則見獨立的 [API Key 設定文件](docs/API_KEYS.zh-TW.md)。
+- 各平台用途、官方申請入口和後台設定名稱見獨立的 [API Key 設定文件](docs/API_KEYS.zh-TW.md)。
 
 ## 文件
 
 | 文件 | 內容 |
 |---|---|
 | [API 文件](docs/API.zh-TW.md) | Bearer 驗證、產生、篩選、錯誤與監控 |
-| [API Key](docs/API_KEYS.zh-TW.md) | 平台申請、環境變數、加密、輪換與冷卻 |
+| [API Key](docs/API_KEYS.zh-TW.md) | 平台用途、申請入口、所需產品和後台設定 |
 | [部署文件](docs/DEPLOYMENT.zh-TW.md) | PostgreSQL、VPS 目錄、程序、Nginx、備份、還原與升級 |
 | [開發文件](docs/DEVELOPMENT.zh-TW.md) | 架構、本地檢查、擴充點與發布門禁 |
 | [位址格式](docs/address-formats.md) | 各國格式與欄位行為 |

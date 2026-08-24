@@ -1,9 +1,13 @@
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 
 const base = process.env.API_BASE_URL || 'http://127.0.0.1:8787/api/v1';
-const registry = await (await fetch(`${base}/countries`)).json();
-const unavailableCountries = new Set(['NG']);
-const codes = registry.data.map((country) => country.code).filter((country) => !unavailableCountries.has(country));
+const authorization = process.env.API_TOKEN ? { Authorization: `Bearer ${process.env.API_TOKEN}` } : {};
+const registryResponse = await fetch(`${base}/countries`, { headers: authorization });
+const registry = await registryResponse.json();
+if (!registryResponse.ok) throw new Error(`/countries: ${registry.error?.code || registryResponse.status}`);
+const codes = registry.data.filter((country) => country.generationMode === 'synchronized-pool'
+  && Number(country.addressCount) > 0 && Number(country.residentialCount) > 0 && country.residentialAvailable)
+  .map((country) => country.code);
 const localScript = {
   CN: /[\u3400-\u9fff]/, HK: /[\u3400-\u9fff]/, TW: /[\u3400-\u9fff]/,
   JP: /[\u3040-\u30ff\u3400-\u9fff]/, KR: /[\uac00-\ud7af]/,
@@ -27,7 +31,7 @@ async function runner() {
   while (cursor < codes.length) {
     const country = codes[cursor++];
     try {
-      const response = await fetch(`${base}/generate?${new URLSearchParams({ country, residential: 'false', seed: `translation-${country}-v3` })}`);
+      const response = await fetch(`${base}/generate?${new URLSearchParams({ country, residential: 'false', seed: `translation-${country}-v3` })}`, { headers: authorization });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error?.code || String(response.status));
       const address = payload.data.result.address;

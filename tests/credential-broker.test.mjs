@@ -271,26 +271,25 @@ describe('credential broker', () => {
       WHERE scope_id=?`).bind(scope).first('dispatch_count')).toBe(1);
   });
 
-  it('builds only fixed Mappls nearby and entity upstream requests', async () => {
+  it('builds only the fixed Mappls Reverse Geocoding request', async () => {
     await control.addCredential({
       provider: 'mappls', label: 'Mappls', secret: 'mappls-secret', qpsLimit: 10_000, quotaLimit: 10
     });
     const upstream = [];
     const broker = await createCredentialBroker({
       database, masterKey, tokens,
-      fetchImpl: async (request) => { upstream.push(new URL(request.url)); return Response.json({ value: 'ok' }); }
+      fetchImpl: async (request) => {
+        upstream.push(new URL(request.url));
+        return Response.json({ responseCode: 200, results: [] });
+      }
     });
-    const nearby = await call(broker, 'production', {
-      requestId: 'request-mappls-nearby-01', operation: 'mappls.nearby',
-      parameters: { latitude: 28.6139, longitude: 77.209, categoryCode: 'HOSPIC', radius: 10_000, page: 1 }
+    const reverse = await call(broker, 'production', {
+      requestId: 'request-mappls-reverse-01', operation: 'mappls.reverse',
+      parameters: { latitude: 28.6139, longitude: 77.209 }
     });
-    const entity = await call(broker, 'production', {
-      requestId: 'request-mappls-entity-01', operation: 'mappls.entity', parameters: { eLoc: 'ABC123' }
-    });
-    expect([nearby.status, entity.status]).toEqual([200, 200]);
+    expect(reverse.status).toBe(200);
     expect(upstream.map(({ hostname, pathname }) => [hostname, pathname])).toEqual([
-      ['search.mappls.com', '/search/places/nearby/json'],
-      ['explore.mappls.com', '/apis/O2O/entity/ABC123']
+      ['search.mappls.com', '/search/address/rev-geocode']
     ]);
   });
 

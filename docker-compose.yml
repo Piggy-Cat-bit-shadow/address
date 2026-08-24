@@ -81,6 +81,9 @@ services:
   migrate:
     <<: *app
     restart: "on-failure:3"
+    environment:
+      <<: *app-environment
+      POSTGRES_STATEMENT_TIMEOUT_MS: 1800000
     command: [node, node_modules/tsx/dist/cli.mjs, server/database/migrate.ts]
     depends_on:
       postgres:

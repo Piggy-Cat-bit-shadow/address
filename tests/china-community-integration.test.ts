@@ -56,6 +56,36 @@ describe('China community storage integration', () => {
     controlDb.close();
   });
 
+  it('selects unfiltered communities through the full-pool hash index', async () => {
+    const statements: string[] = [];
+    const community = {
+      id: 'community-1', canonical_name: '测试小区', province: '北京市', city: '北京市',
+      district: '朝阳区', township: '', provider_address: '测试路1号', latitude: 39.9,
+      longitude: 116.4, verification_level: 'L1', source_count: 1,
+      last_seen_at: '2026-08-24T00:00:00Z'
+    };
+    const database = {
+      prepare(sql: string) {
+        statements.push(sql);
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            return { results: sql.includes('SELECT DISTINCT provider FROM cn_community_sources')
+              ? [{ provider: 'amap' }]
+              : [community] };
+          }
+        };
+        return statement;
+      }
+    };
+
+    await expect(pickChinaCommunityAddress(database as never, {}, 'full-pool'))
+      .resolves.toMatchObject({ id: 'cn-community-community-1' });
+    expect(statements[0]).toContain('hashtextextended');
+    expect(statements[0]).not.toContain('source_count DESC');
+    expect(statements[0]).not.toContain('LIMIT 500');
+  });
+
   it('imports AreaCity hierarchy and builds automatic district targets', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify([{
       code: '110000', name: '北京市', level: 'province', children: [{

@@ -49,8 +49,11 @@ describe('address generation index', () => {
         '2026-01-01T00:00:00Z', 'residential_use', 0, 1, '2026-01-01T00:00:00Z'
       ).run();
       expect(await refreshAddressGenerationIndex(database, 'US')).toBe(1);
-      const row = await database.prepare('SELECT address_id,residential_ready,search_text FROM address_generation_index').first();
-      expect(row).toMatchObject({ address_id: 'fixture-address', residential_ready: 1 });
+      const row = await database.prepare(`SELECT address_id,country_rank,residential_rank,
+        residential_ready,search_text FROM address_generation_index`).first();
+      expect(row).toMatchObject({
+        address_id: 'fixture-address', country_rank: 1, residential_rank: 1, residential_ready: 1
+      });
       expect(row.search_text).toContain('college avenue');
       await expect(pickAddressPoolV2Address(database, 'US', true, {}, undefined, 'generation-seed'))
         .resolves.toMatchObject({ id: 'pool-v2-fixture-address' });

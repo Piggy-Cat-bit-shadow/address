@@ -32,22 +32,11 @@ const googleReverse = (value) => {
   return { latitude: value.latitude, longitude: value.longitude, language, regionCode };
 };
 
-const mapplsNearby = (value) => {
-  if (!exactKeys(value, new Set(['latitude', 'longitude', 'categoryCode', 'radius', 'page']))
-    || !finite(value.latitude, 6, 38) || !finite(value.longitude, 67, 98)
-    || !/^[A-Za-z0-9,_-]{1,120}$/u.test(String(value.categoryCode || ''))
-    || !integer(value.radius, 1, 50_000) || !integer(value.page, 1, 100)) return null;
-  return {
-    latitude: value.latitude,
-    longitude: value.longitude,
-    categoryCode: String(value.categoryCode),
-    radius: value.radius,
-    page: value.page
-  };
+const mapplsReverse = (value) => {
+  if (!exactKeys(value, new Set(['latitude', 'longitude']))
+    || !finite(value.latitude, 6, 38) || !finite(value.longitude, 67, 98)) return null;
+  return { latitude: value.latitude, longitude: value.longitude };
 };
-
-const mapplsEntity = (value) => exactKeys(value, new Set(['eLoc']))
-  && /^[A-Za-z0-9_-]{1,128}$/u.test(String(value.eLoc || '')) ? { eLoc: String(value.eLoc) } : null;
 
 const chinaPlace = (value) => {
   if (!exactKeys(value, new Set(['region', 'page', 'subdivision']))
@@ -98,6 +87,14 @@ const classifyGoogle = (body) => {
   if (body && typeof body === 'object' && !Array.isArray(body)
     && (body.results === undefined || Array.isArray(body.results))) return null;
   return providerFailure('invalid');
+};
+
+const classifyMappls = (body) => {
+  const code = Number(body?.responseCode);
+  if ((code === 200 || !Number.isFinite(code)) && Array.isArray(body?.results)) return null;
+  const outcome = [401, 403].includes(code) ? 'auth' : code === 429 ? 'quota'
+    : [500, 503].includes(code) ? 'network' : 'invalid';
+  return providerFailure(outcome);
 };
 
 export const operationDefinitions = {
@@ -182,28 +179,18 @@ export const operationDefinitions = {
     },
     classify: classifyGoogle
   },
-  'mappls.nearby': {
+  'mappls.reverse': {
     provider: 'mappls',
-    validate: mapplsNearby,
+    validate: mapplsReverse,
     request(parameters, secret) {
-      const url = new URL('https://search.mappls.com/search/places/nearby/json');
+      const url = new URL('https://search.mappls.com/search/address/rev-geocode');
       Object.entries({
-        keywords: parameters.categoryCode,
-        refLocation: `${parameters.latitude},${parameters.longitude}`,
-        region: 'IND', radius: String(parameters.radius), page: String(parameters.page),
-        filter: `categoryCode:${parameters.categoryCode}`, access_token: secret
+        lat: String(parameters.latitude), lng: String(parameters.longitude),
+        region: 'IND', access_token: secret
       }).forEach(([name, value]) => url.searchParams.set(name, value));
       return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
-    }
-  },
-  'mappls.entity': {
-    provider: 'mappls',
-    validate: mapplsEntity,
-    request(parameters, secret) {
-      const url = new URL(`https://explore.mappls.com/apis/O2O/entity/${encodeURIComponent(parameters.eLoc)}`);
-      url.searchParams.set('access_token', secret);
-      return new Request(url, { headers: { Accept: 'application/json', 'User-Agent': 'address-credential-broker/1.0' } });
-    }
+    },
+    classify: classifyMappls
   }
 };
 

@@ -6,11 +6,10 @@ import { validateAddressContract } from '../src/domain/address-contracts.mjs';
 const base = process.env.API_BASE_URL || 'https://address.333186.xyz/api/v1';
 const token = process.env.API_TOKEN || '';
 const samples = Math.max(500, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '500', 10) || 500);
-const concurrency = Math.max(1, Math.min(24, Number.parseInt(process.env.AUDIT_CONCURRENCY || '12', 10) || 12));
+const concurrency = Math.max(1, Math.min(24, Number.parseInt(process.env.AUDIT_CONCURRENCY || '4', 10) || 4));
 const headers = token ? { Authorization: `Bearer ${token}` } : {};
 headers['Content-Type'] = 'application/json';
 const codes = (process.env.AUDIT_COUNTRIES || 'US,CA,MX,GB,DE,FR,IT,ES,NL,RU,JP,HK,SG,TW,KR,MY,CN,TH,PH,VN,TR,SA,IN,AU,BR,NG,ZA').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
-const unavailable = new Set(['NG']);
 const nativePatterns = { CN: /\p{Script=Han}/u, HK: /\p{Script=Han}/u, TW: /\p{Script=Han}/u, JP: /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u, KR: /\p{Script=Hangul}/u, TH: /\p{Script=Thai}/u, SA: /\p{Script=Arabic}/u, RU: /\p{Script=Cyrillic}/u };
 const latin = /\p{Script=Latin}/u;
 const forbiddenNativeLatin = new Set(['HK', 'TW', 'JP', 'KR', 'TH', 'SA', 'RU', 'CN']);
@@ -43,37 +42,28 @@ const hasNonIdentifierLatin = (value) => /\p{Script=Latin}/u.test(String(value)
   .replace(/\d+[A-Za-z][A-Za-z\d/-]*/gu, '')
   .replace(/[A-Za-z]+(?=(?:区|座|栋|棟|幢|单元|室|号|號|楼|组团|期))/gu, ''));
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const fetchEligibleCount = async (code) => {
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const url = new URL(`${base}/generate`);
-      url.searchParams.set('country', code);
-      url.searchParams.set('seed', `contract-audit-eligibility-${code}`);
-      const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
-      const payload = await response.json();
-      const eligibleCount = Number(payload.data?.eligibleCount);
-      if (response.ok && Number.isInteger(eligibleCount) && eligibleCount > 0) return eligibleCount;
-      if (response.status < 500) throw new Error(payload.error?.code || `http_${response.status}`);
-      lastError = new Error(`http_${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await wait(500 * 2 ** attempt);
-  }
-  throw lastError;
-};
+const registryResponse = await fetch(`${base}/countries`, { headers, signal: AbortSignal.timeout(30_000) });
+const registryPayload = await registryResponse.json();
+if (!registryResponse.ok) throw new Error(`/countries: ${registryPayload.error?.code || registryResponse.status}`);
+const eligibleCounts = new Map((registryPayload.data || []).filter((country) => country.generationMode === 'synchronized-pool'
+  && Number(country.addressCount) > 0 && Number(country.residentialCount) > 0 && country.residentialAvailable)
+  .map((country) => [country.code, Number(country.residentialCount)]));
 const fetchBatch = async (code, batch, count) => {
   let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       const response = await fetch(`${base}/generate/batch`, {
         method: 'POST', headers, signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({ count, filters: { country: code }, options: { unique: false, seed: `contract-audit-${code}-${batch}` } })
       });
       const payload = await response.json();
-      if (response.ok || response.status < 500) return { response, payload };
+      if (response.ok || (response.status < 500 && response.status !== 429)) return { response, payload };
       lastError = new Error(`http_${response.status}`);
+      const retryAfter = Number.parseInt(response.headers.get('Retry-After') || '', 10);
+      if (response.status === 429 && Number.isFinite(retryAfter)) {
+        await wait(Math.max(1, Math.min(30, retryAfter)) * 1000);
+        continue;
+      }
     } catch (error) {
       lastError = error;
     }
@@ -120,8 +110,8 @@ const issueFor = (code, address) => {
 
 const result = {};
 for (const code of codes) {
-  if (unavailable.has(code)) { result[code] = { skipped: true, reason: 'no published pool' }; continue; }
-  const eligibleCount = await fetchEligibleCount(code);
+  const eligibleCount = eligibleCounts.get(code);
+  if (!eligibleCount) { result[code] = { skipped: true, reason: 'no published pool' }; continue; }
   const rows = [];
   const batches = Math.ceil(samples / 50);
   let cursor = 0;
@@ -142,7 +132,12 @@ for (const code of codes) {
   });
   await Promise.all(workers);
   const issueCounts = {};
+  const issueExamples = {};
   for (const row of rows) for (const issue of row.issues) issueCounts[issue] = (issueCounts[issue] || 0) + 1;
+  for (const row of rows) for (const issue of row.issues) {
+    const examples = issueExamples[issue] ||= [];
+    if (row.id && examples.length < 3) examples.push(row.id);
+  }
   const uniqueAddresses = new Set(rows.map(({ id }) => id).filter(Boolean)).size;
   const expectedUniqueAddresses = eligibleCount * (1 - ((eligibleCount - 1) / eligibleCount) ** samples);
   const minimumUniqueAddresses = Math.max(1, Math.floor(expectedUniqueAddresses * minimumUniqueRatio));
@@ -156,7 +151,8 @@ for (const code of codes) {
     minimumUniqueAddresses,
     admin1Covered: new Set(rows.map(({ admin1 }) => admin1).filter(Boolean)).size,
     localitiesCovered: new Set(rows.map(({ locality }) => locality).filter(Boolean)).size,
-    issueCounts
+    issueCounts,
+    ...(Object.keys(issueExamples).length ? { issueExamples } : {})
   };
   process.stdout.write(`${code} ${JSON.stringify(result[code])}\n`);
 }

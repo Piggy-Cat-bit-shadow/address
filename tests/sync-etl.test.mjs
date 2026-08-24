@@ -17,6 +17,7 @@ import {
 import { runAddressSync } from '../server/sync/run-address-sync.mjs';
 import { runProcess } from '../server/sync/process.mjs';
 import { createSyncArtifactCleanup } from '../server/sync/artifact-cleanup.mjs';
+import { evaluateMapplsResidentialResult, requestMapplsReverse } from '../server/sync/mappls-residential-enrichment.mjs';
 
 const execFileAsync = promisify(execFile);
 const directories = [];
@@ -237,43 +238,24 @@ describe('address source shard catalog', () => {
   it('keeps licensed sources disabled until their explicit activation flags are set', async () => {
     const base = await loadSourceCatalog(undefined, {});
     expect(base.shards.some((shard) => shard.id === 'mappls-in-residential')).toBe(false);
-    expect(base.shards.some((shard) => shard.id === 'vpostcode-vn-licensed')).toBe(false);
-    expect(base.shards.some((shard) => shard.id === 'ng-licensed-residential')).toBe(false);
     expect(base.shards.some((shard) => shard.id === 'openaddresses-sa-national')).toBe(false);
-    const incomplete = await loadSourceCatalog(undefined, { ADDRESS_SYNC_VPOSTCODE_ENABLED: 'true' });
-    expect(incomplete.shards.find((shard) => shard.id === 'vpostcode-vn-licensed')).toMatchObject({
-      countryCode: 'VN',
-      source: { configurationError: 'missing_source_configuration:ADDRESS_SYNC_VPOSTCODE_FEED_URL' }
-    });
     const enabled = await loadSourceCatalog(undefined, {
-      ADDRESS_SYNC_MAPPLS_ENABLED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_ENABLED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_FEED_URL: 'https://licensed.example/vn.jsonl',
-      ADDRESS_SYNC_NG_FEED_ENABLED: 'true',
-      ADDRESS_SYNC_NG_FEED_URL: 'https://licensed.example/ng.csv'
+      ADDRESS_SYNC_MAPPLS_ENABLED: 'true'
     });
     expect(enabled.shards.find((shard) => shard.id === 'mappls-in-residential'))
-      .toMatchObject({ countryCode: 'IN', quotaProvider: 'mappls' });
-    expect(enabled.shards.find((shard) => shard.id === 'vpostcode-vn-licensed'))
-      .toMatchObject({ countryCode: 'VN', source: { dataUrl: 'https://licensed.example/vn.jsonl' } });
-    expect(enabled.shards.find((shard) => shard.id === 'ng-licensed-residential'))
-      .toMatchObject({ countryCode: 'NG', source: { dataUrl: 'https://licensed.example/ng.csv' } });
-    expect(enabled.shards.filter((shard) => ['mappls-in-residential', 'vpostcode-vn-licensed', 'ng-licensed-residential']
-      .includes(shard.id)).every((shard) => shard.source.redistributionAllowed === false)).toBe(true);
+      .toMatchObject({ countryCode: 'IN', extractId: 'india', boundaryIso3: 'IND', quotaProvider: 'mappls' });
+    expect(enabled.shards.find((shard) => shard.id === 'mappls-in-residential')?.source.redistributionAllowed)
+      .toBe(false);
     const saEnabled = await loadSourceCatalog(undefined, {
       ADDRESS_SYNC_SA_OPENADDRESSES_ENABLED: 'true'
     });
     expect(saEnabled.shards.find((shard) => shard.id === 'openaddresses-sa-national'))
       .toMatchObject({ countryCode: 'SA', source: { redistributionAllowed: false } });
     const licensed = await loadSourceCatalog(undefined, {
-      ADDRESS_SYNC_MAPPLS_ENABLED: 'true', ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_ENABLED: 'true', ADDRESS_SYNC_VPOSTCODE_FEED_URL: 'https://licensed.example/vn.jsonl',
-      ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED: 'true',
-      ADDRESS_SYNC_NG_FEED_ENABLED: 'true', ADDRESS_SYNC_NG_FEED_URL: 'https://licensed.example/ng.csv',
-      ADDRESS_SYNC_NG_REDISTRIBUTION_ALLOWED: 'true'
+      ADDRESS_SYNC_MAPPLS_ENABLED: 'true', ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED: 'true'
     });
-    expect(licensed.shards.filter((shard) => ['mappls-in-residential', 'vpostcode-vn-licensed', 'ng-licensed-residential']
-      .includes(shard.id)).every((shard) => shard.source.redistributionAllowed === true)).toBe(true);
+    expect(licensed.shards.find((shard) => shard.id === 'mappls-in-residential')?.source.redistributionAllowed)
+      .toBe(true);
     const saLicensed = await loadSourceCatalog(undefined, {
       ADDRESS_SYNC_SA_OPENADDRESSES_ENABLED: 'true',
       ADDRESS_SYNC_SA_OPENADDRESSES_LICENSE_CONFIRMED: 'true',
@@ -283,209 +265,52 @@ describe('address source shard catalog', () => {
       .toBe(true);
   });
 
-  it('rotates Mappls credentials and resumes from a durable normalized checkpoint', async () => {
-    const cacheDir = resolve('.data-cache', `mappls-${process.pid}-${Date.now()}`);
-    directories.push(cacheDir);
-    const environment = {
-      ADDRESS_SYNC_MAPPLS_LICENSE_CONFIRMED: 'true',
-      ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED: 'true',
-      MAPPLS_RESIDENTIAL_CATEGORY_CODES: 'RES001',
-      MAPPLS_API_KEY: 'quota-key',
-      MAPPLS_API_KEY_2: 'working-key',
-      MAPPLS_MAX_REQUESTS_PER_RUN: '10'
+  it('combines an OSM residential source address with Mappls administrative fields', () => {
+    const seed = {
+      building_id: 'way/42', building_class: 'house', number: '18', street: 'MG Road',
+      latitude: 28.632, longitude: 77.219,
+      ring: [[77.2189, 28.6319], [77.2191, 28.6319], [77.2191, 28.6321], [77.2189, 28.6321], [77.2189, 28.6319]]
     };
-    const tokens = [];
-    const requestedUrls = [];
-    const fetchImpl = vi.fn(async (input) => {
-      const url = new URL(String(input));
-      requestedUrls.push(url);
-      const token = url.searchParams.get('access_token');
-      tokens.push(token);
-      if (token === 'quota-key') return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
-      if (url.hostname === 'search.mappls.com') return Response.json({
-        suggestedLocations: [{ eLoc: 'ABC123' }],
-        pageInfo: { totalPages: 1 }
-      });
-      return Response.json({
-        eloc: 'ABC123', address: '18, MG Road, Central Delhi, New Delhi, Delhi, 110001', district: 'Central Delhi',
-        city: 'New Delhi', state: 'Delhi', pincode: '110001',
-        latitude: 28.632, longitude: 77.219
-      });
-    });
-    const adapters = createSourceAdapters({
-      fetchImpl,
-      environment,
-      loadSeedLocations: async () => [{ latitude: 28.63146, longitude: 77.217423 }]
-    });
-    const shard = {
-      id: 'mappls-in-residential', countryCode: 'IN', maxRecords: 1,
-      source: {
-        id: 'mappls-in-residential', adapter: 'mappls-residential', name: 'Mappls fixture',
-        dataUrl: 'https://search.mappls.com/search/places/nearby/json',
-        licenseConfirmationEnvironment: 'ADDRESS_SYNC_MAPPLS_LICENSE_CONFIRMED',
-        redistributionConfirmationEnvironment: 'ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED',
-        categoryCodesEnvironment: 'MAPPLS_RESIDENTIAL_CATEGORY_CODES'
-      }
-    };
-    const discovery = await adapters.discover(shard);
-    const first = await adapters.materialize(shard, discovery, {
-      cacheDir, maxBytes: 10_000_000, maxRecords: 1, perLocality: 10, retainRaw: false
-    });
-    expect(tokens).toEqual(['quota-key', 'working-key', 'working-key']);
-    expect(requestedUrls.at(-1).toString()).toContain('https://explore.mappls.com/apis/O2O/entity/ABC123');
-    expect(JSON.parse((await readFile(first.file, 'utf8')).trim())).toMatchObject({
-      source_record_id: 'ABC123', number: '18', street: 'MG Road', property_type: 'residential'
-    });
-    expect(await readFile(first.file, 'utf8')).not.toContain('working-key');
-    const calls = fetchImpl.mock.calls.length;
-    await (await import('node:fs/promises')).rm(first.file);
-    const second = await adapters.materialize(shard, discovery, {
-      cacheDir, maxBytes: 10_000_000, maxRecords: 1, perLocality: 10, retainRaw: false
-    });
-    expect(second.cacheHit).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledTimes(calls);
-  });
-
-  it('imports only explicitly residential rows from a licensed feed mapping', async () => {
-    const dataRoot = resolve('.data-cache', `licensed-feed-${process.pid}-${Date.now()}`);
-    directories.push(dataRoot);
-    await mkdir(dataRoot, { recursive: true });
-    const input = resolve(dataRoot, 'vpostcode.csv');
-    await writeFile(input, [
-      'record_id,house,road,ward,province,postcode,lon,lat,use',
-      'vn-1,12,Le Loi,Ward 1,Ho Chi Minh City,70000,106.70,10.77,residential',
-      'vn-2,14,Le Loi,Ward 1,Ho Chi Minh City,70000,106.71,10.78,commercial'
-    ].join('\n'));
-    const environment = {
-      ADDRESS_DATA_ROOT: dataRoot,
-      ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_FIELD_MAP: JSON.stringify({
-        id: 'record_id', number: 'house', street: 'road', locality: 'ward', admin1: 'province',
-        postcode: 'postcode', longitude: 'lon', latitude: 'lat', residentialClass: 'use'
-      }),
-      ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES: 'residential',
-      ADDRESS_SYNC_VPOSTCODE_FEED_FORMAT: 'csv'
-    };
-    const adapters = createSourceAdapters({ environment });
-    const shard = {
-      id: 'vpostcode-vn-licensed', countryCode: 'VN', maxRecords: 100,
-      source: {
-        id: 'vpostcode-vn-licensed', adapter: 'licensed-residential-feed', name: 'Vpostcode fixture',
-        dataUrl: input,
-        licenseConfirmationEnvironment: 'ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED',
-        redistributionConfirmationEnvironment: 'ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED',
-        versionEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FEED_VERSION',
-        mappingEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FIELD_MAP',
-        formatEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FEED_FORMAT',
-        residentialValuesEnvironment: 'ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES',
-        datasetResidentialEnvironment: 'ADDRESS_SYNC_VPOSTCODE_DATASET_RESIDENTIAL'
-      }
-    };
-    const discovery = await adapters.discover(shard);
-    const result = await adapters.materialize(shard, discovery, {
-      cacheDir: resolve(dataRoot, 'cache'), maxBytes: 10_000_000, maxRecords: 100, perLocality: 10, retainRaw: false
-    });
-    const rows = (await readFile(result.file, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      source_record_id: 'vn-1', number: '12', street: 'Le Loi', property_type: 'residential'
+    const result = evaluateMapplsResidentialResult({
+      responseCode: 200, version: 'fixture-v1', results: [{
+        area: 'India', district: 'Central Delhi', city: 'New Delhi', state: 'Delhi',
+        pincode: '110001', lat: '28.632', lng: '77.219'
+      }]
+    }, seed);
+    expect(result.record).toMatchObject({
+      source_record_id: 'way/42:fixture-v1', number: '18', street: 'MG Road',
+      district: 'Central Delhi', locality: 'New Delhi', admin1: 'Delhi', postcode: '110001',
+      property_type: 'residential'
     });
   });
 
-  it('persists a Mappls checkpoint when a page request fails', async () => {
-    const cacheDir = resolve('.data-cache', `mappls-failure-${process.pid}-${Date.now()}`);
-    directories.push(cacheDir);
-    const environment = {
-      ADDRESS_SYNC_MAPPLS_LICENSE_CONFIRMED: 'true',
-      ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED: 'true',
-      MAPPLS_RESIDENTIAL_CATEGORY_CODES: 'RES001',
-      MAPPLS_MAX_REQUESTS_PER_RUN: '10'
-    };
-    let available = true;
-    const adapters = createSourceAdapters({
-      environment,
+  it('rotates Mappls credentials while using only Reverse Geocoding', async () => {
+    const credentials = [
+      { id: 'quota', secret: 'quota-key' },
+      { id: 'working', secret: 'working-key' }
+    ];
+    const reports = [];
+    const requested = [];
+    const payload = await requestMapplsReverse({
+      latitude: 28.632,
+      longitude: 77.219,
       credentialPool: {
-        acquire: async () => {
-          if (!available) return null;
-          available = false;
-          return { id: 'fixture-key', secret: 'fixture-secret' };
-        },
-        report: async () => {}
+        acquire: async (_provider, { excludeIds }) => credentials.find(({ id }) => !excludeIds.has(id)) || null,
+        report: async (...values) => reports.push(values)
       },
-      fetchImpl: async () => { throw new Error('fixture network failure'); },
-      loadSeedLocations: async () => [{ latitude: 28.63146, longitude: 77.217423 }]
-    });
-    const shard = {
-      id: 'mappls-in-residential', countryCode: 'IN', maxRecords: 1,
-      source: {
-        id: 'mappls-in-residential', adapter: 'mappls-residential', name: 'Mappls fixture',
-        dataUrl: 'https://search.mappls.com/search/places/nearby/json',
-        licenseConfirmationEnvironment: 'ADDRESS_SYNC_MAPPLS_LICENSE_CONFIRMED',
-        redistributionConfirmationEnvironment: 'ADDRESS_SYNC_MAPPLS_REDISTRIBUTION_ALLOWED',
-        categoryCodesEnvironment: 'MAPPLS_RESIDENTIAL_CATEGORY_CODES'
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+        requested.push(url);
+        return url.searchParams.get('access_token') === 'quota-key'
+          ? new Response(null, { status: 429 })
+          : Response.json({ responseCode: 200, results: [] });
       }
-    };
-    const discovery = await adapters.discover(shard);
-    await expect(adapters.materialize(shard, discovery, {
-      cacheDir, maxBytes: 10_000_000, maxRecords: 1, perLocality: 10, retainRaw: false
-    })).rejects.toMatchObject({ code: 'SOURCE_CREDENTIAL_UNAVAILABLE' });
-    const identity = normalizedCachePolicyIdentity(1, 10);
-    const checkpoint = JSON.parse(await readFile(resolve(
-      cacheDir, 'raw', `mappls-in-residential-${discovery.version}-${identity}-checkpoint.json`
-    ), 'utf8'));
-    expect(checkpoint).toMatchObject({ version: discovery.version, complete: false, seedIndex: 0, categoryIndex: 0, page: 1 });
-  });
-
-  it('reports an incomplete Mappls checkpoint instead of treating it as a complete source scan', async () => {
-    const cacheDir = resolve('.data-cache', `mappls-partial-${process.pid}-${Date.now()}`);
-    directories.push(cacheDir);
-    const seeds = Array.from({ length: 10 }, (_, index) => ({
-      latitude: 20 + index / 100,
-      longitude: 70 + index / 100
-    }));
-    const brokerCalls = [];
-    const credentialBrokerClient = {
-      request: async (operation, parameters) => {
-        brokerCalls.push([operation, parameters]);
-        if (operation === 'mappls.nearby') {
-          const id = `EL${String(parameters.latitude).replace(/\D/gu, '')}`;
-          return { suggestedLocations: [{ eLoc: id }], pageInfo: { totalPages: 1 } };
-        }
-        return {
-        eloc: parameters.eLoc,
-        houseNumber: '18',
-        street: 'MG Road',
-        district: 'Central Delhi',
-        city: 'New Delhi',
-        state: 'Delhi',
-        pincode: '110001',
-        latitude: 28.632,
-        longitude: 77.219
-        };
-      }
-    };
-    const adapters = createSourceAdapters({
-      credentialBrokerClient,
-      environment: {
-        MAPPLS_MAX_REQUESTS_PER_RUN: '10'
-      },
-      loadSeedLocations: async () => seeds
     });
-    const shard = {
-      id: 'mappls-in-residential', countryCode: 'IN', maxRecords: 100,
-      source: { id: 'mappls-in-residential', adapter: 'mappls-residential', name: 'Mappls fixture' }
-    };
-    const materialized = await adapters.materialize(shard, {
-      adapter: 'mappls-residential', version: 'fixture-v1', categoryCodes: ['RES001']
-    }, { cacheDir, maxBytes: 10_000_000, maxRecords: 100, perLocality: 10, retainRaw: false });
-    expect(materialized).toMatchObject({ sourceComplete: false, checkpointToken: expect.any(String) });
-    const resumed = await adapters.materialize(shard, {
-      adapter: 'mappls-residential', version: 'fixture-v1', categoryCodes: ['RES001']
-    }, { cacheDir, maxBytes: 10_000_000, maxRecords: 100, perLocality: 10, retainRaw: false });
-    expect(resumed.checkpointToken).not.toBe(materialized.checkpointToken);
-    expect(brokerCalls.some(([operation]) => operation === 'mappls.nearby')).toBe(true);
-    expect(brokerCalls.some(([operation]) => operation === 'mappls.entity')).toBe(true);
+    expect(payload).toEqual({ responseCode: 200, results: [] });
+    expect(reports.map(([, outcome]) => outcome)).toEqual(['quota', 'success']);
+    expect(requested.map(({ pathname }) => pathname)).toEqual([
+      '/search/address/rev-geocode', '/search/address/rev-geocode'
+    ]);
   });
 
   it('rounds the PDOK page size up so 400 seeds can satisfy a 50000-record target', async () => {
@@ -513,50 +338,6 @@ describe('address source shard catalog', () => {
     }, { cacheDir, maxBytes: 10_000_000, maxRecords: 50_000, perLocality: 10, retainRaw: false }))
       .rejects.toThrow('Source metadata request failed');
     expect(requested[0].searchParams.get('limit')).toBe('63');
-  });
-
-  it('removes a remote licensed feed after exporter failure', async () => {
-    const cacheDir = resolve('.data-cache', `licensed-cleanup-${process.pid}-${Date.now()}`);
-    directories.push(cacheDir);
-    const environment = {
-      ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED: 'true',
-      ADDRESS_SYNC_VPOSTCODE_FIELD_MAP: JSON.stringify({
-        id: 'id', number: 'number', street: 'street', locality: 'locality', admin1: 'admin1',
-        postcode: 'postcode', longitude: 'longitude', latitude: 'latitude', residentialClass: 'class'
-      }),
-      ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES: 'residential',
-      ADDRESS_SYNC_VPOSTCODE_FEED_FORMAT: 'jsonl'
-    };
-    const fetchImpl = vi.fn(async (_input, init = {}) => {
-      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: { etag: 'fixture-v1' } });
-      return new Response('{"id":"vn-1"}\n', { status: 200 });
-    });
-    const adapters = createSourceAdapters({
-      environment,
-      fetchImpl,
-      execute: async () => { throw new Error('fixture exporter failure'); }
-    });
-    const shard = {
-      id: 'vpostcode-vn-licensed', countryCode: 'VN', maxRecords: 1,
-      source: {
-        id: 'vpostcode-vn-licensed', adapter: 'licensed-residential-feed', name: 'Vpostcode fixture',
-        dataUrl: 'https://licensed.example/vn.jsonl', fileExtension: '.jsonl',
-        licenseConfirmationEnvironment: 'ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED',
-        redistributionConfirmationEnvironment: 'ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED',
-        versionEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FEED_VERSION',
-        mappingEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FIELD_MAP',
-        formatEnvironment: 'ADDRESS_SYNC_VPOSTCODE_FEED_FORMAT',
-        residentialValuesEnvironment: 'ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES',
-        datasetResidentialEnvironment: 'ADDRESS_SYNC_VPOSTCODE_DATASET_RESIDENTIAL'
-      }
-    };
-    const discovery = await adapters.discover(shard);
-    await expect(adapters.materialize(shard, discovery, {
-      cacheDir, maxBytes: 10_000_000, maxRecords: 1, perLocality: 10, retainRaw: false
-    })).rejects.toThrow('fixture exporter failure');
-    const rawFiles = await (await import('node:fs/promises')).readdir(resolve(cacheDir, 'raw')).catch(() => []);
-    expect(rawFiles).toEqual([]);
   });
 
   it('includes output limits in normalized cache identities', () => {

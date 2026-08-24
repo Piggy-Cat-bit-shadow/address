@@ -6,8 +6,8 @@ import pg from 'pg';
 const { Pool } = pg;
 const addressSchemaUrl = new URL('./schema.sql', import.meta.url);
 const controlSchemaUrl = new URL('../control/schema.sql', import.meta.url);
-const ADDRESS_SCHEMA_VERSION = 18;
-const CONTROL_SCHEMA_VERSION = 18;
+const ADDRESS_SCHEMA_VERSION = 20;
+const CONTROL_SCHEMA_VERSION = 19;
 
 const integer = (value, fallback, minimum, maximum) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);

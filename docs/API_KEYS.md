@@ -2,157 +2,80 @@
 
 [English](API_KEYS.md) · [简体中文](API_KEYS.zh-CN.md) · [繁體中文](API_KEYS.zh-TW.md)
 
-Address can serve an existing PostgreSQL address pool without third-party keys. Provider credentials are needed only for the related synchronization, translation, geocoding, or map-preview feature.
+Add credentials in **Admin → Service credentials**. Multiple credentials under the same provider are rotated automatically.
 
-## Where credentials are stored
+| Provider | Country or feature | Administrator entry |
+|---|---|---|
+| AMap WebService | China address synchronization | AMap |
+| Baidu Maps | China address synchronization | Baidu Maps |
+| Tencent Location Service | China address synchronization | Tencent Maps |
+| Mappls Reverse Geocoding | India address enrichment | Mappls |
+| OneMap | Singapore address synchronization | OneMap |
+| Geoapify Reverse Geocoding | South Korea postcode enrichment | Geoapify |
+| Google Geocoding | Residential enrichment for supported low-volume countries | Google Geocoding |
+| Youdao Text Translation | Address translation | Youdao Translate |
+| AMap JavaScript API | China browser map | AMap browser map |
 
-- Configure AMap, Baidu, Tencent, Mappls, OneMap, Geoapify, Google Geocoding, Youdao, and AMap browser credentials in the administrator console. They are encrypted in PostgreSQL with `CONFIG_MASTER_KEY`.
-- Administrator credentials participate directly in the synchronization workers' quota, cooldown, and rotation pools.
-- Keep `config/address.env` empty for normal deployments. It is reserved for advanced licensed-feed URLs, field mappings, and license gates required at process startup; do not store provider keys there unless a future adapter explicitly requires it.
+## AMap WebService
 
-## Provider credentials
+1. Open the [AMap developer console](https://console.amap.com/dev/index).
+2. Create an application and a **WebService** key using the [official guide](https://lbs.amap.com/api/webservice/create-project-and-key).
+3. Apply the server IP restriction and add the key under **AMap**.
 
-### AMap WebService
+## Baidu Maps
 
-1. Register at the [AMap developer console](https://console.amap.com/dev/index).
-2. Create an application and a **WebService** key following the [official key guide](https://lbs.amap.com/api/webservice/create-project-and-key).
-3. Restrict the key as allowed by the console and enable only required services.
-4. Set `AMAP_API_KEY`; additional keys use numbered names such as `AMAP_API_KEY_2`, or add every key separately in **Admin → Service credentials**.
+1. Open the [Baidu Maps API console](https://lbsyun.baidu.com/apiconsole/key).
+2. Create a **Server** application and enable the Place Web API.
+3. Apply the server IP restriction and add the AK under **Baidu Maps**.
 
-Do not reuse this server key for browser maps.
+## Tencent Location Service
 
-AMap's [base-service quota page](https://lbs.amap.com/pages/base_service_price) lists `5,000` requests per month and `3 QPS` for personal verified basic search. Its [official error table](https://lbs.amap.com/api/webservice/guide/tools/info/) identifies `10003` as a daily limit that unlocks at `00:00` the next day, `10004` as a per-minute limit that unlocks in the next minute, and `40000` as exhausted balance or plan quota. The system tracks short cooldown, daily, and monthly windows independently.
+1. Open the [Tencent Location Service console](https://lbs.qq.com/dev/console/application/mine).
+2. Create an application and enable **WebService API**.
+3. Apply the server IP or signature restriction and add the key under **Tencent Maps**.
 
-### AMap JavaScript map
+## Mappls Reverse Geocoding
 
-1. Create a dedicated **JavaScript API** key and security code in the AMap console.
-2. Restrict the browser key to the production domain.
-3. Configure `AMAP_JS_API_KEY` and `AMAP_JS_SECURITY_CODE`, or use **Admin → Service credentials → AMap browser map**.
+1. Create an application in the [Mappls Console](https://auth.mappls.com/console/).
+2. Enable **Reverse Geocoding API** and copy the static key from the credentials section.
+3. Apply the server IP restriction and add the key under **Mappls**.
 
-The browser key is visible to browsers by design. The security code remains server-side and is applied through the same-origin proxy. AMap's [official security-code guide](https://lbs.amap.com/api/maps-javascript-api/guide/abc/jscode) recommends proxy forwarding rather than exposing the code.
+The integration follows the [Mappls Reverse Geocoding API](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-reverse-geocoding-rest-api-example/Readme/).
 
-### Baidu Maps
-
-1. Register and open the [Baidu Maps API console](https://lbsyun.baidu.com/apiconsole/key).
-2. Create a **Server** application and enable the Place/Web API services used by the project.
-3. Configure an IP whitelist or signature policy suitable for the server.
-4. Set `BAIDU_API_KEY`, numbered variants such as `BAIDU_API_KEY_2`, or add keys in the administrator console.
-
-See Baidu's [official Web API documentation](https://lbsyun.baidu.com/faq/api?title=webapi%2Fguide%2Fwebservice-placeapi). Codes for quota, invalid AK, disabled service, and IP/signature validation are handled per credential.
-
-Baidu's [developer entitlement page](https://lbsyun.baidu.com/solutions/privilege) lists `100` place-search requests per day and `3 QPS` for personal accounts. Use the current account console when it reports a different entitlement.
-
-### Tencent Location Service
-
-1. Register in the [Tencent Location Service console](https://lbs.qq.com/dev/console/application/mine).
-2. Create an application and key, then enable **WebService API** only where needed.
-3. Apply IP/signature restrictions.
-4. Set `TENCENT_API_KEY`, a numbered variant, or add each key in the administrator console.
-
-Tencent documents response code `120` as a per-second limit and `121` as a daily limit in its [official status table](https://lbs.qq.com/service/webService/webServiceGuide/status). Current usage may also be reported in `X-LIMIT` response headers; the console remains authoritative.
-
-Tencent's [WebService quota guide](https://lbs.qq.com/webservice_v1/guide-quota.html) lists an initial default of `10,000` requests per day and `5 QPS`. When `X-LIMIT` or the console reports a different effective value, the system stores and uses that daily-window observation instead.
-
-### Mappls Search API
-
-1. Create an app in the [Mappls Console](https://auth.mappls.com/console/) and enable Nearby Places and Place Details for that app.
-2. Copy the static key from the app's credentials section. Current Nearby API documentation passes it as the mandatory `access_token` query parameter.
-3. Restrict the key to the production server IP where the console permits it.
-4. Set `MAPPLS_API_KEY`, use numbered variants such as `MAPPLS_API_KEY_2`, or add each key in the administrator console.
-
-The India residential adapter remains disabled until the contract explicitly permits residential category codes, restricted address tokens, coordinates, caching, and redistribution. The built-in 1,000/day value is a local protective default, not an official plan entitlement; configure the actual limit from the contract and console. See the [current Nearby API documentation](https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-near-by-api-example/Readme).
-
-### Vietnam Post Vpostcode feed
-
-1. Obtain a Vpostcode bulk feed or API contract that permits residential fields, coordinates, server-side caching, and redistribution.
-2. Set `ADDRESS_SYNC_VPOSTCODE_FEED_URL` to an HTTPS feed, or to a file below `ADDRESS_DATA_ROOT`; set its immutable `ADDRESS_SYNC_VPOSTCODE_FEED_VERSION` and format (`csv`, `json`, or `jsonl`).
-3. Set `ADDRESS_SYNC_VPOSTCODE_FIELD_MAP` to JSON mapping `id`, `number`, `street`, `locality`, `admin1`, `postcode`, `longitude`, and `latitude`. If the dataset is not contractually all-residential, also map `residentialClass` and set `ADDRESS_SYNC_VPOSTCODE_RESIDENTIAL_VALUES`.
-4. Only after the contract and field sample have been reviewed, set `ADDRESS_SYNC_VPOSTCODE_ENABLED=true`, `ADDRESS_SYNC_VPOSTCODE_LICENSE_CONFIRMED=true`, and `ADDRESS_SYNC_VPOSTCODE_REDISTRIBUTION_ALLOWED=true`.
-
-The adapter accepts only five-digit postcodes and remains disabled until a real authorized sample passes the residential quality gate. Synthetic feed throughput tests do not establish Vpostcode capacity.
-
-### Nigeria NIPOST or ProgIS feed
-
-1. Obtain a NIPOST or ProgIS bulk feed contract that permits residential fields, coordinates, server-side caching, and redistribution.
-2. Set `ADDRESS_SYNC_NG_FEED_URL` to an HTTPS feed, or to a file below `ADDRESS_DATA_ROOT`; set `ADDRESS_SYNC_NG_FEED_VERSION` and its format (`csv`, `json`, or `jsonl`).
-3. Set `ADDRESS_SYNC_NG_FIELD_MAP` to JSON mapping `id`, `number`, `street`, `district`, `locality`, `admin1`, `postcode`, `longitude`, and `latitude`. If the dataset is not contractually all-residential, also map `residentialClass` and set `ADDRESS_SYNC_NG_RESIDENTIAL_VALUES`.
-4. Only after the contract and field sample have been reviewed, set `ADDRESS_SYNC_NG_FEED_ENABLED=true`, `ADDRESS_SYNC_NG_LICENSE_CONFIRMED=true`, and `ADDRESS_SYNC_NG_REDISTRIBUTION_ALLOWED=true`.
-
-The adapter requires a six-digit postcode and a district. It remains disabled until a real authorized sample passes the residential quality gate. Synthetic feed throughput tests do not establish NIPOST or ProgIS capacity.
-
-### Geoapify
-
-1. Create an account and project at [Geoapify MyProjects](https://myprojects.geoapify.com/).
-2. Copy the project API key and review the current [Reverse Geocoding documentation](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/) and [official pricing and quotas](https://www.geoapify.com/pricing/).
-3. Add every key separately under **Admin → Service credentials → Geoapify**. Environment values named `GEOAPIFY_API_KEY`, `GEOAPIFY_API_KEY_2`, and so on are imported for bootstrap deployments.
-
-The Korea K-apt worker obtains a credential from the encrypted rotation pool for every postcode request. Authentication failures, rate limits, quota waits, and transient failures are reported per key; when no key is ready, synchronization waits for the earliest persisted recovery time. Keys that share a project or account quota must use the same quota scope. Geoapify currently prices one Reverse Geocoding request as one credit; configured limits remain editable because plans can change. A `429` response honours `Retry-After`, while local daily accounting uses the credential's configured timezone when the provider supplies no reset timestamp.
-
-### Singapore OneMap
+## OneMap
 
 1. Register for [OneMap API access](https://www.onemap.gov.sg/apidocs/register).
-2. Use the [authentication endpoint](https://www.onemap.gov.sg/apidocs/authentication) to generate an access token.
-3. Set `ONEMAP_ACCESS_TOKEN` before starting the Singapore import.
+2. Generate an access token through the [authentication API](https://www.onemap.gov.sg/apidocs/authentication).
+3. Add the token under **OneMap**. Replace it before its three-day expiry.
 
-OneMap states that a token is valid for three days. Refresh the environment value before expiry and restart the worker that consumes it.
-The credential broker validates the JWT expiry automatically. An expired token is reported as `api_key_expired:onemap` and is excluded from synchronization until replaced. Legacy local quota counters are reconciled with the current configured window automatically; no database edit is required.
+## Geoapify
 
-OneMap documents HTTP `429` as an API-limit response but does not publish a daily Search allowance or reset clock. The worker therefore enforces `1 QPS`, retries short throttles with bounded backoff, and does not treat `429` as a fabricated daily quota. Administrators may still configure a local safety budget.
+1. Create a project in [Geoapify MyProjects](https://myprojects.geoapify.com/).
+2. Copy the project API key.
+3. Add the key under **Geoapify**.
 
-### Google Geocoding
+See the [Reverse Geocoding API documentation](https://apidocs.geoapify.com/docs/geocoding/reverse-geocoding/).
 
-1. Create or select a Google Cloud project, attach billing, and enable Geocoding API.
-2. Create an API key and apply API and server restrictions.
-3. Set `GOOGLE_GEOCODING_API_KEY` or add it in the administrator console.
-4. Set `ADDRESS_SYNC_GOOGLE_GEOCODING_LICENSE_CONFIRMED=true` and `ADDRESS_SYNC_GOOGLE_GEOCODING_REDISTRIBUTION_ALLOWED=true` only when written authorization covers persistent storage and redistribution of derived address data.
+## Google Geocoding
 
-The adapter uses Geocoding API v4 only; Places API is not required. It sends the key in `X-Goog-Api-Key`, requests a field mask, and filters `street_address`, `premise`, and `subpremise` results at rooftop or geometric-center granularity. Google currently lists `10,000` Geocoding billable events at no cost per billing account each calendar month and a project-wide limit of `3,000` queries per minute. Address defaults automatic synchronization to a `9,000`-request monthly budget and `5 QPS`. When adding the first key, enter any Geocoding usage already incurred in the same billing account this month. Google does not return the remaining monthly free usage in Geocoding responses, and usage across other projects cannot be discovered from an API key; verify it in Google Cloud Console and set a project quota there. Budget alerts alone do not stop charges. Keys in the same project share one quota scope and are never rotated to bypass it. Follow Google's [official setup guide](https://developers.google.com/maps/documentation/geocoding/get-api-key), [v4 migration guide](https://developers.google.com/maps/documentation/geocoding/geocoding-v4-migrate), [usage and billing page](https://developers.google.com/maps/documentation/geocoding/usage-and-billing), and [pricing list](https://developers.google.com/maps/billing-and-pricing/pricing).
+1. Create or select a Google Cloud project and attach a billing account.
+2. Enable **Geocoding API** using the [official setup guide](https://developers.google.com/maps/documentation/geocoding/get-api-key).
+3. Create a server API key, restrict it to Geocoding API and the deployment server IP, then add it under **Google Geocoding**.
 
-### OS Data Hub
+The project uses Geocoding API v4. Places API is not required.
 
-1. Sign in to [OS Data Hub](https://osdatahub.os.uk/).
-2. Open **Data → API Projects**, create a project, and add the required API.
-3. Copy the project API key and set `OS_DATA_HUB_API_KEY`.
+## Youdao Text Translation
 
-The [official account and API FAQ](https://osdatahub.os.uk/support/faqs/account-and-apis#generateApiKey) also explains key regeneration. This integration is optional unless a selected import strategy explicitly requires it.
+1. Register at [Youdao Zhiyun](https://ai.youdao.com/).
+2. Create an application and enable Text Translation.
+3. Add the application ID and application secret under **Online translation**.
 
-### Youdao translation
+Each entry stores one ID/secret pair; multiple pairs are supported.
 
-1. Register at [Youdao Zhiyun](https://ai.youdao.com/), create an application, and enable text translation.
-2. Copy the application ID and application secret.
-3. Set `YOUDAO_APP_KEY` and `YOUDAO_APP_SECRET`, or add one or more credential pairs in **Admin → Map keys → Online translation**. Multiple pairs rotate automatically according to quota and cooldown state.
-4. `GOOGLE_TRANSLATION_ENABLED` controls only the Google online-translation path; when it is disabled, a configured Youdao credential can still provide translation.
+## AMap JavaScript API
 
-The [official text-translation API](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) describes the v3 SHA-256 signature. Never expose the application secret in frontend code.
+1. Create a separate **JavaScript API** key and security code in the AMap console.
+2. Restrict the key to the production domain.
+3. Add both values under **AMap browser map**.
 
-## Project-generated secrets
-
-Generate these independently; they are not provider API keys:
-
-```bash
-openssl rand -base64 32   # CONFIG_MASTER_KEY
-openssl rand -hex 32      # SYNC_ADMIN_TOKEN
-openssl rand -base64 36   # administrator and PostgreSQL passwords
-```
-
-| Variable | Purpose |
-|---|---|
-| `CONFIG_MASTER_KEY` | Encrypts provider credentials. Keep it stable and backed up; changing it makes existing ciphertext unreadable. |
-| `ADMIN_BOOTSTRAP_PASSWORD` | Creates the first administrator only when PostgreSQL contains no administrator identity. |
-| `SYNC_ADMIN_TOKEN` | Authenticates API-to-sync-control requests. Use the same value in both processes. |
-| `POSTGRES_URL` password | Authenticates the application to PostgreSQL. URL-encode reserved characters. |
-
-## Rotation and cooldown behavior
-
-Credentials are selected by least-recent use while respecting enabled state, QPS, quota, expiry, and cooldown. A key may have simultaneous daily and monthly windows; exhausting either rotates to another key. A request failure excludes only that credential from the current attempt and lets another available credential run. Quota failures wait until the provider-reported retry time or the matching period reset, while QPS and per-minute limits use short cooldowns. If every key is unavailable, work waits for the earliest eligible credential instead of permanently disabling the provider.
-
-Official dashboards and response headers override documentation examples. Review current limits when creating a credential and configure its service, quota period, limit, time-zone boundary, and optional shared quota scope in the administrator console.
-
-## Verification checklist
-
-1. Run `npm run check:public` before staging files.
-2. Confirm `git diff --cached --name-only` contains no `.env`, database, dump, log, raw response, certificate, or private key.
-3. Test each credential from the administrator console without copying its value into logs or screenshots.
-4. Keep screenshots masked and rotate any credential that was accidentally displayed.
-
-Official pages checked: 2026-08-05. Provider terms, plans, quotas, and console workflows may change.
+Do not reuse the AMap WebService key for browser maps.

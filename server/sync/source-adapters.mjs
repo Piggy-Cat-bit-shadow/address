@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { appendFile, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -13,6 +13,7 @@ import { createOneMapCredentialBridge } from './onemap-credential-bridge.mjs';
 import {
   evaluateGoogleResidentialResult, googleResidentialLanguages, reconcileGoogleProgressOutput, requestGoogleReverse
 } from './google-residential-enrichment.mjs';
+import { evaluateMapplsResidentialResult, requestMapplsReverse } from './mappls-residential-enrichment.mjs';
 import { runProcess } from './process.mjs';
 
 const syncRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -33,7 +34,6 @@ const franceBdnbExporter = resolve(syncRoot, 'france-bdnb-export.py');
 const spainCatastroExporter = resolve(syncRoot, 'spain-catastro-export.py');
 const taiwanResidentialExporter = resolve(syncRoot, 'taiwan-residential-export.py');
 const hongKongResidentialExporter = resolve(syncRoot, 'hong-kong-residential-export.py');
-const licensedResidentialExporter = resolve(syncRoot, 'licensed-residential-export.py');
 const overtureResidentialRevision = 'residential-buildings-v5';
 const geofabrikExportRevision = 'g69';
 const googleResidentialRevision = 'osm-explicit-residential-google-geocoding-v8';
@@ -50,8 +50,7 @@ const franceBdnbExportRevision = 'bdnb-ban-fiabilite17-v2';
 const spainCatastroExportRevision = 'inspire-residential-join-v2';
 const taiwanResidentialExportRevision = 'molit-lvr-oa-post-v2';
 const hongKongResidentialExportRevision = 'bd-building-information-v1';
-const mapplsResidentialRevision = 'licensed-nearby-details-v2';
-const licensedResidentialRevision = 'licensed-feed-v2';
+const mapplsResidentialRevision = 'osm-source-address-mappls-reverse-v3';
 const pdokBagRevision = 'strict-active-residential-coverage-round-robin-v2';
 export const sourceAdapterRevisions = Object.freeze({
   overture: overtureResidentialRevision,
@@ -71,7 +70,6 @@ export const sourceAdapterRevisions = Object.freeze({
   'taiwan-residential': taiwanResidentialExportRevision,
   'hong-kong-residential': hongKongResidentialExportRevision,
   'mappls-residential': mapplsResidentialRevision,
-  'licensed-residential-feed': licensedResidentialRevision,
   'pdok-bag': pdokBagRevision
 });
 
@@ -605,8 +603,20 @@ export const loadSourceCatalog = async (file = catalogFile, environment = proces
         intervalDays,
         source
       });
-    } else if (source.adapter === 'mappls-residential' || source.adapter === 'licensed-residential-feed'
-      || source.adapter === 'pdok-bag') {
+    } else if (source.adapter === 'mappls-residential') {
+      shards.push({
+        id: source.id,
+        countryCode: source.countryCode,
+        extractId: source.extractId,
+        boundaryIso3: source.boundaryIso3,
+        excludeBoundaryIso3: source.excludeBoundaryIso3,
+        maxRecords: source.maxRecords,
+        qualityGate: source.qualityGate,
+        quotaProvider: source.quotaProvider,
+        intervalDays,
+        source
+      });
+    } else if (source.adapter === 'pdok-bag') {
       shards.push({
         id: source.id,
         countryCode: source.countryCode,
@@ -756,91 +766,6 @@ export const createSourceAdapters = ({
     }
   };
   const geoapifyCredentialPool = credentialPool || geoapifyEnvironmentPool;
-
-  const retryAtFrom = (response) => {
-    const value = response.headers.get('retry-after');
-    if (!value) return null;
-    const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) return new Date(Date.now() + seconds * 1000).toISOString();
-    return Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
-  };
-
-  const requestMappls = async (target) => {
-    if (credentialBrokerClient) {
-      const url = new URL(target);
-      if (url.hostname === 'search.mappls.com' && url.pathname === '/search/places/nearby/json') {
-        const [latitude, longitude] = String(url.searchParams.get('refLocation') || '').split(',').map(Number);
-        return credentialBrokerClient.request('mappls.nearby', {
-          latitude,
-          longitude,
-          categoryCode: url.searchParams.get('keywords') || '',
-          radius: Number(url.searchParams.get('radius')),
-          page: Number(url.searchParams.get('page'))
-        }, { signal });
-      }
-      if (url.hostname === 'explore.mappls.com' && url.pathname.startsWith('/apis/O2O/entity/')) {
-        return credentialBrokerClient.request('mappls.entity', {
-          eLoc: decodeURIComponent(url.pathname.slice('/apis/O2O/entity/'.length))
-        }, { signal });
-      }
-      throw Object.assign(new Error('Unsupported Mappls Broker operation'), { code: 'SOURCE_CONFIGURATION_INVALID' });
-    }
-    const attempted = new Set();
-    for (let pacingAttempt = 0; pacingAttempt < 20; pacingAttempt += 1) {
-      const credential = await mapplsCredentialPool.acquire('mappls', { excludeIds: attempted });
-      if (!credential) {
-        if (!attempted.size && pacingAttempt < 19) {
-          await wait(100, signal);
-          continue;
-        }
-        throw Object.assign(new Error('No Mappls credential is currently available'), {
-          code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
-        });
-      }
-      attempted.add(credential.id);
-      const url = new URL(target);
-      url.searchParams.set('access_token', credential.secret);
-      let response;
-      try {
-        response = await apiFetchImpl(url, {
-          headers: { Accept: 'application/json' },
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
-        });
-      } catch (error) {
-        if (signal?.aborted) throw Object.assign(error, { code: 'SYNC_PROCESS_ABORTED' });
-        await mapplsCredentialPool.report(credential.id, 'network');
-        continue;
-      }
-      if (response.status === 401 || response.status === 403) {
-        await mapplsCredentialPool.report(credential.id, 'auth');
-        continue;
-      }
-      if (response.status === 429) {
-        await mapplsCredentialPool.report(credential.id, 'quota', { retryAt: retryAtFrom(response) });
-        continue;
-      }
-      if (!response.ok) {
-        await mapplsCredentialPool.report(credential.id, response.status >= 500 ? 'network' : 'invalid', {
-          retryAt: retryAtFrom(response)
-        });
-        if (response.status >= 500) continue;
-        throw Object.assign(new Error(`Mappls request returned HTTP ${response.status}`), {
-          code: 'SOURCE_METADATA_HTTP', status: response.status
-        });
-      }
-      let body;
-      try { body = await response.json(); }
-      catch (error) {
-        await mapplsCredentialPool.report(credential.id, 'invalid');
-        throw Object.assign(new Error('Mappls returned invalid JSON'), { code: 'SOURCE_METADATA_JSON', cause: error });
-      }
-      await mapplsCredentialPool.report(credential.id, 'success');
-      return body;
-    }
-    throw Object.assign(new Error('Every Mappls credential is unavailable'), {
-      code: 'SOURCE_CREDENTIAL_UNAVAILABLE'
-    });
-  };
 
   const loadStacItems = async (collectionUrl, collection) => {
     const links = collection.links.filter((link) => link.rel === 'item');
@@ -1556,79 +1481,17 @@ export const createSourceAdapters = ({
     }
   };
 
-  const mapplsCategoryCodes = (source) => {
-    const name = source.categoryCodesEnvironment || 'MAPPLS_RESIDENTIAL_CATEGORY_CODES';
-    const values = String(environment[name] || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
-    if (!values.length || values.some((value) => !/^[A-Z\d_-]{2,32}$/u.test(value))) {
-      throw Object.assign(new Error(`${name} must contain authorized residential category codes`), {
-        code: 'SOURCE_CONFIGURATION_INVALID'
-      });
-    }
-    return [...new Set(values)];
-  };
-
-  const discoverMapplsResidential = async (shard) => {
+  const discoverMapplsResidential = async (shard, options) => {
     requireLicensedSource(shard.source);
-    const categories = mapplsCategoryCodes(shard.source);
-    const month = new Date().toISOString().slice(0, 7);
-    const categoryFingerprint = createHash('sha256').update(categories.sort().join('\u001f')).digest('hex').slice(0, 12);
+    const source = await discoverGeofabrik(shard, options);
     return {
+      ...source,
       adapter: 'mappls-residential',
-      version: `${month}-${categoryFingerprint}-${mapplsResidentialRevision}`,
+      version: mapplsResidentialRevision,
+      rawVersion: source.version,
       publishedAt: null,
-      dataUrl: shard.source.dataUrl,
-      sourceBytes: null,
-      categoryCodes: categories,
       residentialBuildingAvailable: true,
-      estimateMethod: 'licensed-paginated-api'
-    };
-  };
-
-  const licensedLocalFile = async (value) => {
-    const root = await realpath(resolve(environment.ADDRESS_DATA_ROOT || 'data'));
-    const file = await realpath(resolve(value));
-    const relativeFile = relative(root, file);
-    if (!relativeFile || isAbsolute(relativeFile) || relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || relativeFile.startsWith(sep)) {
-      throw Object.assign(new Error('Licensed feed files must be inside ADDRESS_DATA_ROOT'), {
-        code: 'SOURCE_CONFIGURATION_INVALID'
-      });
-    }
-    return file;
-  };
-
-  const discoverLicensedResidential = async (shard) => {
-    requireLicensedSource(shard.source);
-    const configuredVersion = String(environment[shard.source.versionEnvironment] || '').trim();
-    if (/^https:\/\//iu.test(shard.source.dataUrl)) {
-      const response = await fetchHead(shard.source.dataUrl);
-      if (!response.ok) throw new Error(`Licensed feed metadata request failed (${response.status})`);
-      const modified = response.headers.get('last-modified');
-      const etag = response.headers.get('etag')?.replaceAll('"', '') || '';
-      const version = configuredVersion || [modified ? new Date(modified).toISOString().slice(0, 10) : '', etag]
-        .filter(Boolean).join('-');
-      if (!version) throw Object.assign(new Error(`${shard.source.versionEnvironment} is required when the feed has no validator`), {
-        code: 'SOURCE_CONFIGURATION_INVALID'
-      });
-      return {
-        adapter: 'licensed-residential-feed',
-        version: `${safeVersion(version)}-${licensedResidentialRevision}`,
-        publishedAt: modified && Number.isFinite(Date.parse(modified)) ? new Date(modified).toISOString() : null,
-        dataUrl: shard.source.dataUrl,
-        sourceBytes: headerNumber(response.headers, 'content-length'),
-        estimateMethod: 'licensed-feed-content-length'
-      };
-    }
-    const file = await licensedLocalFile(shard.source.dataUrl);
-    const metadata = await stat(file);
-    const checksum = await sha256File(file);
-    return {
-      adapter: 'licensed-residential-feed',
-      version: `${safeVersion(configuredVersion || checksum.slice(0, 24))}-${licensedResidentialRevision}`,
-      publishedAt: metadata.mtime.toISOString(),
-      dataUrl: file,
-      sourceBytes: metadata.size,
-      sourceChecksum: checksum,
-      estimateMethod: 'licensed-local-feed'
+      estimateMethod: 'fixed-osm-source-address-seed-cap'
     };
   };
 
@@ -1673,7 +1536,6 @@ export const createSourceAdapters = ({
     if (shard.source.adapter === 'taiwan-residential') return discoverTaiwanResidential(shard, options);
     if (shard.source.adapter === 'hong-kong-residential') return discoverHongKongResidential(shard, options);
     if (shard.source.adapter === 'mappls-residential') return discoverMapplsResidential(shard, options);
-    if (shard.source.adapter === 'licensed-residential-feed') return discoverLicensedResidential(shard, options);
     if (shard.source.adapter === 'pdok-bag') return discoverPdokBag(shard, options);
     throw new Error(`Unsupported source adapter: ${shard.source.adapter}`);
   };
@@ -1874,7 +1736,9 @@ export const createSourceAdapters = ({
     return { file: output, format: 'geofabrik-geojsonseq', cacheBytes: size, checksum: await sha256File(output), sourceChecksum, cacheHit: false };
   };
 
-  const materializeGoogleResidential = async (shard, discovery, options) => {
+  const materializeResidentialEnrichment = async (shard, discovery, options) => {
+    const mappls = discovery.adapter === 'mappls-residential';
+    const providerName = mappls ? 'Mappls' : 'Google';
     const version = safeVersion(discovery.version);
     const rawVersion = String(discovery.rawVersion || discovery.version);
     const policyIdentity = normalizedCachePolicyIdentity(options.maxRecords, options.perLocality);
@@ -1954,13 +1818,14 @@ export const createSourceAdapters = ({
         try {
           targets = await loadGoogleCoverageTargets(shard.countryCode);
         } catch (error) {
-          console.error(`[address-sync] ${shard.countryCode} Google coverage targets unavailable`, error);
+          console.error(`[address-sync] ${shard.countryCode} ${providerName} coverage targets unavailable`, error);
         }
         if (targets.length) await writeFile(coverageTargets, `${JSON.stringify(targets)}\n`, 'utf8');
         await runExecute({
           file: pythonBin,
           args: [googleResidentialSeedExporter, '--input', raw, '--output', temporarySeeds,
             '--max-records', String(Math.min(Number(shard.maxRecords || options.maxRecords), options.maxRecords)),
+            ...(mappls ? ['--require-source-address'] : []),
             ...(targets.length ? ['--coverage-targets', coverageTargets] : []),
             ...(discovery.boundaryUrl ? ['--boundary', boundary] : []),
             ...excludeBoundaries.flatMap((file) => ['--exclude-boundary', file])],
@@ -2012,16 +1877,23 @@ export const createSourceAdapters = ({
         const seed = JSON.parse(line);
         let payload;
         try {
-          payload = await requestGoogleReverse({
+          payload = mappls ? await requestMapplsReverse({
             latitude: seed.latitude,
             longitude: seed.longitude,
-            language: googleResidentialLanguages[shard.countryCode] || 'en',
-            regionCode: shard.countryCode,
-            credentialPool,
+            credentialPool: credentialPool || mapplsCredentialPool,
             brokerClient: credentialBrokerClient,
             fetchImpl: apiFetchImpl,
             signal: options.signal || signal
-          });
+          }) : await requestGoogleReverse({
+              latitude: seed.latitude,
+              longitude: seed.longitude,
+              language: googleResidentialLanguages[shard.countryCode] || 'en',
+              regionCode: shard.countryCode,
+              credentialPool,
+              brokerClient: credentialBrokerClient,
+              fetchImpl: apiFetchImpl,
+              signal: options.signal || signal
+            });
         } catch (error) {
           if (['SOURCE_CREDENTIAL_UNAVAILABLE', 'SOURCE_QUOTA_UNAVAILABLE', 'SOURCE_RATE_LIMITED',
             'BROKER_TEST_POLICY_BLOCKED', 'BROKER_UNAVAILABLE'].includes(error?.code)) {
@@ -2032,7 +1904,9 @@ export const createSourceAdapters = ({
         }
         requests += 1;
         progress.requested += 1;
-        const evaluation = evaluateGoogleResidentialResult(payload, seed, shard.countryCode);
+        const evaluation = mappls
+          ? evaluateMapplsResidentialResult(payload, seed)
+          : evaluateGoogleResidentialResult(payload, seed, shard.countryCode);
         const record = evaluation.record;
         if (record) {
           await appendFile(output, `${JSON.stringify(record)}\n`, 'utf8');
@@ -2075,7 +1949,7 @@ export const createSourceAdapters = ({
         ...(!options.retainRaw ? [rm(raw, { force: true })] : [])
       ]);
       throw Object.assign(new Error(
-        `Google residential pilot accepted ${progress.accepted}/${progress.nextIndex}; minimum ${minimumPilotAccepted}/${pilotRequests}`
+        `${providerName} residential pilot accepted ${progress.accepted}/${progress.nextIndex}; minimum ${minimumPilotAccepted}/${pilotRequests}`
       ), {
         code: 'SOURCE_QUALITY_FAILED',
         failureSignature: `${shard.id}:${version}:pilot:${pilotRequests}:${minimumPilotAccepted}`,
@@ -3206,205 +3080,6 @@ export const createSourceAdapters = ({
     await replaceFile(temporary, file);
   };
 
-  const mapplsAddressRecord = (detailsPayload, nearby, categoryCode, sourceName) => {
-    const details = Array.isArray(detailsPayload) ? detailsPayload[0]
-      : detailsPayload?.results?.[0] || detailsPayload?.result || detailsPayload?.copResults?.[0]
-        || detailsPayload?.copResults || detailsPayload;
-    if (!details || typeof details !== 'object') return null;
-    const address = details.addressTokens && typeof details.addressTokens === 'object' ? details.addressTokens : details;
-    const admin = details.adminTokens && typeof details.adminTokens === 'object' ? details.adminTokens : details;
-    const sourceRecordId = String(details.eloc || details.eLoc || nearby.eLoc || nearby.eloc || '').trim();
-    const formattedAddress = String(details.address || details.formattedAddress || nearby.placeAddress || '').trim();
-    const addressParts = formattedAddress.split(',').map((value) => value.trim()).filter(Boolean);
-    const parsedNumber = addressParts[0]?.match(/^(\d+[A-Za-z]?(?:[-/]\d+)?)(?:\s|$)/u)?.[1] || '';
-    const number = String(address.houseNumber || details.houseNumber || parsedNumber).trim();
-    const parsedStreet = parsedNumber
-      ? (addressParts[0].slice(parsedNumber.length).trim() || addressParts[1] || '')
-      : '';
-    const street = String(address.street || details.street || parsedStreet).trim();
-    const admin1 = String(admin.state || address.state || details.state || '').trim();
-    const locality = String(admin.city || address.city || details.city || address.village || details.village || address.locality || details.locality || '').trim();
-    const district = String(admin.district || admin.subDistrict || address.district || details.district || address.subDistrict || details.subDistrict || '').trim();
-    const postcode = String(admin.pincode || address.pincode || details.pincode || '').trim();
-    const coordinates = details.coordinates || details.location || {};
-    const longitude = Number(details.longitude ?? details.lon ?? coordinates.longitude ?? coordinates.lng ?? nearby.longitude ?? nearby.lon);
-    const latitude = Number(details.latitude ?? details.lat ?? coordinates.latitude ?? coordinates.lat ?? nearby.latitude ?? nearby.lat);
-    if (!sourceRecordId || !number || !street || !admin1 || !locality || !district || !/^\d{6}$/u.test(postcode)
-      || !Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
-    return {
-      id: sourceRecordId,
-      source_record_id: sourceRecordId,
-      source_dataset: sourceName,
-      number,
-      street,
-      building_name: String(address.houseName || details.houseName || details.name || nearby.placeName || '').trim(),
-      district,
-      locality,
-      admin1,
-      postcode,
-      longitude,
-      latitude,
-      property_type: 'residential',
-      residential_building_id: sourceRecordId,
-      residential_building_class: `mappls-category:${categoryCode}`
-    };
-  };
-
-  const materializeMapplsResidential = async (shard, discovery, options) => {
-    const version = safeVersion(discovery.version);
-    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
-    const identity = normalizedCachePolicyIdentity(sourceMaximum, options.perLocality);
-    const normalizedRoot = resolve(options.cacheDir, 'normalized');
-    const rawRoot = resolve(options.cacheDir, 'raw');
-    const output = resolve(normalizedRoot, `${shard.id}-${version}-${identity}.jsonl`);
-    const candidates = resolve(rawRoot, `${shard.id}-${version}-${identity}-candidates.jsonl`);
-    const checkpointFile = resolve(rawRoot, `${shard.id}-${version}-${identity}-checkpoint.json`);
-    await Promise.all([mkdir(normalizedRoot, { recursive: true }), mkdir(rawRoot, { recursive: true })]);
-    let checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
-    try {
-      const loaded = JSON.parse(await readFile(checkpointFile, 'utf8'));
-      if (loaded.version === version) checkpoint = { ...checkpoint, ...loaded };
-    } catch {}
-    if (checkpoint.complete) {
-      try {
-        const size = (await stat(output)).size;
-        if (await hasMinimumLines(output, Number(shard.qualityGate?.minimumRecords || 1))) {
-          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true, sourceComplete: true };
-        }
-        await rm(output, { force: true });
-        checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
-      } catch {
-        try {
-          if (!await hasMinimumLines(candidates, Number(shard.qualityGate?.minimumRecords || 1))) throw new Error('empty Mappls candidate cache');
-          const temporary = `${output}.${process.pid}.tmp`;
-          await copyFile(candidates, temporary);
-          await replaceFile(temporary, output);
-          const size = (await stat(output)).size;
-          return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true, sourceComplete: true };
-        } catch {
-          checkpoint = { version, seedIndex: 0, categoryIndex: 0, page: 1, processed: [], complete: false };
-        }
-      }
-    }
-    const seeds = (await loadSeedLocations(shard.countryCode))
-      .map((value) => ({ latitude: Number(value.latitude), longitude: Number(value.longitude) }))
-      .filter(({ latitude, longitude }) => Number.isFinite(latitude) && Number.isFinite(longitude));
-    if (!seeds.length) throw Object.assign(new Error('Mappls residential discovery requires postcode or city coordinates'), {
-      code: 'SOURCE_CONFIGURATION_INVALID'
-    });
-    const processed = new Set(checkpoint.processed || []);
-    let acceptedCount = 0;
-    let candidatesPresent = false;
-    try {
-      for (const line of (await readFile(candidates, 'utf8')).split(/\r?\n/u)) {
-        if (!line) continue;
-        candidatesPresent = true;
-        const value = JSON.parse(line);
-        processed.add(String(value.source_record_id || value.id));
-        acceptedCount += 1;
-      }
-    } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
-    }
-    if (!candidatesPresent && checkpoint.processed?.length) {
-      checkpoint.processed = [];
-      processed.clear();
-    }
-    const persistCheckpoint = async () => {
-      checkpoint.processed = [...processed];
-      checkpoint.acceptedCount = acceptedCount;
-      checkpoint.updatedAt = new Date().toISOString();
-      await writeJsonAtomic(checkpointFile, checkpoint);
-    };
-    const requestBudget = Math.max(10, Math.min(100_000,
-      Number.parseInt(environment.MAPPLS_MAX_REQUESTS_PER_RUN || '2000', 10) || 2000));
-    const maximumPages = Math.max(1, Math.min(100,
-      Number.parseInt(environment.MAPPLS_MAX_PAGES_PER_SEED || '10', 10) || 10));
-    let requests = 0;
-    let pageCompleted = true;
-    try {
-      while (!checkpoint.complete && acceptedCount < sourceMaximum && requests < requestBudget) {
-        signal?.throwIfAborted();
-        if (checkpoint.seedIndex >= seeds.length) {
-          checkpoint.complete = true;
-          break;
-        }
-        const seed = seeds[checkpoint.seedIndex];
-        const categoryCode = discovery.categoryCodes[checkpoint.categoryIndex];
-        const nearbyUrl = new URL('https://search.mappls.com/search/places/nearby/json');
-        Object.entries({
-          keywords: categoryCode,
-          refLocation: `${seed.latitude},${seed.longitude}`,
-          region: 'IND',
-          radius: '10000',
-          page: String(checkpoint.page),
-          filter: `categoryCode:${categoryCode}`
-        }).forEach(([name, value]) => nearbyUrl.searchParams.set(name, value));
-        const nearbyPayload = await requestMappls(nearbyUrl);
-        requests += 1;
-        const locations = Array.isArray(nearbyPayload?.suggestedLocations) ? nearbyPayload.suggestedLocations : [];
-        pageCompleted = true;
-        for (const nearby of locations) {
-          signal?.throwIfAborted();
-          const eLoc = String(nearby.eLoc || nearby.eloc || '').trim();
-          if (!eLoc || processed.has(eLoc)) continue;
-          if (requests >= requestBudget) { pageCompleted = false; break; }
-          const detailsUrl = new URL(`https://explore.mappls.com/apis/O2O/entity/${encodeURIComponent(eLoc)}`);
-          const details = await requestMappls(detailsUrl);
-          requests += 1;
-          processed.add(eLoc);
-          const record = mapplsAddressRecord(details, nearby, categoryCode, shard.source.name);
-          if (!record) continue;
-          await appendFile(candidates, `${JSON.stringify(record)}\n`, 'utf8');
-          acceptedCount += 1;
-          if (acceptedCount >= sourceMaximum) break;
-        }
-        if (!pageCompleted || acceptedCount >= sourceMaximum) break;
-        const totalPages = Math.min(maximumPages, Math.max(1, Number(nearbyPayload?.pageInfo?.totalPages || 1)));
-        if (locations.length && checkpoint.page < totalPages) checkpoint.page += 1;
-        else {
-          checkpoint.page = 1;
-          checkpoint.categoryIndex += 1;
-          if (checkpoint.categoryIndex >= discovery.categoryCodes.length) {
-            checkpoint.categoryIndex = 0;
-            checkpoint.seedIndex += 1;
-          }
-        }
-        await persistCheckpoint();
-      }
-      if (acceptedCount >= sourceMaximum || checkpoint.seedIndex >= seeds.length) checkpoint.complete = true;
-    } finally {
-      await persistCheckpoint();
-    }
-    const checkpointToken = createHash('sha256').update(JSON.stringify({
-      seedIndex: checkpoint.seedIndex,
-      categoryIndex: checkpoint.categoryIndex,
-      page: checkpoint.page,
-      processedCount: processed.size,
-      acceptedCount,
-      complete: checkpoint.complete
-    })).digest('hex');
-    if (!acceptedCount) throw Object.assign(new Error('Mappls discovery checkpoint advanced without a publishable record'), {
-      code: checkpoint.complete ? 'SOURCE_QUALITY_FAILED' : 'SOURCE_PARTIAL',
-      sourceComplete: checkpoint.complete,
-      checkpointToken
-    });
-    const temporary = `${output}.${process.pid}.tmp`;
-    await copyFile(candidates, temporary);
-    await replaceFile(temporary, output);
-    const size = (await stat(output)).size;
-    return {
-      file: output,
-      format: 'overture-jsonl',
-      cacheBytes: size,
-      checksum: await sha256File(output),
-      sourceChecksum: await sha256File(candidates),
-      cacheHit: false,
-      sourceComplete: checkpoint.complete,
-      checkpointToken
-    };
-  };
-
   const materializePdokBag = async (shard, discovery, options) => {
     const version = safeVersion(discovery.version);
     const sourceMaximum = options.maxRecords;
@@ -3578,79 +3253,12 @@ export const createSourceAdapters = ({
     };
   };
 
-  const materializeLicensedResidential = async (shard, discovery, options) => {
-    const version = safeVersion(discovery.version);
-    const sourceMaximum = Math.min(options.maxRecords, Number(shard.maxRecords || options.maxRecords));
-    const output = resolve(options.cacheDir, 'normalized',
-      `${shard.id}-${version}-${normalizedCachePolicyIdentity(sourceMaximum, options.perLocality)}.jsonl`);
-    try {
-      const size = (await stat(output)).size;
-      if (await hasMinimumLines(output, Number(shard.qualityGate?.minimumRecords || 1))) {
-        return { file: output, format: 'overture-jsonl', cacheBytes: size, checksum: await sha256File(output), cacheHit: true };
-      }
-      await rm(output, { force: true });
-    } catch {}
-    const mappingName = shard.source.mappingEnvironment;
-    let mapping;
-    try { mapping = JSON.parse(String(environment[mappingName] || '')); }
-    catch { throw Object.assign(new Error(`${mappingName} must be a JSON field map`), { code: 'SOURCE_CONFIGURATION_INVALID' }); }
-    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
-      throw Object.assign(new Error(`${mappingName} must be a JSON field map`), { code: 'SOURCE_CONFIGURATION_INVALID' });
-    }
-    const residentialValues = String(environment[shard.source.residentialValuesEnvironment] || '')
-      .split(',').map((value) => value.trim()).filter(Boolean);
-    const datasetResidential = environmentEnabled(environment[shard.source.datasetResidentialEnvironment]);
-    if ((!mapping.residentialClass || !residentialValues.length) && !datasetResidential) {
-      throw Object.assign(new Error('Licensed feeds require explicit residential evidence'), {
-        code: 'SOURCE_CONFIGURATION_INVALID'
-      });
-    }
-    await mkdir(resolve(options.cacheDir, 'normalized'), { recursive: true });
-    const remote = /^https:\/\//iu.test(discovery.dataUrl);
-    const sourceFile = remote
-      ? resolve(options.cacheDir, 'raw', `${shard.id}-${version}${shard.source.fileExtension || '.feed'}`)
-      : await licensedLocalFile(discovery.dataUrl);
-    if (remote) await download(discovery.dataUrl, sourceFile, {
-      expectedBytes: discovery.sourceBytes,
-      maxBytes: options.maxBytes
-    });
-    const sourceChecksum = discovery.sourceChecksum || await sha256File(sourceFile);
-    const temporary = `${output}.${process.pid}.tmp`;
-    try {
-      await runExecute({
-        file: pythonBin,
-        args: [licensedResidentialExporter,
-          '--input', sourceFile,
-          '--output', temporary,
-          '--country', shard.countryCode,
-          '--source-name', shard.source.name,
-          '--mapping-json', JSON.stringify(mapping),
-          '--format', String(environment[shard.source.formatEnvironment] || 'auto'),
-          '--residential-values', residentialValues.join(','),
-          ...(datasetResidential ? ['--dataset-residential'] : []),
-          '--max-records', String(sourceMaximum)],
-        phase: `materialize:${shard.id}`
-      });
-      await replaceFile(temporary, output);
-    } finally {
-      await rm(temporary, { force: true });
-      if (remote && !options.retainRaw) await rm(sourceFile, { force: true });
-    }
-    const size = (await stat(output)).size;
-    return {
-      file: output,
-      format: 'overture-jsonl',
-      cacheBytes: size,
-      checksum: await sha256File(output),
-      sourceChecksum,
-      cacheHit: false
-    };
-  };
-
   const materialize = (shard, discovery, options) => {
     if (discovery.adapter === 'overture') return materializeOverture(shard, discovery, options);
     if (discovery.adapter === 'geofabrik') return materializeGeofabrik(shard, discovery, options);
-    if (discovery.adapter === 'google-residential-enrichment') return materializeGoogleResidential(shard, discovery, options);
+    if (['google-residential-enrichment', 'mappls-residential'].includes(discovery.adapter)) {
+      return materializeResidentialEnrichment(shard, discovery, options);
+    }
     if (discovery.adapter === 'japan-abr') return materializeJapanAbr(shard, discovery, options);
     if (discovery.adapter === 'singapore-hdb') return materializeSingaporeHdb(shard, discovery, options);
     if (discovery.adapter === 'korea-kapt') return materializeKoreaKapt(shard, discovery, options);
@@ -3664,8 +3272,6 @@ export const createSourceAdapters = ({
     if (discovery.adapter === 'spain-catastro-residential') return materializeSpainCatastroResidential(shard, discovery, options);
     if (discovery.adapter === 'taiwan-residential') return materializeTaiwanResidential(shard, discovery, options);
     if (discovery.adapter === 'hong-kong-residential') return materializeHongKongResidential(shard, discovery, options);
-    if (discovery.adapter === 'mappls-residential') return materializeMapplsResidential(shard, discovery, options);
-    if (discovery.adapter === 'licensed-residential-feed') return materializeLicensedResidential(shard, discovery, options);
     if (discovery.adapter === 'pdok-bag') return materializePdokBag(shard, discovery, options);
     throw new Error(`Unsupported source adapter: ${discovery.adapter}`);
   };

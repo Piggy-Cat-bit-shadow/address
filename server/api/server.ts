@@ -104,8 +104,6 @@ const environment = {
   IP_GEOLOCATION_API_URL: process.env.IP_GEOLOCATION_API_URL,
   IP_GEOLOCATION_FALLBACK_API_URL: process.env.IP_GEOLOCATION_FALLBACK_API_URL,
   ONEMAP_ACCESS_TOKEN: process.env.ONEMAP_ACCESS_TOKEN,
-  OVERPASS_API_URL: process.env.OVERPASS_API_URL,
-  PHOTON_API_URL: process.env.PHOTON_API_URL,
   TRUST_PROXY: process.env.TRUST_PROXY,
   YOUDAO_APP_KEY: process.env.YOUDAO_APP_KEY,
   YOUDAO_APP_SECRET: process.env.YOUDAO_APP_SECRET
@@ -208,6 +206,8 @@ const server = serve({
 }, ({ address, port: listeningPort }) => {
   console.log(`Address service listening on http://${address}:${listeningPort}`);
 });
+
+void china.wake(0).catch((error) => console.error('[china-sync] automatic scheduling failed', error));
 
 let stopping = false;
 const shutdown = (): void => {

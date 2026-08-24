@@ -72,7 +72,7 @@ Useful commands:
 
 Copy `.env.example` to the ignored `.env` file. Keep secrets server-side. Only variables explicitly prefixed for Astro's public environment are eligible for browser bundling; third-party provider keys and `SYNC_ADMIN_TOKEN` must remain in the API/sync process environment. `AMAP_API_KEY` is a server-side WebService credential. `AMAP_JS_API_KEY` is a separate domain-restricted browser loading key, while `AMAP_JS_SECURITY_CODE` remains server-side and is applied only by `/_AMapService`.
 
-Regular development needs no third-party API key. Optional synchronization integrations are documented in the [deployment guide](DEPLOYMENT.md).
+Regular development needs no third-party API key. Optional synchronization integrations are documented in the [API key guide](API_KEYS.md).
 
 ## Database and synchronization
 
@@ -90,9 +90,10 @@ Manual examples:
 
 ```bash
 node server/sync/address-etl.mjs --initial --all
-node server/sync/address-etl.mjs --daily --all
 node server/sync/address-etl.mjs --manual --shard US
 ```
+
+Production uses the synchronization supervisor rather than a cron-driven full reimport. Scheduler wake-ups resume eligible checkpoints and newly available source capabilities; completed or exhausted source fingerprints are not reimported merely because time has passed.
 
 ## Extending the public API
 

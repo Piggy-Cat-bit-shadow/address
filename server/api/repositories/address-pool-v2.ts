@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { hashSeed } from '../../../src/domain/generator';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
@@ -13,7 +14,7 @@ import {
   validateAdministrativeHierarchy
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
-import { requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
+import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
 import { storedVariantLooksLocalized } from '../../../src/domain/address-display';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
@@ -80,6 +81,17 @@ const normalize = (value: string | undefined): string => (value || '')
   .toLocaleLowerCase()
   .replace(/\s+/gu, ' ')
   .trim();
+
+const candidateOffset = (seed: string, length: number): number => length <= 1 ? 0
+  : Number(createHash('sha256').update(seed).digest().readBigUInt64BE(0) % BigInt(length));
+
+const rankSeed = (seed: string): string => (createHash('sha256').update(seed).digest().readBigUInt64BE(0)
+  & 0x7fffffffffffffffn).toString();
+
+const rotateCandidates = <T>(values: T[], seed: string): T[] => {
+  const offset = candidateOffset(seed, values.length);
+  return offset ? [...values.slice(offset), ...values.slice(0, offset)] : values;
+};
 
 const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
 const toTraditionalHongKong = createTraditionalizer({ from: 'cn', to: 'hk' });
@@ -459,7 +471,8 @@ export const enrichPickedAddress = async (db: Database, address: VerifiedAddress
       assign('native', names.native_name || names.name);
       assign('en', names.name);
       assign('zh-CN', names.zh_name || names.native_name || names.name);
-    } else if ((samePlaceKey(native.admin1) === samePlaceKey(native.locality)
+    } else if (!addressContracts[address.countryCode]?.required.includes('admin1')
+      && (samePlaceKey(native.admin1) === samePlaceKey(native.locality)
       || samePlaceKey(native.admin1) === samePlaceKey(native.postalLocality))
       && await hasCatalogRegions(db, address.countryCode)) {
       for (const language of languages) {
@@ -684,18 +697,34 @@ export const pickAddressPoolV2Address = async (
 
   const pivot = hashSeed(`${country}:${seed}:address-pool-v2`) & 0x7fffffff;
   const candidateLimit = residential ? 16 : 64;
+  const nationwide = !target && !filters.region && !filters.regionId && !filters.city && !filters.cityId
+    && !filters.district && !filters.districtId && !filters.postcode && !filters.postcodeId && !filters.q?.trim();
   try {
     const select = `SELECT id FROM address_pool WHERE ${clauses.join(' AND ')}${residential ? ` AND ${residentialEvidenceClause}` : ''}`;
     const generationSelect = `SELECT address_id AS id FROM address_generation_index WHERE ${generationClauses.join(' AND ')}`;
-    const pickEligible = async (sql: string, values: unknown[]): Promise<VerifiedAddress | undefined> => {
-      const identifiers = (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
+    const loadIdentifiers = async (sql: string, values: unknown[]): Promise<Array<{ id: string }>> =>
+      (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
+    const loadWindow = async (select: string, values: unknown[], idColumn: string): Promise<Array<{ id: string }>> => {
+      const forward = await loadIdentifiers(
+        `${select} AND random_key >= ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
+        [...values, pivot]
+      );
+      if (forward.length >= candidateLimit || typeof (db as { exec?: unknown }).exec !== 'function') return forward;
+      const seen = new Set(forward.map(({ id }) => id));
+      const wrapped = await loadIdentifiers(
+        `${select} AND random_key < ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
+        [...values, pivot]
+      );
+      return [...forward, ...wrapped.filter(({ id }) => !seen.has(id))].slice(0, candidateLimit);
+    };
+    const pickEligible = async (identifiers: Array<{ id: string }>): Promise<VerifiedAddress | undefined> => {
       if (!identifiers.length) return undefined;
       const ids = identifiers.map(({ id }) => id);
       const placeholders = ids.map(() => '?').join(',');
       const rows = (await db.prepare(`SELECT * FROM address_pool_runtime WHERE id IN (${placeholders})`)
         .bind(...ids).all<AddressPoolV2Row>()).results || [];
       const byId = new Map(rows.map((row) => [row.id, row]));
-      for (const { id } of identifiers) {
+      for (const { id } of rotateCandidates(identifiers, `${country}:${seed}:address-pool-v2:candidate`)) {
         const row = byId.get(id);
         const address = row ? rowToAddress(row, now) : undefined;
         if (address) {
@@ -708,14 +737,24 @@ export const pickAddressPoolV2Address = async (
     // Test doubles and older database adapters may not expose exec(); in that
     // case use the original indexed address_pool query directly.
     if (typeof (db as { exec?: unknown }).exec === 'function') {
-      const indexed = await pickEligible(`${generationSelect} AND random_key >= ? ORDER BY random_key, address_id LIMIT ${candidateLimit}`,
-        [...generationBindings, pivot]);
+      if (nationwide) {
+        const rank = residential ? 'residential_rank' : 'country_rank';
+        const readiness = residential ? ' AND residential_ready=1' : '';
+        const ranked = await loadIdentifiers(`WITH selected AS (
+            SELECT (CAST(? AS bigint) % MAX(${rank}))+1 AS target
+            FROM address_generation_index
+            WHERE country_code=? AND active=1${readiness}
+          )
+          SELECT address_id AS id FROM address_generation_index,selected
+          WHERE country_code=? AND active=1${readiness} AND ${rank}=selected.target
+          LIMIT 1`, [rankSeed(`${country}:${seed}:address-pool-v2:rank`), country, country]);
+        const exact = await pickEligible(ranked);
+        if (exact) return exact;
+      }
+      const indexed = await pickEligible(await loadWindow(generationSelect, generationBindings, 'address_id'));
       if (indexed) return indexed;
-      const indexedFallback = await pickEligible(`${generationSelect} ORDER BY random_key, address_id LIMIT ${candidateLimit}`, generationBindings);
-      if (indexedFallback) return indexedFallback;
     }
-    return await pickEligible(`${select} AND random_key >= ? ORDER BY random_key, id LIMIT ${candidateLimit}`, [...bindings, pivot])
-      || await pickEligible(`${select} ORDER BY random_key, id LIMIT ${candidateLimit}`, bindings);
+    return await pickEligible(await loadWindow(select, bindings, 'id'));
   } catch (error) {
     if (missingSchema(error)) return undefined;
     throw error;

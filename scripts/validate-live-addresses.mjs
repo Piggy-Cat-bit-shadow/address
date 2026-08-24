@@ -5,7 +5,6 @@ const supportedCountries = [
   'CN', 'HK', 'TW', 'JP', 'KR', 'SG', 'VN', 'TH', 'PH', 'MY',
   'IN', 'AU', 'TR', 'SA', 'BR', 'NG', 'ZA'
 ];
-const unavailableCountries = new Set(['NG']);
 const requestTimeoutMs = Number.parseInt(process.env.LIVE_REQUEST_TIMEOUT_MS || '15000', 10);
 const maxOrdinaryMs = Number.parseInt(process.env.MAX_ORDINARY_GENERATION_MS || '5000', 10);
 const maxResidentialMs = Number.parseInt(process.env.MAX_RESIDENTIAL_GENERATION_MS || '5000', 10);
@@ -20,6 +19,7 @@ const registryLatencyMs = Date.now() - registryStarted;
 const registryCountries = Array.isArray(registry.data) ? registry.data : [];
 const registryByCode = new Map(registryCountries.map((country) => [country.code, country]));
 const registryErrors = [];
+const availableCountries = new Set();
 if (registryCountries.length !== supportedCountries.length) registryErrors.push(`registry exposes ${registryCountries.length}/27 countries`);
 for (const country of supportedCountries) {
   const entry = registryByCode.get(country);
@@ -27,12 +27,17 @@ for (const country of supportedCountries) {
     registryErrors.push(`${country} is missing from the registry`);
     continue;
   }
-  if (!unavailableCountries.has(country) && !(Number(entry.addressCount) > 0)) registryErrors.push(`${country} has no ordinary address data`);
-  if (!unavailableCountries.has(country) && includeResidential && (!(Number(entry.residentialCount) > 0) || entry.residentialAvailable !== true)) registryErrors.push(`${country} has no residential address data`);
-  const expectedMode = unavailableCountries.has(country) ? 'sync-required' : 'synchronized-pool';
+  const ordinaryAvailable = Number(entry.addressCount) > 0;
+  const residentialAvailable = Number(entry.residentialCount) > 0 && entry.residentialAvailable === true;
+  if (ordinaryAvailable || residentialAvailable) {
+    if (!ordinaryAvailable) registryErrors.push(`${country} has no ordinary address data`);
+    if (includeResidential && !residentialAvailable) registryErrors.push(`${country} has no residential address data`);
+    if (ordinaryAvailable && (!includeResidential || residentialAvailable)) availableCountries.add(country);
+  }
+  const expectedMode = ordinaryAvailable && (!includeResidential || residentialAvailable) ? 'synchronized-pool' : 'sync-required';
   if (entry.generationMode !== expectedMode) registryErrors.push(`${country} generation mode is ${entry.generationMode}, expected ${expectedMode}`);
 }
-const allCountries = supportedCountries.filter((country) => !unavailableCountries.has(country));
+const allCountries = supportedCountries.filter((country) => availableCountries.has(country));
 const residentialCountries = allCountries;
 const sampleCount = Math.max(1, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '3', 10) || 3);
 const samples = Array.from({ length: sampleCount }, (_, index) => index + 1);

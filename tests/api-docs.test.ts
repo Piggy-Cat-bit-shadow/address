@@ -38,6 +38,11 @@ describe('public API contract', () => {
     expect(server).toContain("'/api/v1/health', '/api/v1/ready', '/api/v1/openapi.json'");
   });
 
+  it('starts China synchronization scheduling without an administrator page visit', () => {
+    const server = readFileSync('server/api/server.ts', 'utf8');
+    expect(server).toContain("void china.wake(0).catch");
+  });
+
   it('omits the removed API hero copy and uses readable method labels', () => {
     const page = readFileSync('src/pages/[locale]/api.astro', 'utf8');
     const styles = readFileSync('src/styles/global.css', 'utf8');

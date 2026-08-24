@@ -18,7 +18,41 @@ https://YOUR_DOMAIN.example/api/v1
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-Token 在 `/admin/` 建立，同時保存不可逆驗證雜湊和由服務端主密鑰加密的密文，可設定權限、限速和到期時間，也可在管理員工作階段中查看、修改或撤銷。WebUI 使用獨立的 `/web-api/v1` 工作階段通道，不嵌入該 Token。驗證失敗返回 `401`；超過令牌每分鐘限速返回 `429` 和 `Retry-After: 60`。
+Token 在 `/admin/` 建立，可設定權限、限速和到期時間。驗證失敗返回 `401`；超過令牌每分鐘限速返回 `429` 和 `Retry-After: 60`。
+
+## 快速開始
+
+### curl
+
+```bash
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=TW" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+### Python
+
+```python
+import json
+from urllib.request import Request, urlopen
+
+request = Request(
+    "https://YOUR_DOMAIN.example/api/v1/generate?country=TW",
+    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
+)
+with urlopen(request) as response:
+    print(json.load(response))
+```
+
+### JavaScript
+
+```javascript
+const response = await fetch(
+  "https://YOUR_DOMAIN.example/api/v1/generate?country=TW",
+  { headers: { Authorization: "Bearer YOUR_API_TOKEN" } },
+);
+const payload = await response.json();
+console.log(payload);
+```
 
 ## 外部端點
 
@@ -52,7 +86,8 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/health
 ## 國家註冊表
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
+curl -fsS https://YOUR_DOMAIN.example/api/v1/countries \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 響應格式為 `{ "data": [...] }`。每個國家包含代碼、本地化名稱、支持的篩選條件、同步總量、真實住宅數量、住宅覆蓋狀態和 `generationMode`。公開生成只使用真實住宅池；同步總量僅用於遷移和健康報告。未連接數據庫時，數量為 `null`。
@@ -71,13 +106,15 @@ curl -fsS -H "Authorization: Bearer YOUR_API_TOKEN" \
 解析當前請求：
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/client-context
+curl -fsS https://YOUR_DOMAIN.example/api/v1/client-context \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 解析指定 IPv4 或 IPv6：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 響應可能包含 `publicIp`、國家、州省、城市、郵編、緯度和經度。只有受控反向代理會覆蓋轉發 IP 請求頭時，才配置 `TRUST_PROXY=true`。
@@ -97,7 +134,8 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8"
 | `limit` | `100` | 請求頁大小，範圍為 `20` 至 `200` |
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=city&q=南京"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=city&q=南京" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 響應包含 `regions`、`cities`、`postcodes` 和 `matches`。連接地區目錄數據庫後，還會提供 `total`、`nextCursor` 和 `source`。
@@ -120,24 +158,27 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=CN&field=
 美國真實住宅地址：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 中國城市篩選：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=南京"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=南京" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 IP 地區生成：
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 響應外層為 `{ "data": { ... } }`。生成數據包含請求 ID、模式、國家、篩選、精確 `filterMatchLevel` 或 IP `ipMatchLevel`、嘗試的數據源和耗時；普通生成還返回 `eligibleCount`，表示當前精確篩選範圍內通過發布門禁的數據庫記錄數。地址三語變體與室內字段均來自來源，缺失值保持為空；人物資料、沙盒銀行卡、工作、財務和網絡字段仍為合成測試數據。地區篩選嚴格匹配，IP 模式只接受座標或城市匹配。
 
-普通請求從當前篩選範圍的完整合格數據庫候選集中選擇，不使用固定候選窗口或固定順序。需要穩定復現合格記錄選擇與測試資料時傳入 `seed`；未傳入時服務器為每次請求生成新 UUID。該參數不會生成缺失的地址組件，地址源同步後底層住宅池仍可能變化。
+未篩選的國家請求將種子映射到 PostgreSQL 連續生成序號，使每條合格記錄具有相同的選擇機率；篩選請求使用覆蓋完整匹配範圍的有界循環索引窗口。兩條路徑均不使用固定子集或固定順序。需要穩定復現合格記錄選擇與測試資料時傳入 `seed`；未傳入時服務器為每次請求生成新 UUID。該參數不會生成缺失的地址組件，地址源同步後底層住宅池仍可能變化。
 
 ## 批量生成與結構化查詢
 
@@ -154,18 +195,13 @@ curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8
 | `addressId` | 必填 | `/generate` 返回的 `result.address.id` |
 | `targetLocale` | 必填 | `en`、`zh-CN`、`zh-TW`、`ja`、`ko`、`de`、`fr`、`es` 或 `pt` |
 
-顯示鏈路為：已存儲變體 → 按需翻譯 → 原文。僅當每個語義組件均已符合目標文字時才直接使用已存儲變體；否則依次執行本地文字轉換（中文目標使用 OpenCC，中文來源的英文目標以拼音兜底）和已配置的翻譯服務商，並對每個候選做文字與數字保真校驗。響應始終為單一語言的完整地址：任何環節都無有效結果時返回 `fallback` 或 `unavailable`，客戶端應回退展示完整原文地址，絕不混排。
-
-## WebUI 地圖配置
-
-地圖顯示屬於 WebUI 配置，不改變 `/generate` 的地址證據。受會話保護的 `/web-api/v1` 通道只返回顯示開關，以及啟用高德時瀏覽器加載所需的專用 JS API Key；不會返回高德 JS 安全密鑰或任何同步 Key。
-
-Google 與高德分別提供中國和國外開關，默認均為 Google 開啟、高德關閉。中國高德標記使用 GCJ-02 座標；高德國外地圖需要賬號已開通世界地圖權限。高德服務請求統一使用同源 `/_AMapService` 前綴，由伺服器讀取加密安全密鑰並附加後再轉發到固定高德上游。
+響應統一使用一種語言並保留數字標識。沒有可用的有效翻譯時，介面返回 `fallback` 或 `unavailable`，客戶端可回退展示完整原文地址。
 
 ## 數據健康
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health
+curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 該端點返回配置國家、無效配置、熱點池覆蓋、低水位槽位和就緒狀態，適合監控和部署檢查。
@@ -183,30 +219,7 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health
 
 常見代碼包括 `INVALID_COUNTRY`、`INVALID_FIELD`、`INVALID_LOCATION`、`INVALID_RESIDENTIAL`、`IP_LOCATION_UNAVAILABLE`、`NO_POOL_COVERAGE` 和 IP 參數校驗錯誤。調用方應判斷 `error.code`，不要依賴界面翻譯文本。
 
-## 同步管理 API
-
-同步服務默認只監聽 `127.0.0.1:8791`。任務端點要求 `Authorization: Bearer SYNC_ADMIN_TOKEN`。
-
-| 方法 | 路徑 | 用途 |
-|---|---|---|
-| `GET` | `/healthz` | `8791` 端口的本地同步服務健康檢查 |
-| `POST` | `/api/v1/sync/jobs` | 創建 `initial` 或 `manual` 任務 |
-| `GET` | `/api/v1/sync/jobs/latest` | 查詢最近任務 |
-| `GET` | `/api/v1/sync/jobs/{id}` | 查詢指定任務 |
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8791/api/v1/sync/jobs \
-  -H "Authorization: Bearer $SYNC_ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"manual","shards":["CN"]}'
-```
-
-任務接受後返回 HTTP `202`、任務對象和 `Location` 請求頭。已有任務運行時返回 `409`；JSON、模式或分片標識無效時返回 `400`。
-
-主 API 默認隱藏 `/sync-control/*`。保持 `SYNC_CONTROL_PUBLIC=false`，通過本地端口或額外的私有訪問邊界進行管理。
-
 ## CORS 與隱私
 
 - 生產環境將 `ALLOWED_ORIGIN` 設置為公開 HTTPS 來源。
 - API Key 和 `SYNC_ADMIN_TOKEN` 不進入查詢參數、瀏覽器代碼、截圖或日誌。
-- 瀏覽器渲染應使用專用且受域名限制的高德 JS API Key。JS Key 按平台機制會出現在瀏覽器請求中；配套安全密鑰和所有 WebService 同步 Key 始終留在伺服器。

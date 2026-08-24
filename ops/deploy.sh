@@ -70,6 +70,9 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 git ls-files -co --exclude-standard -z \
+  | while IFS= read -r -d '' file; do
+      [[ -f "$file" || -L "$file" ]] && printf '%s\0' "$file"
+    done \
   | tar --null -T - -cf - \
   | tar -xf - -C "$STAGE"
 (
@@ -88,7 +91,7 @@ git ls-files -co --exclude-standard -z \
 )
 TREE_HASH=$(sha256sum "$STAGE/.release-manifest.sha256" | cut -c1-12)
 REL="$(git rev-parse --short HEAD)-$TREE_HASH"
-TARBALL="${TMPDIR:-/tmp}/address-$REL.tar.gz"
+TARBALL=$(mktemp "${TMPDIR:-/tmp}/address-$REL.XXXXXX.tar.gz")
 tar -C "$STAGE" -czf "$TARBALL" .
 
 scp_retry() {

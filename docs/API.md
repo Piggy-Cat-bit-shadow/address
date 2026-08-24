@@ -18,7 +18,41 @@ Except for `/api/v1/health`, `/api/v1/ready`, and `/api/v1/openapi.json`, extern
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-Tokens are created in `/admin/`. The server stores both an irreversible authentication hash and ciphertext protected by the server master key. An administrator can set scopes, rate limits, and expiry, then reveal, edit, or revoke a token in an authenticated session. The WebUI uses its own `/web-api/v1` session channel and never embeds this token. Authentication failures return `401`; per-token rate-limit exhaustion returns `429` with `Retry-After: 60`.
+Create tokens in `/admin/`, where scopes, rate limits, and expiry can also be managed. Authentication failures return `401`; per-token rate-limit exhaustion returns `429` with `Retry-After: 60`.
+
+## Quick start
+
+### curl
+
+```bash
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+### Python
+
+```python
+import json
+from urllib.request import Request, urlopen
+
+request = Request(
+    "https://YOUR_DOMAIN.example/api/v1/generate?country=US",
+    headers={"Authorization": "Bearer YOUR_API_TOKEN"},
+)
+with urlopen(request) as response:
+    print(json.load(response))
+```
+
+### JavaScript
+
+```javascript
+const response = await fetch(
+  "https://YOUR_DOMAIN.example/api/v1/generate?country=US",
+  { headers: { Authorization: "Bearer YOUR_API_TOKEN" } },
+);
+const payload = await response.json();
+console.log(payload);
+```
 
 ## External endpoints
 
@@ -52,7 +86,8 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/health
 ## Countries
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/countries
+curl -fsS https://YOUR_DOMAIN.example/api/v1/countries \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 The response is `{ "data": [...] }`. Each country includes its code, localized name, supported filters, total synchronized count, verified residential count, residential availability, and `generationMode`. Public generation uses only the verified residential pool; total counts remain visible for migration and health reporting. Counts are `null` when no database is attached.
@@ -71,13 +106,15 @@ The response reports whether each configured country currently has publication-g
 Resolve the current request:
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/client-context
+curl -fsS https://YOUR_DOMAIN.example/api/v1/client-context \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 Resolve an explicit IPv4 or IPv6 address:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/client-context?ip=8.8.8.8" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 The response may contain `publicIp`, country, region, city, postcode, latitude, and longitude. `TRUST_PROXY=true` should be used only behind a controlled reverse proxy that overwrites forwarded IP headers.
@@ -97,7 +134,8 @@ The response may contain `publicIp`, country, region, city, postcode, latitude, 
 | `limit` | `100` | Requested page size from `20` through `200` |
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=US&field=city&q=San"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/locations/search?country=US&field=city&q=San" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a catalog database is available, `total`, `nextCursor`, and `source`.
@@ -120,24 +158,27 @@ The response contains `regions`, `cities`, `postcodes`, `matches`, and, when a c
 Verified residential generation:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=US" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 China generation with a location filter:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=Nanjing"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?country=CN&city=Nanjing" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 IP-region generation:
 
 ```bash
-curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8"
+curl -fsS "https://YOUR_DOMAIN.example/api/v1/generate?mode=ip-region&ip=8.8.8.8" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 The response envelope is `{ "data": { ... } }`. Generation data includes the request ID, mode, country, filters, exact `filterMatchLevel` or IP `ipMatchLevel`, sources tried, timing information, and a `result` bundle. Normal generation also returns `eligibleCount`, the number of publication-gated database records in the exact selection scope. Address variants and indoor fields are source-backed; missing fields remain empty. Profile, sandbox card, employment, finance, and internet fields remain synthetic test data. A filtered request is exact-or-empty, while IP mode requires a coordinate or city match.
 
-Normal requests select from the complete eligible database scope, without a fixed candidate window or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected residential pool over time.
+Unfiltered country requests map the seed to a dense PostgreSQL generation rank so every eligible record has the same selection probability. Filtered requests use bounded circular index windows spanning the complete matching scope. Neither path uses a fixed subset or fixed sequence. Use `seed` when tests need reproducible eligible-record selection and synthetic profile fields. Without it, every request receives a new server-generated UUID. The seed does not create missing address components, and source synchronization can change the selected residential pool over time.
 
 ## Batch generation and structured queries
 
@@ -154,18 +195,13 @@ Normal requests select from the complete eligible database scope, without a fixe
 | `addressId` | required | `result.address.id` returned by `/generate` |
 | `targetLocale` | required | `en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `de`, `fr`, `es`, or `pt` |
 
-The display chain is stored variant → on-demand translation → native original. A stored variant is served only when every semantic component already reads in the target script; otherwise the service applies local script conversion (OpenCC for Chinese targets, pinyin as the English last resort for Chinese sources) and the configured translation providers in order, validating each candidate for script and digit preservation. The response is always complete in a single language: when no step produces a valid result it reports `fallback` or `unavailable` and clients render the full native address — never a mixed one.
-
-## WebUI map configuration
-
-Map display is a WebUI concern and does not change `/generate` address evidence. The session-protected `/web-api/v1` channel returns only display flags and, when enabled, the dedicated AMap JS API key required by the browser. It never returns the AMap JS security code or any synchronization key.
-
-Google and AMap each have independent China and overseas switches. Defaults are Google enabled and AMap disabled in both regions. China AMap markers use GCJ-02 coordinates; overseas AMap rendering requires the account's World Map permission. AMap service requests use the same-origin `/_AMapService` prefix, where the server adds the encrypted security code before forwarding to the fixed AMap upstream.
+The response uses one language consistently and preserves numeric identifiers. If no valid translated variant is available, it reports `fallback` or `unavailable` so the client can display the complete native address.
 
 ## Data health
 
 ```bash
-curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health
+curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
 This endpoint reports configured countries, invalid configuration entries, hot-pool coverage, low-water slots, and readiness. It is intended for monitoring and deployment checks.
@@ -185,30 +221,7 @@ Errors use this envelope:
 
 Common codes include `INVALID_COUNTRY`, `INVALID_FIELD`, `INVALID_LOCATION`, `INVALID_RESIDENTIAL`, `IP_LOCATION_UNAVAILABLE`, `NO_POOL_COVERAGE`, and IP lookup validation errors. Callers should branch on `error.code`, not translated UI text.
 
-## Sync management API
-
-The synchronization service normally listens on `127.0.0.1:8791`. Mutation and job endpoints require `Authorization: Bearer SYNC_ADMIN_TOKEN`.
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/healthz` | Local sync service health on port `8791` |
-| `POST` | `/api/v1/sync/jobs` | Start an `initial` or `manual` job |
-| `GET` | `/api/v1/sync/jobs/latest` | Read the latest job |
-| `GET` | `/api/v1/sync/jobs/{id}` | Read one job |
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8791/api/v1/sync/jobs \
-  -H "Authorization: Bearer $SYNC_ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"manual","shards":["US"]}'
-```
-
-Accepted jobs return HTTP `202`, a job object, and a `Location` header. A concurrent job returns `409`. Invalid JSON, mode, or shard identifiers return `400`.
-
-The main API hides `/sync-control/*` by default. Keep `SYNC_CONTROL_PUBLIC=false`; manage synchronization through the local port or an additional private access boundary.
-
 ## CORS and privacy
 
 - Set `ALLOWED_ORIGIN` to the public HTTPS origin in production.
 - Do not place API keys or `SYNC_ADMIN_TOKEN` in query strings, browser code, screenshots, or logs.
-- Use a dedicated, domain-restricted AMap JS API key for browser rendering. The JS key is necessarily visible in browser requests; the paired security code and all WebService synchronization keys remain server-only.

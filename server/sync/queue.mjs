@@ -49,7 +49,7 @@ const providerEnvironmentVariables = Object.freeze({
 const revisionEmbeddedAdapters = new Set([
   'japan-abr', 'singapore-hdb', 'korea-kapt', 'inegi-residential', 'ethekwini-residential',
   'cape-town-residential', 'taiwan-residential', 'hong-kong-residential', 'mappls-residential',
-  'licensed-residential-feed', 'pdok-bag', 'google-residential-enrichment'
+  'pdok-bag', 'google-residential-enrichment'
 ]);
 
 const timestamp = (value) => {
@@ -1036,11 +1036,16 @@ export const computeQueueSnapshot = async ({
       ? [...migrationCandidates].sort((left, right) => timestamp(right.stored.updatedAt) - timestamp(left.stored.updatedAt))[0]
       : null;
     const legacyPauseActive = Boolean(migrationSource);
-    const runnableSources = sourceEntries.filter((source) => !source.paused && !source.probeDue && !source.configurationError)
+    const runnableSources = sourceEntries.filter((source) => {
+      const delayedPartial = source.paused && source.savedState === 'checked'
+        && [PARTIAL_REASON, PARTIAL_STALLED_REASON].includes(source.saved.reason || '')
+        && source.nextAttempt > now.getTime() && (!source.quota || source.quota.available);
+      return (!source.paused || delayedPartial) && !source.probeDue && !source.configurationError;
+    })
       .sort((left, right) => {
         const availabilityRank = (source) => !source.quota || source.quota.available
           ? source.matches && source.nextAttempt > now.getTime() ? 1 : 0
-          : source.quota.waitState === 'blocked' ? 2 : 1;
+          : source.quota.waitState === 'blocked' ? 3 : 2;
         const quotaOrder = availabilityRank(left) - availabilityRank(right);
         if (quotaOrder) return quotaOrder;
         const meteredOrder = Number(!left.provider) - Number(!right.provider);
@@ -1161,7 +1166,7 @@ export const computeQueueSnapshot = async ({
     } else if (!configuredShards.length || !shardCountries.has(countryCode)) {
       entry.state = 'no_source';
       entry.reason = 'no_source_shard';
-    } else if (pausedQuotaSource) {
+    } else if (pausedQuotaSource && (!selectedSource || pausedQuotaSource === selectedSource)) {
       entry.runnableShardId = pausedQuotaSource.shard.id;
       entry.quotaBound = true;
       entry.quotaProvider = pausedQuotaSource.provider;

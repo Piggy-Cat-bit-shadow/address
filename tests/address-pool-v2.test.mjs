@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  enrichPickedAddress,
   pickAddressPoolV2Address,
   pickNearestAddressPoolV2Address,
   repairHongKongNativeVariants
@@ -17,6 +18,7 @@ describe('unified PostgreSQL address schema', () => {
     expect(schema).toContain('CREATE TABLE IF NOT EXISTS sync_country_state');
     expect(schema).toContain('idx_address_pool_zh_han_id');
     expect(schema).toContain('idx_address_pool_zh_han_random');
+    expect(schema).toContain('idx_generation_country_residential_rank');
     expect(schema).not.toContain('address_pool_meta');
   });
 });
@@ -352,7 +354,7 @@ describe('ADDRESS_DB v2 repository', () => {
     expect(address?.nativeAddress).not.toMatch(/^3,/u);
   });
 
-  it('preserves indexed candidate order after batch materialization', async () => {
+  it('preserves the selected candidate order after batch materialization', async () => {
     const first = { ...row, id: 'first' };
     const second = { ...row, id: 'second' };
     const database = {
@@ -362,7 +364,7 @@ describe('ADDRESS_DB v2 repository', () => {
           async all() {
             return { results: sql.startsWith('SELECT id FROM address_pool')
               ? [{ id: first.id }, { id: second.id }]
-              : [second, first] };
+              : [first, second] };
           }
         };
         return statement;
@@ -370,7 +372,59 @@ describe('ADDRESS_DB v2 repository', () => {
     };
 
     await expect(pickAddressPoolV2Address(database, 'JP', false, {}, undefined, 'ordered-seed'))
-      .resolves.toMatchObject({ id: 'pool-v2-first' });
+      .resolves.toMatchObject({ id: 'pool-v2-second' });
+  });
+
+  it('distributes deterministic seeds across the indexed candidate window', async () => {
+    const candidates = Array.from({ length: 16 }, (_, index) => ({ ...row, id: `candidate-${index}` }));
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            return { results: sql.startsWith('SELECT id FROM address_pool')
+              ? candidates.map(({ id }) => ({ id }))
+              : candidates };
+          }
+        };
+        return statement;
+      }
+    };
+    const selected = new Set();
+    for (let index = 0; index < 64; index += 1) {
+      selected.add((await pickAddressPoolV2Address(
+        database, 'JP', true, {}, undefined, `distribution-${index}`
+      ))?.id);
+    }
+    expect(selected.size).toBeGreaterThanOrEqual(12);
+  });
+
+  it('preserves a required admin1 when a capital has the same locality name', async () => {
+    const native = {
+      houseNumber: '57', street: 'ซอย 6', locality: 'กรุงเทพมหานคร', district: 'เขตทุ่งครุ',
+      admin1: 'กรุงเทพมหานคร', postcode: '10290'
+    };
+    const address = {
+      id: 'thai-capital', countryCode: 'TH', components: native,
+      componentVariants: {
+        native,
+        en: { ...native, street: 'Soi 6', locality: 'Bangkok', district: 'Thung Khru', admin1: 'Bangkok' },
+        'zh-CN': { ...native, street: '6号巷', locality: '曼谷', district: '童库区', admin1: '曼谷' }
+      }
+    };
+    const database = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async first() { return sql.startsWith('SELECT 1 AS present') ? { present: 1 } : undefined; }
+        };
+        return statement;
+      }
+    };
+    const enriched = await enrichPickedAddress(database, address);
+    expect(enriched.componentVariants.native.admin1).toBe('กรุงเทพมหานคร');
+    expect(enriched.componentVariants.en.admin1).toBe('Bangkok');
+    expect(enriched.componentVariants['zh-CN'].admin1).toBe('曼谷');
   });
 
   it('normalizes a 112xx v2 postal locality to Brooklyn', async () => {

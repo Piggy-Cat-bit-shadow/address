@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS address_generation_index (
   building_name TEXT NOT NULL DEFAULT '',
   search_text TEXT NOT NULL DEFAULT '',
   random_key INTEGER NOT NULL CHECK (random_key BETWEEN 0 AND 2147483647),
+  country_rank BIGINT,
+  residential_rank BIGINT,
   residential_ready INTEGER NOT NULL DEFAULT 0 CHECK (residential_ready IN (0, 1)),
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
   source_revision TEXT NOT NULL DEFAULT '',
@@ -538,6 +540,8 @@ CREATE INDEX IF NOT EXISTS idx_cn_admin_parent ON cn_admin_areas(parent_adcode,l
 CREATE INDEX IF NOT EXISTS idx_cn_communities_location ON cn_communities_v2(city,district,active,normalized_name);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_publication_location ON cn_communities_v2(active,province,city,district,last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_cn_communities_generation ON cn_communities_v2(active,source_count DESC,id);
+CREATE INDEX IF NOT EXISTS idx_cn_communities_generation_random
+  ON cn_communities_v2(active,((hashtextextended(id,0) & 2147483647)));
 CREATE INDEX IF NOT EXISTS idx_cn_communities_coordinate ON cn_communities_v2(latitude,longitude);
 CREATE INDEX IF NOT EXISTS idx_cn_community_sources_community ON cn_community_sources(community_id);
 CREATE INDEX IF NOT EXISTS idx_cn_ingest_decision ON cn_ingest_candidates(decision,provider,adcode,last_seen_at);
@@ -551,6 +555,13 @@ CREATE INDEX IF NOT EXISTS idx_generation_country_random
   ON address_generation_index(country_code,active,random_key,address_id) WHERE active=1;
 CREATE INDEX IF NOT EXISTS idx_generation_country_residential_random
   ON address_generation_index(country_code,residential_ready,active,random_key,address_id)
+  WHERE active=1 AND residential_ready=1;
+ALTER TABLE address_generation_index ADD COLUMN IF NOT EXISTS country_rank BIGINT;
+ALTER TABLE address_generation_index ADD COLUMN IF NOT EXISTS residential_rank BIGINT;
+CREATE INDEX IF NOT EXISTS idx_generation_country_rank
+  ON address_generation_index(country_code,active,country_rank,address_id) WHERE active=1;
+CREATE INDEX IF NOT EXISTS idx_generation_country_residential_rank
+  ON address_generation_index(country_code,residential_ready,active,residential_rank,address_id)
   WHERE active=1 AND residential_ready=1;
 CREATE INDEX IF NOT EXISTS idx_generation_admin1_random
   ON address_generation_index(country_code,admin1_key,active,random_key,address_id) WHERE active=1;
@@ -628,5 +639,5 @@ JOIN address_sources ON address_sources.id = address_datasets.source_id
 WHERE address_pool.active = 1;
 
 INSERT INTO schema_migrations(version, applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 18) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 20) AS version
 ON CONFLICT (version) DO NOTHING;

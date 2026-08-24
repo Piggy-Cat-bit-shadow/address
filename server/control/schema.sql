@@ -301,6 +301,10 @@ SELECT id,quota_service,quota_scope_id,quota_period,quota_limit,quota_timezone_o
 FROM provider_credentials
 ON CONFLICT (credential_id,service,period) DO NOTHING;
 
+UPDATE provider_credentials SET status='healthy',failure_count=0,cooldown_until=NULL
+WHERE provider='mappls' AND status='needs_review'
+  AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=19);
+
 INSERT INTO control_migrations(version,applied_at)
-SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 18) AS version
+SELECT version, CURRENT_TIMESTAMP::text FROM generate_series(1, 19) AS version
 ON CONFLICT (version) DO NOTHING;

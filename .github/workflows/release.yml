@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v2.0.4
+        description: Release version, for example v2.0.5
         required: true
-        default: v2.0.4
+        default: v2.0.5
 
 permissions:
   contents: read
@@ -112,27 +112,22 @@ jobs:
         run: |
           version='${{ steps.version.outputs.value }}'
           cat > release/RELEASE_NOTES.md <<NOTES
-          This release improves generation throughput and keeps resource use predictable under load.
+          ### Address sources and quality
+          - Added Mappls Reverse Geocoding enrichment for Indian OSM residential-building seeds, with strict source-address, PIN, country, and geometry validation.
+          - Restricted Google and Mappls enrichment to OSM buildings that already contain residential evidence, a stable building ID, a house number, a street, and building geometry.
+          - Added or expanded strict official-source adapters for Canada NAR, France BDNB/BAN, Spain Catastro INSPIRE, and Thailand DPT building data.
+          - Updated country address contracts, formats, language rules, administrative hierarchies, and source documentation.
 
-          ### Performance
-          - Added a lightweight PostgreSQL generation index so the API no longer loads the full address pool into application memory at startup.
-          - Address generation now uses indexed random pivots across all eligible records instead of a fixed sequence or cached subset.
-          - Added bounded PostgreSQL pools and generation concurrency controls for stable CPU and memory usage.
-          - Added in-flight request protection that returns HTTP 429 with a Retry-After header when generation capacity is saturated.
+          ### Synchronization and credentials
+          - Removed unused provider placeholders and generic licensed-feed code that had never produced publishable records.
+          - Prevented already-applied source state from being replayed after recovery and kept exhausted or unchanged sources out of repeated full synchronization.
+          - Improved credential deletion, quota-state handling, cooldown recovery, and multi-key rotation consistency.
+          - Hardened deployment archive creation, PostgreSQL test isolation, and automatic synchronization validation.
 
-          ### Synchronization
-          - Added synchronization history with country, source, execution window, duration, result, and address growth.
-          - Added persistent checkpoints for long-running imports, with automatic continuation after quota recovery.
-          - Persisted source version, exhaustion, failure, and next-check state independently so unchanged sources stop repeating full synchronization after producing no growth.
-          - Separated daily and monthly quotas, short-term rate limits, and cooldowns; keys rotate in order and resume at the earliest available recovery time.
-          - Separated queue priority, three-rule completion, and source execution eligibility to prevent exhausted countries from consuming workers.
-          - Consolidated PostgreSQL initialization, migration, and isolated Docker Compose deployment behavior.
-
-          ### Reliability fixes
-          - Fixed South Korea K-apt continuation after Geoapify rate limits or daily quota exhaustion.
-          - Fixed jobs becoming stuck after abnormal termination, expired leases, or stale checkpoints.
-          - Fixed repeated downloads of no-growth sources, failed shards, and unchanged source versions.
-          - Added automatic cleanup for synchronization staging files, failed artifacts, and timeout residue.
+          ### API and documentation
+          - Expanded the public API reference with authenticated curl, Python, and JavaScript examples and corrected endpoint authentication guidance.
+          - Simplified the API key guide to list only implemented providers, required products, supported countries, and administrator configuration steps.
+          - Updated the English, Simplified Chinese, and Traditional Chinese README, deployment, development, and strategy documentation.
           NOTES
       - name: Publish stable GitHub release
         shell: bash

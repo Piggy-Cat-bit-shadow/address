@@ -1,6 +1,6 @@
 # 数据源、准确性与自动同步
 
-更新：2026-08-16。本文汇总各国家和地区使用的数据源、发布规则与自动同步流程。字段、坐标系、去重和验证细节见 [`strategies/`](strategies/)。
+更新：2026-08-24。本文汇总各国家和地区当前实现的数据源、发布规则与自动同步流程。字段、坐标系、去重和验证细节见 [`strategies/`](strategies/)。
 
 ## 1. 发布原则
 
@@ -36,31 +36,20 @@
 | 马来西亚 MY | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [MY](strategies/MY-address-strategy.md) |
 | 泰国 TH | DPT 官方建筑图层 + Geofabrik OSM | DPT Tambon/Amphoe/Province + catalog；5 位邮编；polygon 转 WGS84 点 | DPT 明确住宅/公寓/集合住宅/宿舍分类；OSM 住宅建筑 | [TH](strategies/TH-address-strategy.md) |
 | 菲律宾 PH | Geofabrik OSM | 源字段 + catalog；4 位邮编 | OSM 住宅建筑 | [PH](strategies/PH-address-strategy.md) |
-| 越南 VN | Geofabrik OSM；可选 Vpostcode 授权 feed（默认关闭、容量未验收） | 源字段 + catalog；五位邮编 | OSM 住宅建筑；授权 feed 的逐条/合同级住宅分类 | [VN](strategies/VN-address-strategy.md) |
+| 越南 VN | Geofabrik OSM；Google Geocoding 补全 | 源字段 + catalog；五位邮编 | OSM 住宅建筑 | [VN](strategies/VN-address-strategy.md) |
 | 土耳其 TR | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [TR](strategies/TR-address-strategy.md) |
 | 沙特阿拉伯 SA | 全国地址点保全包 + Overture + Geofabrik OSM | 源字段 + catalog；5 位或 `5-4` 邮编 | 地址点精确落入明确住宅建筑面 | [SA](strategies/SA-address-strategy.md) |
-| 印度 IN | Geofabrik OSM；可选 Mappls Nearby + Place Details（默认关闭、容量未验收） | 源字段 + catalog；6 位 PIN | OSM 住宅建筑；合同授权的 Mappls 住宅分类 | [IN](strategies/IN-address-strategy.md) |
+| 印度 IN | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 补全 | OSM 门牌/道路 + 地理编码行政字段与 6 位 PIN | OSM 明确住宅建筑 | [IN](strategies/IN-address-strategy.md) |
 | 澳大利亚 AU | Overture | 源字段 + catalog；4 位邮编 | 明确住宅建筑/用途 | [AU](strategies/AU-address-strategy.md) |
 | 巴西 BR | Geofabrik OSM | 源字段 + catalog；CEP | OSM 住宅建筑 | [BR](strategies/BR-address-strategy.md) |
-| 尼日利亚 NG | 默认无可发布源；可选 NIPOST/ProgIS 授权 feed（默认关闭、容量未验收） | 来源字段；6 位邮编 | 授权 feed 的逐条/合同级住宅分类 | [NG](strategies/NG-address-strategy.md) |
+| 尼日利亚 NG | Geofabrik OSM；Google Geocoding 补全 | 来源字段；6 位邮编 | OSM 明确住宅建筑 | [NG](strategies/NG-address-strategy.md) |
 | 南非 ZA | eThekwini 官方地址点 + Cape Town 官方地块 + Geofabrik OSM | SAPO 官方 4 位邮编精确唯一匹配 | 官方住宅分区精确点/地块关联；OSM 明确住宅建筑 | [ZA](strategies/ZA-address-strategy.md) |
 
-OpenAddresses 只用于发现可用上游；每个上游需单独核验许可和质量。libpostal 只用于解析/规范化，不证明地址真实或属于住宅。
+OpenAddresses 只用于发现可用上游；每个实际来源仍需通过项目的许可、字段和质量门禁。libpostal 只用于解析和规范化，不证明地址真实或属于住宅。
 
-### 补充来源状态（2026-08-13）
+### API 补全
 
-| 国家 | 候选来源 | 当前结论 |
-|---|---|---|
-| 越南 | VietMap；国家建设活动数据库 | VietMap 普通 Search v4 已验证可查询已知候选，但不能全国枚举且不提供可靠住宅用途；仍需批量 feed、稳定版本和住宅分类 |
-| 印度 | BBMP GEPTIS；MP UADD PIMS；地方物业数据 | 部署者确认已取得 BBMP 使用授权，但仍缺可执行 bulk endpoint/file、字段字典和样本；Mappls 普通响应字段不足以通过严格门禁 |
-| 泰国 | Bangkok Open Government building CSV | DPT 已作为自动同步来源；Bangkok CSV 仍因缺坐标、用途编码和严格容量实测而仅作候选补充 |
-| 沙特 | SPL National Address + REGA Registry | SPL 需已知输入且不证明住宅；需 REGA 批量住宅用途 feed 和稳定关联键 |
-
-Google Maps/Places、HERE、Mapbox、AWS Location 和 Geoapify 不作为无种子的全国地址池下载器。取得专项授权的部署可使用 Google Geocoding 严格补全 OSM 明确住宅建筑种子，但 Google 结果不单独构成住宅证据，也禁止用网格遍历创造住宅门牌。Google 来源先执行 50 次分散种子探测，至少 1 条通过全部严格门禁才扩大同步；零命中时停止当前来源能力，拒绝原因只保存匿名计数。逐来源容量、许可、拒绝原因及重测条件见本地忽略的 `source-capacity-audit.md`。
-
-### 授权住宅 feed 配置
-
-Vpostcode 与 NIPOST/ProgIS 适配器默认关闭。启用前必须同时设置 `*_ENABLED=true`、`*_LICENSE_CONFIRMED=true` 和 `*_REDISTRIBUTION_ALLOWED=true`，并取得允许住宅字段、坐标、缓存和再分发的合同。远程 feed 只接受 HTTPS；本地 feed 只能放在 `ADDRESS_DATA_ROOT` 内。`*_FIELD_MAP` 是 JSON 对象，至少映射 `id`、`number`、`street`、`locality`、`admin1`、`postcode`、`longitude`、`latitude`，还要映射 `district`（NG 必需）；如果不是整库住宅，还必须映射 `residentialClass` 并在 `*_RESIDENTIAL_VALUES` 列出允许值。支持 `csv`、`json`（数组或 `records`/`data`）和 `jsonl`。容量审计见被忽略的 `docs/source-capacity-audit.md`，其中的合成吞吐结果不代表供应商容量。
+Google Geocoding 与 Mappls Reverse Geocoding 只处理具有 OSM 明确住宅建筑、稳定建筑 ID、来源门牌、来源道路和建筑几何的种子。它们补全缺失的行政区、邮编与坐标字段，不单独构成住宅证据，也不通过网格遍历或附近结果创造门牌。Mappls 当前只用于印度；Google 当前用于各国家策略中明确列出的低数量国家。
 
 ## 3. 自动同步
 
@@ -88,5 +77,10 @@ API Key 的申请、配置、轮换与冷却规则见 [API Key 配置文档](API
 - 高德 JS 安全密钥: <https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode>
 - Postcodes.io: <https://postcodes.io/>
 - Geolonia Japanese Addresses v2: <https://github.com/geolonia/japanese-addresses-v2>
+- Statistics Canada National Address Register: <https://www150.statcan.gc.ca/n1/en/catalogue/46260002>
+- CSTB BDNB: <https://bdnb.io/download/>
+- Spanish Catastro INSPIRE: <https://www.catastro.hacienda.gob.es/webinspire/index.html>
+- Thailand DPT building layer: <https://bcbgis.dpt.go.th/arcgis/rest/services/DPTC_BCB_UAT/dptc_bldg/MapServer/2>
+- Mappls Reverse Geocoding: <https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-reverse-geocoding-rest-api-example/Readme/>
 - OpenAddresses: <https://github.com/openaddresses/openaddresses>
 - libpostal: <https://github.com/openvenues/libpostal>

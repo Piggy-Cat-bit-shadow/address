@@ -15,7 +15,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-初始化腳本只建立相對目錄與四個隨機啟動密鑰，不會覆寫既有檔案。首次管理員密碼位於：
+初始化腳本只建立相對目錄與六個隨機啟動密鑰，不會覆寫既有檔案。首次管理員密碼位於：
 
 ```bash
 cat config/secrets/admin_bootstrap_password
@@ -67,7 +67,7 @@ TRUST_PROXY=false
 COOKIE_SECURE=false
 ```
 
-HTTPS 反向代理生產環境應設定準確的 `ALLOWED_ORIGIN`，並將 `TRUST_PROXY`、`COOKIE_SECURE` 改為 `true`。第三方 API Key 與一般業務參數統一在管理員後台管理。預設空白且被忽略的 `config/address.env` 只保留給同步程序啟動前必須存在的授權 feed URL、欄位映射與授權門禁。
+HTTPS 反向代理生產環境應設定準確的 `ALLOWED_ORIGIN`，並將 `TRUST_PROXY`、`COOKIE_SECURE` 改為 `true`。第三方 API Key 與一般業務參數統一在管理員後台管理。預設空白且被忽略的 `config/address.env` 只保留給同步程序啟動前必須存在的進階適配器開關與限制。
 
 ## 服務與網路
 
@@ -75,6 +75,7 @@ HTTPS 反向代理生產環境應設定準確的 `ALLOWED_ORIGIN`，並將 `TRUS
 - `migrate`：每次啟動前執行一次資料庫遷移，成功後退出
 - `api`：WebUI 與 API，預設只監聽 `127.0.0.1:8787`
 - `sync`：自動同步服務，只連接 Compose 私有網路
+- `credential-broker`：憑據加密輪換與額度協調服務，只連接 Compose 私有網路
 
 自動同步預設啟用，佇列發現、逾時、有限重試、冷卻、來源耗盡與暫存檔清理由服務自動處理。
 

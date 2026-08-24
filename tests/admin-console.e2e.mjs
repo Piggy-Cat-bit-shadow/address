@@ -302,7 +302,6 @@ try {
   assert.equal(await keyDialog.getByRole('option', { name: '有道翻译', exact: true }).count(), 0);
   assert.equal(await keyDialog.getByRole('option', { name: 'Google Geocoding', exact: true }).count(), 1);
   assert.equal(await keyDialog.getByRole('option', { name: 'Mappls', exact: true }).count(), 1);
-  assert.equal(await keyDialog.getByRole('option', { name: '英国 OS Data Hub', exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('QPS', { exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('每日额度', { exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('共享配额组', { exact: true }).count(), 0);

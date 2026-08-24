@@ -36,14 +36,10 @@ interface Bindings {
   HOT_POOL_MIN_PER_SLOT?: string;
   GOOGLE_GEOCODING_API_KEY?: string;
   GOOGLE_GEOCODING_MOCK?: string;
-  OVERPASS_API_URL?: string;
-  PHOTON_API_URL?: string;
-  OVERPASS_MOCK?: string;
   AMAP_API_KEY?: string;
   GEOAPIFY_API_KEY?: string;
   GOOGLE_TRANSLATION_ENABLED?: boolean | string;
   ONEMAP_ACCESS_TOKEN?: string;
-  OS_DATA_HUB_API_KEY?: string;
   YOUDAO_APP_KEY?: string;
   YOUDAO_APP_SECRET?: string;
   TRUST_PROXY?: string;
@@ -970,7 +966,6 @@ app.get('/api/v1/data-health', async (context) => {
         amap: Boolean(context.env.AMAP_API_KEY),
         geoapify: Boolean(context.env.GEOAPIFY_API_KEY),
         oneMap: Boolean(context.env.ONEMAP_ACCESS_TOKEN),
-        osDataHub: Boolean(context.env.OS_DATA_HUB_API_KEY),
         googleTranslate: true,
         youdao: Boolean(context.env.YOUDAO_APP_KEY && context.env.YOUDAO_APP_SECRET)
       },

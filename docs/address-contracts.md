@@ -1,6 +1,6 @@
 # Country Address Contracts
 
-Updated: 2026-08-12. This document is the review checklist for the runtime contract in `src/domain/address-contracts.mjs`.
+Updated: 2026-08-24. This document is the review checklist for the runtime contract in `src/domain/address-contracts.mjs`.
 
 ## Administrative abbreviations
 

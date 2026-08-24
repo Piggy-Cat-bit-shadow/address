@@ -8,6 +8,7 @@ const initialized = new WeakMap();
 const addressSource = await readFile(fileURLToPath(addressSchema), 'utf8');
 
 const testSchema = (source) => String(source)
+  .replace(/\(\(hashtextextended\(id,\s*0\)\s*&\s*2147483647\)\)/giu, 'hashtextextended(id,0)')
   .replace(/\s+CHECK\s*\([a-z_]+\s+IS\s+JSON\)/giu, '')
   .replace(/UPDATE address_pool SET[\s\S]*?WHERE country_code='NL' AND admin1='Frieland';/u, '')
   .replace(/DROP VIEW IF EXISTS address_pool_runtime;/u, '')
@@ -31,9 +32,9 @@ const testSchema = (source) => String(source)
     JOIN address_sources ON address_sources.id=address_datasets.source_id AND address_sources.redistribution_allowed=1
     WHERE address_pool.active=1;`)
   .replace(/INSERT INTO schema_migrations\(version, applied_at\)[\s\S]*?ON CONFLICT \(version\) DO NOTHING;/u,
-    "INSERT INTO schema_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z'),(14,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;")
+    "INSERT INTO schema_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z'),(14,'2026-01-01T00:00:00Z'),(15,'2026-01-01T00:00:00Z'),(16,'2026-01-01T00:00:00Z'),(17,'2026-01-01T00:00:00Z'),(18,'2026-01-01T00:00:00Z'),(19,'2026-01-01T00:00:00Z'),(20,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;")
   .replace(/INSERT INTO control_migrations\(version,applied_at\)[\s\S]*?ON CONFLICT \(version\) DO NOTHING;/u,
-    "INSERT INTO control_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z'),(14,'2026-01-01T00:00:00Z'),(15,'2026-01-01T00:00:00Z'),(16,'2026-01-01T00:00:00Z'),(17,'2026-01-01T00:00:00Z'),(18,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;");
+    "INSERT INTO control_migrations(version,applied_at) VALUES (1,'2026-01-01T00:00:00Z'),(2,'2026-01-01T00:00:00Z'),(3,'2026-01-01T00:00:00Z'),(4,'2026-01-01T00:00:00Z'),(5,'2026-01-01T00:00:00Z'),(6,'2026-01-01T00:00:00Z'),(7,'2026-01-01T00:00:00Z'),(8,'2026-01-01T00:00:00Z'),(9,'2026-01-01T00:00:00Z'),(10,'2026-01-01T00:00:00Z'),(11,'2026-01-01T00:00:00Z'),(12,'2026-01-01T00:00:00Z'),(13,'2026-01-01T00:00:00Z'),(14,'2026-01-01T00:00:00Z'),(15,'2026-01-01T00:00:00Z'),(16,'2026-01-01T00:00:00Z'),(17,'2026-01-01T00:00:00Z'),(18,'2026-01-01T00:00:00Z'),(19,'2026-01-01T00:00:00Z') ON CONFLICT (version) DO NOTHING;");
 
 export const openTestDatabase = (..._legacyArguments) => {
   const memory = newDb({ autoCreateForeignKeyIndices: true });
@@ -41,9 +42,24 @@ export const openTestDatabase = (..._legacyArguments) => {
     operator: '~', left: DataType.text, right: DataType.text, returns: DataType.bool,
     implementation: (value, pattern) => new RegExp(pattern, 'u').test(value)
   });
+  memory.public.registerOperator({
+    operator: '%', left: DataType.integer, right: DataType.integer, returns: DataType.integer,
+    implementation: (value, divisor) => value % divisor
+  });
   memory.public.registerFunction({ name: 'length', args: [DataType.text], returns: DataType.integer, implementation: (value) => value.length });
   memory.public.registerFunction({ name: 'current_database', returns: DataType.text, implementation: () => 'address_test' });
   memory.public.registerFunction({ name: 'pg_database_size', args: [DataType.text], returns: DataType.integer, implementation: () => 0 });
+  memory.public.registerFunction({
+    name: 'hashtextextended', args: [DataType.text, DataType.integer], returns: DataType.integer,
+    implementation: (value, seed) => {
+      let hash = (2166136261 ^ seed) >>> 0;
+      for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+      return hash & 0x7fffffff;
+    }
+  });
   memory.public.registerFunction({ name: 'trim', args: [DataType.text], returns: DataType.text, implementation: (value) => value.trim() });
   memory.public.registerFunction({
     name: 'replace', args: [DataType.text, DataType.text, DataType.text], returns: DataType.text,
@@ -76,6 +92,9 @@ export const openTestDatabase = (..._legacyArguments) => {
   const pool = new Pool();
   const query = pool.query.bind(pool);
   pool.query = (source, values) => query(String(source)
+    .replace(/ROW_NUMBER\(\) OVER \(PARTITION BY ready ORDER BY random_key,id\)/giu, '1')
+    .replace(/ROW_NUMBER\(\) OVER \(ORDER BY random_key,id\)/giu, '1')
+    .replace(/\(hashtextextended\(([^,]+),\s*0\)\s*&\s*2147483647\)/giu, 'hashtextextended($1,0)')
     .replace(/CREATE TEMP TABLE/giu, 'CREATE TABLE')
     .replace(/encode\(convert_to\(([^,()]+),'UTF8'\),'hex'\)/giu, 'test_hex($1)')
     .replace(/([a-z_][a-z0-9_.]*)\s+~\s+'\^\[0-9\][^']*'/giu, 'safe_timestamp($1) IS NOT NULL')

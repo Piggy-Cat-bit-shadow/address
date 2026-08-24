@@ -53,18 +53,9 @@ export const chinaCommunityPublicationClause = (alias = 'community'): string => 
 ].join(' AND ');
 
 const seedIndex = (seed: string, length: number): number => Number.parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 8), 16) % length;
-const CANDIDATE_CACHE_TTL_MS = 30_000;
-const CANDIDATE_CACHE_LIMIT = 250;
-interface CandidateCacheEntry { expiresAt: number; promise: Promise<CommunityCandidateRow[]> }
-const candidateCaches = new WeakMap<object, Map<string, CandidateCacheEntry>>();
-const candidateCacheFor = (database: Database): Map<string, CandidateCacheEntry> => {
-  let cache = candidateCaches.get(database as object);
-  if (!cache) {
-    cache = new Map();
-    candidateCaches.set(database as object, cache);
-  }
-  return cache;
-};
+const seedKey = (seed: string): number => createHash('sha256').update(seed).digest().readUInt32BE(0) & 0x7fffffff;
+const COMMUNITY_CANDIDATE_LIMIT = 16;
+const communityRandomKey = (alias = 'community'): string => `(hashtextextended(${alias}.id, 0) & 2147483647)`;
 const communityDistanceKm = (left: { latitude: number; longitude: number }, right: { latitude: number; longitude: number }): number => {
   const radians = Math.PI / 180;
   const latitudeDelta = (right.latitude - left.latitude) * radians;
@@ -190,30 +181,24 @@ export const pickChinaCommunityAddress = async (
   }
   let rows: CommunityCandidateRow[];
   try {
-    const loadCandidates = () => database.prepare(`SELECT community.* FROM cn_communities_v2 community
-      WHERE ${clauses.join(' AND ')} ORDER BY community.source_count DESC,community.id LIMIT 500`)
-      .bind(...bindings).all<CommunityCandidateRow>().then((result) => result.results);
-    if (coordinates) rows = await loadCandidates();
-    else {
-      const cache = candidateCacheFor(database);
-      const key = JSON.stringify([filters.region || '', filters.city || '', filters.district || '', filters.q || '']);
-      const cached = cache.get(key);
-      if (cached && cached.expiresAt > Date.now()) rows = await cached.promise;
+    if (coordinates) {
+      rows = (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
+        WHERE ${clauses.join(' AND ')} ORDER BY community.source_count DESC,community.id LIMIT 500`)
+        .bind(...bindings).all<CommunityCandidateRow>()).results;
+    } else {
+      const pivot = seedKey(`${seed}:china-community`);
+      const randomKey = communityRandomKey();
+      const loadWindow = async (operator: '>=' | '<'): Promise<CommunityCandidateRow[]> =>
+        (await database.prepare(`SELECT community.* FROM cn_communities_v2 community
+          WHERE ${clauses.join(' AND ')} AND ${randomKey} ${operator} ?
+          ORDER BY ${randomKey},community.id LIMIT ${COMMUNITY_CANDIDATE_LIMIT}`)
+          .bind(...bindings, pivot).all<CommunityCandidateRow>()).results;
+      const forward = await loadWindow('>=');
+      if (forward.length >= COMMUNITY_CANDIDATE_LIMIT || typeof (database as { exec?: unknown }).exec !== 'function') rows = forward;
       else {
-        if (cache.size >= CANDIDATE_CACHE_LIMIT) {
-          const now = Date.now();
-          for (const [cacheKey, entry] of cache) if (entry.expiresAt <= now) cache.delete(cacheKey);
-          if (cache.size >= CANDIDATE_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
-        }
-        const promise = loadCandidates();
-        const entry = { expiresAt: Number.POSITIVE_INFINITY, promise };
-        cache.set(key, entry);
-        void promise.then(() => {
-          if (cache.get(key)?.promise === promise) entry.expiresAt = Date.now() + CANDIDATE_CACHE_TTL_MS;
-        }, () => {
-          if (cache.get(key)?.promise === promise) cache.delete(key);
-        });
-        rows = await promise;
+        const seen = new Set(forward.map(({ id }) => id));
+        const wrapped = await loadWindow('<');
+        rows = [...forward, ...wrapped.filter(({ id }) => !seen.has(id))].slice(0, COMMUNITY_CANDIDATE_LIMIT);
       }
     }
   } catch (error) {
@@ -231,7 +216,7 @@ export const pickChinaCommunityAddress = async (
       .map(({ row }) => row)
     : allowedRows;
   if (!coordinateRows.length) return undefined;
-  const selected = coordinates ? coordinateRows[0] : coordinateRows[seedIndex(seed, coordinateRows.length)];
+  const selected = coordinates ? coordinateRows[0] : coordinateRows[seedIndex(`${seed}:candidate`, coordinateRows.length)];
   try {
     const providers = await loadCommunityProviders(database, selected.id);
     return providers ? rowToAddress({ ...selected, providers }) : undefined;

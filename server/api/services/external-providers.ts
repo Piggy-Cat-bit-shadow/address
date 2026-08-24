@@ -329,7 +329,6 @@ export interface ExternalProviderKeys {
   geoapify?: string;
   amap?: string;
   oneMap?: string;
-  osDataHub?: string;
 }
 
 export const fetchExternalCandidates = async (

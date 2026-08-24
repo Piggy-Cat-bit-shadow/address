@@ -49,7 +49,7 @@ npm run dev
 
 `npm run dev` 先構建一次 WebUI，再由 `127.0.0.1:8787` 的 Hono API 提供服務。需要實時編輯 UI 時，同時運行 `npm run dev:api` 和 `npm run dev:web`：`127.0.0.1:4321` 的 Astro 開發服務器把 `/api` 代理到 Hono，把 `/sync-control` 代理到 `127.0.0.1:8791` 的本地同步服務。
 
-新遷移的數據庫只有表結構，不包含地址池。本地開發和測試套件基於空 Schema 加 `scripts/fixtures/`、`tests/fixtures/` 中的小型夾具運行；生產 PostgreSQL 數據 不會離開伺服器（`data/` 被 Git 忽略，部署腳本會保留伺服器數據庫）。需要本地真實數據時，先導入目錄（`npm run data:catalog` 加 `npm run data:catalog:import`），再導入一個小國家，例如 `npm run data:address-pool:etl -- --manual --shard SG`。
+新遷移的資料庫只有表結構，不包含地址池。本地開發和測試套件基於空 Schema 加 `scripts/fixtures/`、`tests/fixtures/` 中的小型夾具執行；生產 PostgreSQL 資料不會離開伺服器（`data/` 被 Git 忽略，部署腳本會保留伺服器資料庫）。需要本地真實資料時，先匯入目錄（`npm run data:catalog` 加 `npm run data:catalog:import`），再匯入一個小國家，例如 `npm run data:address-pool:etl -- --manual --shard SG`。
 
 常用命令：
 
@@ -72,11 +72,11 @@ npm run dev
 
 把 `.env.example` 複製為被忽略的 `.env`。密鑰始終留在服務端。只有明確用於 Astro 公開環境的變量才應進入瀏覽器構建；第三方服務 Key 和 `SYNC_ADMIN_TOKEN` 必須保留在 API 或同步進程環境中。`AMAP_API_KEY` 是伺服器端 WebService 憑據；`AMAP_JS_API_KEY` 是獨立且受域名限制的瀏覽器加載 Key；`AMAP_JS_SECURITY_CODE` 僅由 `/_AMapService` 在伺服器端使用。
 
-常規開發不需要第三方 API Key。可選同步平台參見[部署文檔](DEPLOYMENT.zh-TW.md)。
+常規開發不需要第三方 API Key。可選同步平台參見 [API Key 設定文件](API_KEYS.zh-TW.md)。
 
 ## 數據庫與同步
 
-PostgreSQL 使用事务和连接池，保存地址、三語本地化、來源證據、國家狀態和 座標索引。國家發佈是事務性的：候選快照通過驗證後才替換 active 數據，失敗的候選不會影響舊快照。
+PostgreSQL 使用交易和連線池，保存地址、多語言本地化、來源證據、國家狀態和座標索引。國家發佈是交易性的：候選快照通過驗證後才替換 active 資料，失敗的候選不會影響舊快照。
 
 同步來源：
 
@@ -84,15 +84,16 @@ PostgreSQL 使用事务和连接池，保存地址、三語本地化、來源證
 - Geofabrik 提供的 OpenStreetMap：pyosmium 流式讀取預篩選後的 PBF node 和 way。
 - 本地地區與位置目錄：約束選擇器並驗證行政區一致性。
 
-管線會過濾機構和非地址要素、去重、檢查住宅證據、驗證本地化組件並執行容量門禁。API 或同步任務運行時不要手工修改 the production database。
+管線會過濾機構和非地址要素、去重、檢查住宅證據、驗證本地化組件並執行容量門禁。API 或同步任務執行時不要手動修改生產資料庫。
 
 手工執行示例：
 
 ```bash
 node server/sync/address-etl.mjs --initial --all
-node server/sync/address-etl.mjs --daily --all
 node server/sync/address-etl.mjs --manual --shard US
 ```
+
+生產環境由同步監督程序執行，不使用定時任務反覆全量匯入。排程器喚醒只會續跑具備執行資格的 checkpoint 或新增來源能力；相同指紋已經完成或耗盡的來源不會僅因時間經過而重新匯入。
 
 ## 擴展公開 API
 

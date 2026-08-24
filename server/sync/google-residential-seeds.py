@@ -58,10 +58,11 @@ def rank(value):
 
 
 class SeedSampler:
-    def __init__(self, maximum, boundary, exclude_boundary, targets=None):
+    def __init__(self, maximum, boundary, exclude_boundary, targets=None, require_source_address=False):
         self.maximum = maximum
         self.boundary = boundary
         self.exclude_boundary = exclude_boundary
+        self.require_source_address = require_source_address
         self.candidates = []
         self.targets = sorted(targets or [], key=lambda value: (
             int(value.get("priority", 99)), -int(value.get("deficit", 0)), str(value.get("id", ""))
@@ -84,7 +85,12 @@ class SeedSampler:
             return
         if any(tags.get(key, "").strip().casefold() not in {"", "no", "none"} for key in NON_RESIDENTIAL_POI_KEYS):
             return
-        if tags.get("addr:housenumber") and (tags.get("addr:street") or tags.get("addr:place")):
+        number = tags.get("addr:housenumber", "").strip()
+        street = (tags.get("addr:street") or tags.get("addr:place") or "").strip()
+        if self.require_source_address:
+            if not number or not street:
+                return
+        elif number and street:
             return
         locations = [node.location for node in way.nodes]
         if len(locations) < 4 or not all(location.valid() for location in locations):
@@ -111,6 +117,9 @@ class SeedSampler:
             "latitude": latitude,
             "ring": ring
         }
+        if self.require_source_address:
+            record["number"] = number
+            record["street"] = street
         candidate = (-priority, identifier, record)
         if self.target_tree is not None:
             target_index = int(self.target_tree.nearest(Point(longitude, latitude)))
@@ -188,6 +197,7 @@ def main():
     parser.add_argument("--exclude-boundary", action="append", default=[])
     parser.add_argument("--coverage-targets")
     parser.add_argument("--max-records", required=True, type=int)
+    parser.add_argument("--require-source-address", action="store_true")
     args = parser.parse_args()
 
     exclude_geometries = [boundary_from_geojson(path).geometry for path in args.exclude_boundary]
@@ -196,7 +206,8 @@ def main():
         args.max_records,
         boundary_from_geojson(args.boundary),
         exclude_boundary,
-        targets_from_json(args.coverage_targets)
+        targets_from_json(args.coverage_targets),
+        args.require_source_address
     )
     location_index = None
     location_storage = "flex_mem"
