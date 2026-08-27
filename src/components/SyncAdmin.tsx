@@ -283,6 +283,11 @@ type AdminErrorCode = keyof typeof baseAdminErrorText.en;
 export const adminErrorText = { ...baseAdminErrorText, ...generatedAdminErrors } as unknown as Record<AdminLocale, Record<AdminErrorCode, string>>;
 export const errorMessage = (value: unknown, locale: AdminLocale = 'zh-CN'): string => {
   const code = value instanceof Error ? value.message : String(value);
+  if (code === 'ADMIN_PASSWORD_CHANGE_REQUIRED') {
+    return locale === 'zh-CN' || locale === 'zh-TW'
+      ? '使用其他管理员功能前必须先修改默认密码'
+      : 'Change the default password before using other administrator features.';
+  }
   const fallback = locale === 'zh-CN' || locale === 'zh-TW' ? baseAdminErrorText['zh-CN'] : baseAdminErrorText.en;
   return adminErrorText[locale][code as AdminErrorCode] || fallback[code as AdminErrorCode] || code;
 };
@@ -374,6 +379,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   const [authenticated, setAuthenticated] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [initialized, setInitialized] = useState(true);
+  const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
   const [password, setPassword] = useState('');
   const [view, setView] = useState<View>('dashboard');
   const [dataByView, setDataByView] = useState<Partial<Record<View, unknown>>>({});
@@ -454,16 +460,19 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     void fetch('/admin/api/status').then((response) => response.json()).then((body) => setInitialized(Boolean(body.data?.initialized)))
       .catch((value) => setError(errorMessage(value, locale)));
     void fetch('/admin/api/session', { credentials: 'same-origin' }).then((response) => response.json()).then((body) => {
-      const selected = viewFromLocation();
+      const forceChange = Boolean(body.data?.passwordChangeRequired);
+      const selected: View = forceChange ? 'access' : viewFromLocation();
       viewRef.current = selected;
       setView(selected);
       const active = Boolean(body.data?.authenticated);
       setAuthenticated(active);
+      setPasswordChangeRequired(active && forceChange);
       if (active) void load(selected);
     }).catch((value) => setError(errorMessage(value, locale))).finally(() => setSessionReady(true));
   }, [load, locale]);
 
   const selectView = useCallback((selected: View, history: 'push' | 'none' = 'push') => {
+    if (passwordChangeRequired && selected !== 'access') return;
     if (selected !== viewRef.current) loadControllers.current[viewRef.current]?.abort();
     if (selected === 'dashboard') {
       coverageParent.current = ''; setCoverageTrail([]);
@@ -477,7 +486,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
       window.history.pushState({}, '', url);
     }
     void load(selected);
-  }, [load]);
+  }, [load, passwordChangeRequired]);
 
   useEffect(() => {
     const restore = () => {
@@ -499,10 +508,13 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     event.preventDefault(); setLoginBusy(true); setError('');
     try {
       const result = await fetch('/admin/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }), credentials: 'same-origin' });
-      const body = await result.json();
+      const body = await result.json() as { data?: { passwordChangeRequired?: boolean }; error?: string };
       if (!result.ok) throw new Error(errorMessage(body.error || 'LOGIN_FAILED', locale));
-      setAuthenticated(true); setPassword('');
-      setTimeout(() => void load(viewRef.current), 0);
+      const forceChange = Boolean(body.data?.passwordChangeRequired);
+      const selected: View = forceChange ? 'access' : viewRef.current;
+      setAuthenticated(true); setPasswordChangeRequired(forceChange); setPassword('');
+      viewRef.current = selected; setView(selected);
+      setTimeout(() => void load(selected), 0);
     } catch (value) { setError(errorMessage(value, locale)); }
     finally { setLoginBusy(false); }
   };
@@ -512,6 +524,9 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
     setMutating(true); setError(''); setNotice('');
     try {
       const result = await request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      if (path === '/settings/access' && result && typeof result === 'object' && 'passwordChangeRequired' in result) {
+        setPasswordChangeRequired(Boolean((result as { passwordChangeRequired?: boolean }).passwordChangeRequired));
+      }
       if (await load(selected, false, true)) setNotice(success);
       return result;
     } catch (value) {
@@ -560,7 +575,7 @@ export default function SyncAdmin({ locale: pageLocale }: SyncAdminProps) {
   return <div className="admin-shell">
     <aside className="admin-sidebar">
       <div className="admin-brand"><span className="brand-mark"><MapPin size={25} strokeWidth={2.5} /></span><b>{t.brandName}</b><span>{t.brand}</span></div>
-      <nav>{(Object.keys(labelsFor(locale)) as View[]).map((item) => {
+      <nav>{(Object.keys(labelsFor(locale)) as View[]).filter((item) => !passwordChangeRequired || item === 'access').map((item) => {
         const Icon = viewIcons[item];
         return <button type="button" key={item} className={view === item ? 'active' : ''} onClick={() => selectView(item)}><span className="nav-icon" aria-hidden="true"><Icon size={17} /></span><span>{labelsFor(locale)[item]}</span></button>;
       })}</nav>
@@ -844,7 +859,7 @@ function BlacklistSettings({ value, locale, busy, mutate }: { value: BlacklistVi
   </Panel>;
 }
 
-function AccessSettingsForm({ value, locale, busy, mutate }: { value?: { frontendPasswordEnabled?: boolean }; locale: AdminLocale; busy: boolean; mutate: Mutate }) {
+function AccessSettingsForm({ value, locale, busy, mutate }: { value?: { frontendPasswordEnabled?: boolean; passwordChangeRequired?: boolean }; locale: AdminLocale; busy: boolean; mutate: Mutate }) {
   const t = adminText[locale];
   const [passwordDialog, setPasswordDialog] = useState<'frontend' | 'admin' | null>(null);
   return <><form className="admin-form" onSubmit={async (event) => {
@@ -852,6 +867,7 @@ function AccessSettingsForm({ value, locale, busy, mutate }: { value?: { fronten
     const values = new FormData(event.currentTarget);
     await mutate('/settings/access', 'PUT', { frontendPasswordEnabled: values.get('frontendPasswordEnabled') === 'on' }, t.settingsSaved);
   }}>
+    {value?.passwordChangeRequired && <div className="admin-warning" role="alert">{locale === 'zh-CN' || locale === 'zh-TW' ? '当前使用默认管理员密码。请先修改管理员密码。' : 'The default administrator password is active. Change it before continuing.'}</div>}
     <div className="setting-group"><h3>{t.policySection}</h3><label className="check"><input name="frontendPasswordEnabled" type="checkbox" defaultChecked={value?.frontendPasswordEnabled} />{t.frontendPasswordEnabled}</label></div>
     <div className="setting-group"><h3>{t.passwordSection}</h3><div className="password-action-list"><div className="password-action-row"><div><strong>{t.newFrontendPassword}</strong><small>{t.keepUnchanged}</small></div><button type="button" disabled={busy} onClick={() => setPasswordDialog('frontend')}>{t.changeFrontendPassword}</button></div><div className="password-action-row"><div><strong>{t.newAdminPassword}</strong><small>{t.keepUnchanged}</small></div><button type="button" disabled={busy} onClick={() => setPasswordDialog('admin')}>{t.changeAdminPassword}</button></div></div></div>
     <button className="primary-action form-submit" disabled={busy}>{t.saveSettings}</button>

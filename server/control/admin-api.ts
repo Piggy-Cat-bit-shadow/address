@@ -16,6 +16,7 @@ import { listAddressData } from './address-data';
 import { nonResidentialRules } from '../../src/domain/non-residential-rules.mjs';
 import { isCountryCode } from '../../src/domain/countries.ts';
 import { customBlacklistKeywords, replaceCustomBlacklist } from '../lib/custom-blacklist.mjs';
+import { originAllowed, parseAllowedOrigins } from '../lib/origin-policy';
 import {
   deleteNodePolicy, deleteNodeTarget, getRuntimePolicy, listCountryNodeTargets, listCountryPolicies, listNodePolicies,
   updateCountryPolicy, updateRuntimePolicy, upsertNodePolicy, upsertNodeTarget
@@ -156,22 +157,17 @@ export const proxyAmapServiceRequest = async (
   control: ControlStore,
   request: Request,
   fetcher: typeof fetch = fetch,
-  allowedOrigin?: string
+  allowedOrigins?: string
 ): Promise<Response> => {
   if (request.method !== 'GET') return proxyError(405, 'METHOD_NOT_ALLOWED');
   const requestUrl = new URL(request.url);
   const origin = request.headers.get('origin');
   const referer = request.headers.get('referer');
-  let expectedOrigin = requestUrl.origin;
-  if (allowedOrigin?.trim() && allowedOrigin.trim() !== '*') {
-    try {
-      const configured = new URL(allowedOrigin.trim());
-      if (!['http:', 'https:'].includes(configured.protocol)) return proxyError(403, 'FORBIDDEN');
-      expectedOrigin = configured.origin;
-    }
-    catch { return proxyError(403, 'FORBIDDEN'); }
-  }
-  if ((!origin && !referer) || !sameOrigin(origin, expectedOrigin) || !sameOrigin(referer, expectedOrigin)) {
+  let allowed;
+  try { allowed = parseAllowedOrigins(allowedOrigins); }
+  catch { return proxyError(403, 'FORBIDDEN'); }
+  if (!originAllowed(allowed, requestUrl.origin) || (!origin && !referer)
+    || !sameOrigin(origin, requestUrl.origin) || !sameOrigin(referer, requestUrl.origin)) {
     return proxyError(403, 'FORBIDDEN');
   }
   const config = await control.mapDisplayConfig();
@@ -431,6 +427,10 @@ export const createAdminApi = ({
       const token = getCookie(context, adminCookie) || '';
       const csrf = context.req.method === 'GET' ? undefined : context.req.header('x-csrf-token') || '';
       if (!await control.session(token, 'admin', csrf)) return context.json({ error: 'UNAUTHORIZED' }, 401);
+      const passwordRoute = ['/admin/api/logout', '/admin/api/settings/access'].includes(context.req.path);
+      if (!passwordRoute && await control.setting('admin_password_change_required', false)) {
+        return context.json({ error: 'ADMIN_PASSWORD_CHANGE_REQUIRED' }, 403);
+      }
     }
     await next();
   });
@@ -448,10 +448,15 @@ export const createAdminApi = ({
     }
     loginAttempts.delete(ip);
     const session = await control.createSession('admin', ip);
+    const status = await control.status();
     setCookie(context, adminCookie, session.token, { ...secureCookie, maxAge: 12 * 60 * 60 });
     setCookie(context, adminCsrfCookie, session.csrf, { ...csrfCookie, maxAge: 12 * 60 * 60 });
     await control.audit('admin', 'session.login', 'admin');
-    return context.json({ data: { csrfToken: session.csrf, expiresAt: session.expiresAt } });
+    return context.json({ data: {
+      csrfToken: session.csrf,
+      expiresAt: session.expiresAt,
+      passwordChangeRequired: status.passwordChangeRequired
+    } });
   });
   app.post('/admin/api/logout', async (context) => {
     await control.deleteSession(getCookie(context, adminCookie) || '');
@@ -465,7 +470,10 @@ export const createAdminApi = ({
     if (!csrf || !await control.session(token, 'admin', csrf)) csrf = await control.refreshSessionCsrf(token, 'admin') || '';
     if (!csrf) return context.json({ data: { authenticated: false } });
     setCookie(context, adminCsrfCookie, csrf, { ...csrfCookie, maxAge: 12 * 60 * 60 });
-    return context.json({ data: { authenticated: true } });
+    return context.json({ data: {
+      authenticated: true,
+      passwordChangeRequired: await control.setting('admin_password_change_required', false)
+    } });
   });
 
   app.get('/admin/api/dashboard', async (context) => {

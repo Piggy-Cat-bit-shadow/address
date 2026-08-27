@@ -143,11 +143,12 @@ Astro 靜態頁面 + React 介面
 ## 部署
 
 ```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
 docker compose up -d
 ```
+
+管理員初始密碼為 `admin`，前端密碼預設關閉。首次啟動前可直接在 `docker-compose.yml` 修改兩項初始值；使用預設管理員密碼登入後必須先修改密碼。
 
 完整說明見[部署文件](docs/DEPLOYMENT.zh-TW.md)。
 

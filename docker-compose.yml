@@ -3,8 +3,6 @@ name: address
 x-app: &app
   image: ${ADDRESS_IMAGE:-daimon23/address:latest}
   init: true
-  env_file:
-    - ./config/address.env
   environment: &app-environment
     ADDRESS_ROOT: /srv/address
     ADDRESS_DATA_ROOT: /srv/address/data
@@ -12,7 +10,7 @@ x-app: &app
     STATIC_ROOT: /srv/address/app/dist
     SYNC_STATE_DIR: /srv/address/runtime/sync-control
     CREDENTIAL_BROKER_URL: http://credential-broker:8792
-    CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_production_token
+    CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_production_token
     PYTHON_BIN: /srv/address/venv/bin/python
     HOME: /srv/address/runtime/home
     XDG_CACHE_HOME: /srv/address/runtime/cache
@@ -21,24 +19,21 @@ x-app: &app
     POSTGRES_HOST: postgres
     POSTGRES_DB: ${POSTGRES_DB:-address}
     POSTGRES_USER: ${POSTGRES_USER:-address}
-    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    CONFIG_MASTER_KEY_FILE: /run/secrets/config_master_key
-    ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/secrets/admin_bootstrap_password
-    SYNC_ADMIN_TOKEN_FILE: /run/secrets/sync_admin_token
+    POSTGRES_PASSWORD_FILE: /run/address-secrets/postgres_password
+    CONFIG_MASTER_KEY_FILE: /run/address-secrets/config_master_key
+    ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/address-secrets/admin_bootstrap_password
+    FRONTEND_BOOTSTRAP_PASSWORD_FILE: /run/address-secrets/frontend_bootstrap_password
+    SYNC_ADMIN_TOKEN_FILE: /run/address-secrets/sync_admin_token
     COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
     TRUST_PROXY: ${TRUST_PROXY:-false}
     SYNC_SCHEDULER_ENABLED: "true"
     TRANSLATION_BACKFILL_ENABLED: ${TRANSLATION_BACKFILL_ENABLED:-true}
-  secrets: &app-secrets
-    - postgres_password
-    - config_master_key
-    - admin_bootstrap_password
-    - sync_admin_token
-    - credential_broker_production_token
   volumes: &app-volumes
     - ./data/address:/srv/address/data
     - ./runtime:/srv/address/runtime
+    - ./data/secrets:/run/address-secrets:ro
   networks:
     - internal
     - egress
@@ -49,13 +44,29 @@ x-app: &app
       max-file: "5"
 
 services:
+  bootstrap:
+    image: ${ADDRESS_IMAGE:-daimon23/address:latest}
+    init: true
+    restart: "no"
+    user: "0:0"
+    entrypoint: [node, ops/bootstrap-compose.mjs]
+    environment:
+      ADDRESS_SECRET_ROOT: /srv/address/data/secrets
+      ADDRESS_LEGACY_SECRET_ROOT: /srv/address/legacy-secrets
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-admin}
+      FRONTEND_INITIAL_PASSWORD: ${FRONTEND_INITIAL_PASSWORD:-}
+    volumes:
+      - ./data:/srv/address/data
+      - ./config/secrets:/srv/address/legacy-secrets
+    logging: *logging
+
   postgres:
     image: postgres:16-bookworm
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-address}
       POSTGRES_USER: ${POSTGRES_USER:-address}
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_PASSWORD_FILE: /run/address-secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
     command:
       - postgres
@@ -65,10 +76,9 @@ services:
       - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}"
       - -c
       - "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-8GB}"
-    secrets:
-      - postgres_password
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+      - ./data/secrets:/run/address-secrets:ro
     networks:
       - internal
     healthcheck:
@@ -77,6 +87,9 @@ services:
       timeout: 5s
       retries: 12
     logging: *logging
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
 
   migrate:
     <<: *app
@@ -158,15 +171,8 @@ services:
       CREDENTIAL_BROKER_PORT: 8792
       POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
       POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
-      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
-      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
-    secrets:
-      - postgres_password
-      - config_master_key
-      - admin_bootstrap_password
-      - sync_admin_token
-      - credential_broker_production_token
-      - credential_broker_test_token
+      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/address-secrets/credential_broker_production_token
+      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
     command: [node, server/credential-broker/index.mjs]
     depends_on:
       postgres:
@@ -185,17 +191,3 @@ networks:
   internal:
     internal: true
   egress:
-
-secrets:
-  postgres_password:
-    file: ./config/secrets/postgres_password
-  config_master_key:
-    file: ./config/secrets/config_master_key
-  admin_bootstrap_password:
-    file: ./config/secrets/admin_bootstrap_password
-  sync_admin_token:
-    file: ./config/secrets/sync_admin_token
-  credential_broker_production_token:
-    file: ./config/secrets/credential_broker_production_token
-  credential_broker_test_token:
-    file: ./config/secrets/credential_broker_test_token

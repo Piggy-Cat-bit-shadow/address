@@ -362,7 +362,7 @@ describe('credential broker', () => {
     const compose = await readFile(new URL('../ops/docker-compose.isolated.yml', import.meta.url), 'utf8');
     expect(compose.match(/env_file:\s*!reset \[\]/gu)).toHaveLength(3);
     expect(compose).toContain('CREDENTIAL_BROKER_TOKEN_FILE: ""');
-    expect(compose).toContain('CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_test_token');
+    expect(compose).toContain('CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_test_token');
     expect(compose).toContain('ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE');
     expect(compose.match(/http:\/\/gateway:8792/gu)).toHaveLength(2);
     expect(compose).not.toContain('ONEMAP_ACCESS_TOKEN');

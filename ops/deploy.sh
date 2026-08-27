@@ -125,7 +125,6 @@ if $RESTART; then
   echo "==> building $IMAGE"
   ssh_retry "docker build -t '$IMAGE' '$RUNTIME/releases/$REL'"
   ssh_retry "docker run --rm --entrypoint sh '$IMAGE' -c 'cd /srv/address/app && sha256sum --quiet -c .image-manifest.sha256'"
-  ssh_retry "cd '$ADDRESS_ROOT' && ./ops/init-compose.sh"
   ssh_once "cd '$ADDRESS_ROOT' && bash ./ops/activate-production-release.sh '$REL' '$IMAGE'"
 else
   echo "==> files synchronized without rebuilding services"

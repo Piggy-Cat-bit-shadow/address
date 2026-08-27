@@ -4,11 +4,39 @@ import { describe, expect, it } from 'vitest';
 const overlay = readFileSync('ops/docker-compose.production.yml', 'utf8');
 const isolatedOverlay = readFileSync('ops/docker-compose.isolated.yml', 'utf8');
 const compose = readFileSync('docker-compose.yml', 'utf8');
+const bootstrap = readFileSync('ops/bootstrap-compose.mjs', 'utf8');
 const deploy = readFileSync('ops/activate-production-release.sh', 'utf8');
 const deployClient = readFileSync('ops/deploy.sh', 'utf8');
 const gateway = readFileSync('ops/caddy/Caddyfile.template', 'utf8');
 
 describe('production blue-green deployment', () => {
+  it('supports a one-file first deployment with an internal bootstrap service', () => {
+    expect(compose).toContain('bootstrap:');
+    expect(compose).toContain('ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-admin}');
+    expect(compose).toContain('FRONTEND_INITIAL_PASSWORD: ${FRONTEND_INITIAL_PASSWORD:-}');
+    expect(compose).toContain('condition: service_completed_successfully');
+    expect(compose).not.toContain('file: ./config/secrets/');
+    expect(compose).not.toContain('env_file:');
+    expect(bootstrap).toContain("['postgres_password'");
+    expect(bootstrap).toContain('Secret conflict for');
+  });
+
+  it('keeps the existing production secret mounts to avoid a PostgreSQL recreation', () => {
+    expect(overlay).toContain('profiles: [production-bootstrap-disabled]');
+    expect(overlay).toContain('depends_on: !reset {}');
+    expect(overlay).toContain('POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password');
+    expect(overlay).toContain('file: ./config/secrets/postgres_password');
+    expect(overlay).toContain('FRONTEND_BOOTSTRAP_PASSWORD_FILE: ""');
+    for (const service of ['migrate', 'sync']) {
+      const start = overlay.indexOf(`  ${service}:`);
+      const remainder = overlay.slice(start + 3);
+      const relativeEnd = remainder.search(/\n  [a-z][a-z-]*:/u);
+      const block = overlay.slice(start, relativeEnd < 0 ? undefined : start + 3 + relativeEnd);
+      expect(block).toContain('environment: !override');
+      expect(block).toContain('volumes: !override');
+    }
+    expect(deployClient).not.toContain('init-compose.sh');
+  });
   it('keeps the isolated verification stack in a separate Compose project', () => {
     expect(isolatedOverlay).toMatch(/^name: address-test$/mu);
   });

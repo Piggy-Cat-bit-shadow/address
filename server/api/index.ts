@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import type { Database } from '../database/database.mjs';
 import { countries, countryByCode, isCountryCode } from '../../src/domain/countries';
 import { publicOpenApiDocument } from '../../src/domain/api-contract';
@@ -8,6 +9,7 @@ import { DomainError, generateBundle } from '../../src/domain/generator';
 import { locationOptions, regionsForCountry } from '../../src/domain/location-options';
 import { isVerifiedAddressNonResidential } from '../../src/domain/non-residential.mjs';
 import { matchesCustomBlacklist } from '../lib/custom-blacklist.mjs';
+import { originAllowed, parseAllowedOrigins } from '../lib/origin-policy';
 import type { GeneratedBundle } from '../../src/domain/types';
 import type { VerifiedAddress } from '../../src/domain/types';
 import {
@@ -32,6 +34,7 @@ interface Bindings {
   IP_GEOLOCATION_API_URL?: string;
   IP_GEOLOCATION_FALLBACK_API_URL?: string;
   ALLOWED_ORIGIN?: string;
+  ALLOWED_ORIGINS?: string;
   HOT_POOL_COUNTRIES?: string;
   HOT_POOL_MIN_PER_SLOT?: string;
   GOOGLE_GEOCODING_API_KEY?: string;
@@ -279,16 +282,20 @@ const hotPoolCoverage = async (
 };
 
 app.use('*', async (context, next) => {
-  if (context.req.method === 'OPTIONS') {
-    return context.body(null, 204, {
-      'Access-Control-Allow-Origin': context.env.ALLOWED_ORIGIN || '*',
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Authorization,Content-Type'
-    });
+  const allowed = parseAllowedOrigins(context.env.ALLOWED_ORIGINS, context.env.ALLOWED_ORIGIN);
+  const origin = context.req.header('Origin') || '';
+  if (context.req.method === 'OPTIONS' && origin && !originAllowed(allowed, origin)) {
+    return context.json({ error: 'ORIGIN_NOT_ALLOWED' }, 403);
   }
-  await next();
-  context.header('Access-Control-Allow-Origin', context.env.ALLOWED_ORIGIN || '*');
-  context.header('X-Content-Type-Options', 'nosniff');
+  return cors({
+    origin: allowed,
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowHeaders: ['Authorization', 'Content-Type'],
+    maxAge: 600
+  })(context, async () => {
+    await next();
+    context.header('X-Content-Type-Options', 'nosniff');
+  });
 });
 
 app.get('/', (context) => context.json({ service: 'Real Address Generator API', version: 'v1' }));

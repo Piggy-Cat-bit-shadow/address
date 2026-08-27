@@ -223,5 +223,5 @@ Common codes include `INVALID_COUNTRY`, `INVALID_FIELD`, `INVALID_LOCATION`, `IN
 
 ## CORS and privacy
 
-- Set `ALLOWED_ORIGIN` to the public HTTPS origin in production.
+- Set `ALLOWED_ORIGINS` to the comma-separated public HTTPS origins in production.
 - Do not place API keys or `SYNC_ADMIN_TOKEN` in query strings, browser code, screenshots, or logs.

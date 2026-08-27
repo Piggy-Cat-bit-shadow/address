@@ -18,6 +18,29 @@ const mockBindings = { ALLOWED_ORIGIN: '*', GOOGLE_TRANSLATION_ENABLED: false } 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('synchronized address registry', () => {
+  it('handles preflight requests for every configured origin and rejects unlisted origins', async () => {
+    const bindings = { ALLOWED_ORIGINS: 'https://address.daimonna.com, https://address.333186.xyz' };
+    for (const origin of ['https://address.daimonna.com', 'https://address.333186.xyz']) {
+      const response = await app.request('/api/v1/generate', {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'authorization,content-type'
+        }
+      }, bindings);
+      expect(response.status).toBe(204);
+      expect(response.headers.get('access-control-allow-origin')).toBe(origin);
+      expect(response.headers.get('access-control-allow-methods')).toContain('POST');
+      expect(response.headers.get('vary')).toContain('Origin');
+    }
+    const rejected = await app.request('/api/v1/generate', {
+      method: 'OPTIONS', headers: { Origin: 'https://attacker.example' }
+    }, bindings);
+    expect(rejected.status).toBe(403);
+    expect(rejected.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
   it('reports countries that still require a synchronized snapshot', async () => {
     const response = await app.request('/api/v1/countries', {}, { ALLOWED_ORIGIN: '*' });
     const payload = await response.json() as { data: Array<{ code: string; addressCount: null; generationMode: string }> };

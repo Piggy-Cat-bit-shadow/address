@@ -21,8 +21,10 @@ x-production-app: &production-app
     POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     CONFIG_MASTER_KEY_FILE: /run/secrets/config_master_key
     ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/secrets/admin_bootstrap_password
+    FRONTEND_BOOTSTRAP_PASSWORD_FILE: ""
     SYNC_ADMIN_TOKEN_FILE: /run/secrets/sync_admin_token
     COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
     TRUST_PROXY: ${TRUST_PROXY:-false}
     SYNC_SCHEDULER_ENABLED: "true"
@@ -93,6 +95,18 @@ x-production-broker: &production-broker
   stop_grace_period: 30s
 
 services:
+  bootstrap:
+    profiles: [production-bootstrap-disabled]
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes: !override
+      - ./data/postgres:/var/lib/postgresql/data
+    depends_on: !reset {}
+
   api:
     profiles: [production-single-disabled]
     ports: !reset []
@@ -102,6 +116,13 @@ services:
 
   migrate:
     image: ${ADDRESS_MIGRATION_IMAGE:?Set ADDRESS_MIGRATION_IMAGE}
+    environment: !override
+      <<: *production-environment
+      POSTGRES_STATEMENT_TIMEOUT_MS: 1800000
+    secrets: *production-secrets
+    volumes: !override
+      - ./data/address:/srv/address/data
+      - ./runtime:/srv/address/runtime
 
   api-blue:
     <<: *production-api
@@ -197,13 +218,33 @@ services:
 
   sync:
     image: ${ADDRESS_SYNC_IMAGE:?Set ADDRESS_SYNC_IMAGE}
-    environment:
-      CREDENTIAL_BROKER_URL: http://gateway:8792
+    environment: !override
+      <<: *production-environment
+      SYNC_HOST: 0.0.0.0
+      SYNC_PORT: 8791
       POSTGRES_POOL_MAX: ${SYNC_POSTGRES_POOL_MAX:-6}
       POSTGRES_POOL_MIN: ${SYNC_POSTGRES_POOL_MIN:-1}
+    secrets: *production-secrets
+    volumes: !override
+      - ./data/address:/srv/address/data
+      - ./runtime:/srv/address/runtime
     depends_on: !override
       postgres:
         condition: service_healthy
       gateway:
         condition: service_healthy
     stop_grace_period: 95m
+
+secrets:
+  postgres_password:
+    file: ./config/secrets/postgres_password
+  config_master_key:
+    file: ./config/secrets/config_master_key
+  admin_bootstrap_password:
+    file: ./config/secrets/admin_bootstrap_password
+  sync_admin_token:
+    file: ./config/secrets/sync_admin_token
+  credential_broker_production_token:
+    file: ./config/secrets/credential_broker_production_token
+  credential_broker_test_token:
+    file: ./config/secrets/credential_broker_test_token

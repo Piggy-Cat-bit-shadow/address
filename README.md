@@ -143,11 +143,12 @@ The queue applies bounded retries, exponential backoff, cooldown/quota reset tim
 ## Deployment
 
 ```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
 docker compose up -d
 ```
+
+The initial administrator password is `admin`; the frontend password is disabled. Change either initial value in `docker-compose.yml` before the first start. The administrator console requires the default administrator password to be replaced after sign-in.
 
 See the [deployment guide](docs/DEPLOYMENT.md) for complete instructions.
 

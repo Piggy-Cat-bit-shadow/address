@@ -81,6 +81,7 @@ const server = spawn(process.execPath, ['--import', 'tsx', 'server/api/server.ts
     API_HOST: '127.0.0.1', API_PORT: String(port),
     CONFIG_MASTER_KEY: '3333333333333333333333333333333333333333333333333333333333333333',
     ADMIN_BOOTSTRAP_PASSWORD: 'initial admin password', COOKIE_SECURE: 'false', STATIC_ROOT: resolve(root, 'dist'),
+    ALLOWED_ORIGINS: 'https://address.daimonna.com,https://address.333186.xyz',
     ADDRESS_DATA_ROOT: runtime, ADDRESS_SYNC_CACHE_DIR: resolve(runtime, 'staging'), AMAP_API_KEY: '',
     SYNC_CONTROL_URL: syncBaseUrl, SYNC_ADMIN_TOKEN: 'e2e-sync-admin-token'
   },
@@ -115,6 +116,16 @@ let browser;
 try {
   await waitForServer(baseUrl, server, serverErrors);
   await waitForSyncControl();
+  const preflight = await fetch(`${baseUrl}/api/v1/generate`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://address.daimonna.com',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'authorization,content-type'
+    }
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://address.daimonna.com');
   const browserPath = executablePath();
   assert.ok(browserPath, 'Set PLAYWRIGHT_EXECUTABLE_PATH to a Chromium-compatible browser');
   browser = await chromium.launch({ headless: true, executablePath: browserPath });

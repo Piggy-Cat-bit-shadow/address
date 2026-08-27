@@ -36,6 +36,7 @@ describe('public API contract', () => {
     expect(apiScopeForPath('/api/v1/countries')).toBe('read');
     const server = readFileSync('server/api/server.ts', 'utf8');
     expect(server).toContain("'/api/v1/health', '/api/v1/ready', '/api/v1/openapi.json'");
+    expect(server.indexOf("request.method === 'OPTIONS'")).toBeLessThan(server.indexOf('apiAuthorization(control, request)'));
   });
 
   it('starts China synchronization scheduling without an administrator page visit', () => {

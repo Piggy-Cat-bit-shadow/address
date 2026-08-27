@@ -313,8 +313,12 @@ export class ControlStore {
       quota_timezone_offset=-480,updated_at=? WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000`)
       .bind(GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, nowIso()).run();
     const admin = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='admin'").first<{ id: string }>();
-    if (!admin && bootstrapPassword) await this.setPassword('admin', bootstrapPassword);
-    await this.setDefault('frontend_password_enabled', false);
+    const frontend = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='frontend'").first<{ id: string }>();
+    const frontendBootstrapPassword = environment.FRONTEND_BOOTSTRAP_PASSWORD?.trim();
+    if (!admin && bootstrapPassword) await this.setPassword('admin', bootstrapPassword, undefined, bootstrapPassword === 'admin' ? 5 : 10);
+    if (!admin && !frontend && frontendBootstrapPassword) await this.setPassword('frontend', frontendBootstrapPassword);
+    await this.setDefault('admin_password_change_required', !admin && bootstrapPassword === 'admin');
+    await this.setDefault('frontend_password_enabled', Boolean(frontendBootstrapPassword));
     await this.setDefault('api_auth_enabled', true);
     await this.setDefault('google_translation_enabled', environmentBoolean(environment.GOOGLE_TRANSLATION_ENABLED, true));
     await this.setDefault('map_display_config', mapDisplayConfigFromEnvironment(environment));
@@ -323,12 +327,13 @@ export class ControlStore {
     await this.ensureQuotaWindows();
   }
 
-  async status(): Promise<{ initialized: boolean; frontendPasswordEnabled: boolean; apiAuthEnabled: boolean }> {
+  async status(): Promise<{ initialized: boolean; frontendPasswordEnabled: boolean; apiAuthEnabled: boolean; passwordChangeRequired: boolean }> {
     const admin = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='admin'").first<{ id: string }>();
     return {
       initialized: Boolean(admin),
       frontendPasswordEnabled: await this.setting('frontend_password_enabled', false),
-      apiAuthEnabled: true
+      apiAuthEnabled: true,
+      passwordChangeRequired: await this.setting('admin_password_change_required', false)
     };
   }
 
@@ -515,8 +520,8 @@ export class ControlStore {
     } catch { return null; }
   }
 
-  async setPassword(kind: SessionRole, password: string, currentSessionToken?: string): Promise<void> {
-    const value = await hashPassword(password);
+  async setPassword(kind: SessionRole, password: string, currentSessionToken?: string, minimumLength = 10): Promise<void> {
+    const value = await hashPassword(password, minimumLength);
     const now = nowIso();
     await this.database.prepare(`INSERT INTO auth_identities(id,kind,password_hash,password_salt,created_at,updated_at)
       VALUES (?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET password_hash=excluded.password_hash,
@@ -563,6 +568,9 @@ export class ControlStore {
       statements.push(currentSessionToken
         ? this.database.prepare("DELETE FROM auth_sessions WHERE role='admin' AND id_hash<>?").bind(tokenHash(currentSessionToken))
         : this.database.prepare("DELETE FROM auth_sessions WHERE role='admin'"));
+      statements.push(this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)
+        ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+        .bind('admin_password_change_required', JSON.stringify(false), now));
     }
     if (input.frontendPasswordEnabled !== undefined) {
       statements.push(this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)

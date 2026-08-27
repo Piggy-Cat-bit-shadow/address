@@ -9,23 +9,14 @@ services:
     env_file: !reset []
     environment:
       CREDENTIAL_BROKER_TOKEN_FILE: ""
-    secrets: !override
-      - postgres_password
-      - config_master_key
-      - admin_bootstrap_password
-      - sync_admin_token
 
   api:
     env_file: !reset []
     environment:
       CREDENTIAL_BROKER_URL: ${ADDRESS_PRODUCTION_BROKER_URL:-http://gateway:8792}
-      CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_test_token
-    secrets: !override
-      - postgres_password
-      - config_master_key
-      - admin_bootstrap_password
-      - sync_admin_token
-      - credential_broker_test_token
+      CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
+    volumes:
+      - ${ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE:?Set ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE}:/run/address-secrets/credential_broker_test_token:ro
     depends_on: !override
       postgres:
         condition: service_healthy
@@ -36,13 +27,9 @@ services:
     env_file: !reset []
     environment:
       CREDENTIAL_BROKER_URL: ${ADDRESS_PRODUCTION_BROKER_URL:-http://gateway:8792}
-      CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_test_token
-    secrets: !override
-      - postgres_password
-      - config_master_key
-      - admin_bootstrap_password
-      - sync_admin_token
-      - credential_broker_test_token
+      CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
+    volumes:
+      - ${ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE:?Set ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE}:/run/address-secrets/credential_broker_test_token:ro
     depends_on: !override
       postgres:
         condition: service_healthy
@@ -53,7 +40,3 @@ networks:
   egress:
     external: true
     name: address_egress
-
-secrets:
-  credential_broker_test_token:
-    file: ${ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE:?Set ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE}

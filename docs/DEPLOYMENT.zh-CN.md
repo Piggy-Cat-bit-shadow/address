@@ -7,18 +7,17 @@
 ## Docker Compose 快速部署
 
 ```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-初始化脚本只创建相对目录和六个随机启动密钥，不会覆盖已有文件。首次管理员密码位于：
+Compose 的 bootstrap 服务会自动创建相对目录和持久化内部密钥。管理员初始密码为 `admin`，前端密码默认关闭。首次启动前可直接在 `docker-compose.yml` 修改 `ADMIN_INITIAL_PASSWORD` 或 `FRONTEND_INITIAL_PASSWORD`；使用默认管理员密码登录后，必须先修改密码。
 
 ```bash
-cat config/secrets/admin_bootstrap_password
+cat data/secrets/admin_bootstrap_password
 ```
 
 登录 `/admin/` 后可修改前端密码、管理员密码、API 调用令牌、地图平台 Key、额度与其他业务设置。
@@ -27,7 +26,6 @@ cat config/secrets/admin_bootstrap_password
 
 - Linux AMD64 或 ARM64
 - Docker Engine 与 Docker Compose v2
-- OpenSSL，用于首次生成随机启动密钥
 - 4 GB 内存；执行大型国家首次同步建议 8 GB 或更多
 - 足够容纳 PostgreSQL、地址数据、同步暂存和备份的磁盘空间
 - HTTPS 反向代理
@@ -38,9 +36,9 @@ cat config/secrets/admin_bootstrap_password
 
 ```text
 address/
-├── docker-compose.yml
-├── config/address.env    # 可选的高级数据源适配器参数
-├── config/secrets/       # 随机启动密钥，不进入 Git
+├── docker-compose.yml    # 唯一必需的部署文件
+├── config/secrets/       # 可选的旧版密钥导入位置
+├── data/secrets/         # 自动生成的持久化密钥
 ├── data/address/         # 地址池与同步暂存
 ├── data/postgres/        # PostgreSQL 数据
 ├── runtime/              # 同步运行状态
@@ -52,7 +50,7 @@ address/
 
 ## 可选部署配置
 
-默认配置可以直接启动。只有需要修改镜像、端口或反向代理设置时才创建 `.env`：
+默认配置可以直接启动。可直接编辑 Compose 中的 `environment`；只有需要统一覆盖镜像、端口或反向代理设置时才创建 `.env`：
 
 ```bash
 cp ops/compose.env.example .env
@@ -62,16 +60,17 @@ cp ops/compose.env.example .env
 ADDRESS_IMAGE=daimon23/address:latest
 API_BIND_ADDRESS=127.0.0.1
 API_PORT=8787
-ALLOWED_ORIGIN=*
+ALLOWED_ORIGINS=*
 TRUST_PROXY=false
 COOKIE_SECURE=false
 ```
 
-HTTPS 反向代理生产环境应设置准确的 `ALLOWED_ORIGIN`，并将 `TRUST_PROXY`、`COOKIE_SECURE` 改为 `true`。第三方 API Key 和常规业务参数统一在管理员后台管理。默认空白且被忽略的 `config/address.env` 只保留给同步进程启动前必须存在的高级适配器开关和限制。
+HTTPS 反向代理生产环境应将 `ALLOWED_ORIGINS` 设置为一个或多个以逗号分隔的 HTTPS 来源，并将 `TRUST_PROXY`、`COOKIE_SECURE` 改为 `true`。第三方 API Key 和常规业务参数统一在管理员后台管理。
 
 ## 服务与网络
 
 - `postgres`：PostgreSQL 16，只连接内部网络
+- `bootstrap`：创建或校验持久化内部密钥，完成后退出
 - `migrate`：每次启动前执行一次数据库迁移，成功后退出
 - `api`：WebUI 与 API，默认只监听 `127.0.0.1:8787`
 - `sync`：自动同步服务，只连接 Compose 私有网络
@@ -92,7 +91,8 @@ docker compose up -d
 升级镜像：
 
 ```bash
-sh ops/backup.sh
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -101,11 +101,15 @@ docker compose ps
 ## 备份与恢复
 
 ```bash
-sh ops/backup.sh
-sh ops/restore.sh ./backups/address-YYYYMMDDTHHMMSSZ.dump
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+docker compose stop api sync credential-broker
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' < ./backups/address-YYYYMMDDTHHMMSSZ.dump
+docker compose up -d
 ```
 
-备份包含地址表、控制表、加密后的凭据、同步状态和审计数据。`config/secrets/config_master_key` 必须与数据库备份一起安全保存，否则无法解密后台保存的凭据。跨 PostgreSQL 主版本必须使用 `pg_dump` 与 `pg_restore`，不能直接复用数据目录。
+备份包含地址表、控制表、加密后的凭据、同步状态和审计数据。`data/secrets/config_master_key` 必须与数据库备份一起安全保存，否则无法解密后台保存的凭据。跨 PostgreSQL 主版本必须使用 `pg_dump` 与 `pg_restore`，不能直接复用数据目录。
 
 ## Nginx 示例
 

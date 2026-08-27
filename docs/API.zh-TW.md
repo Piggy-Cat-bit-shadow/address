@@ -221,5 +221,5 @@ curl -fsS https://YOUR_DOMAIN.example/api/v1/data-health \
 
 ## CORS 與隱私
 
-- 生產環境將 `ALLOWED_ORIGIN` 設置為公開 HTTPS 來源。
+- 生產環境將 `ALLOWED_ORIGINS` 設置為以逗號分隔的公開 HTTPS 來源。
 - API Key 和 `SYNC_ADMIN_TOKEN` 不進入查詢參數、瀏覽器代碼、截圖或日誌。

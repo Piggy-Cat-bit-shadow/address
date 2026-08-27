@@ -7,18 +7,17 @@ The project maintains one production deployment path: Docker Compose. The root `
 ## Docker Compose quick deployment
 
 ```bash
-git clone https://github.com/daimon3332/address.git
-cd address
-sh ops/init-compose.sh
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-The initialization script creates only relative directories and six random bootstrap secrets. It never overwrites existing files. Read the initial administrator password with:
+The Compose bootstrap service creates relative directories and persistent internal secrets automatically. The default administrator password is `admin`; the frontend password is disabled. Edit `ADMIN_INITIAL_PASSWORD` or `FRONTEND_INITIAL_PASSWORD` in `docker-compose.yml` before the first start if needed. After signing in, change the default administrator password before using other administrator features.
 
 ```bash
-cat config/secrets/admin_bootstrap_password
+cat data/secrets/admin_bootstrap_password
 ```
 
 After signing in to `/admin/`, manage the frontend password, administrator password, API token, provider keys, quotas, and business settings there.
@@ -27,7 +26,6 @@ After signing in to `/admin/`, manage the frontend password, administrator passw
 
 - Linux AMD64 or ARM64
 - Docker Engine and Docker Compose v2
-- OpenSSL for one-time secret generation
 - 4 GB RAM; 8 GB or more is recommended for large initial country imports
 - Enough disk space for PostgreSQL, address data, synchronization staging, and backups
 - An HTTPS reverse proxy
@@ -38,9 +36,9 @@ The development computer does not need Docker. GitHub Actions builds the product
 
 ```text
 address/
-├── docker-compose.yml
-├── config/address.env    # Optional advanced source-adapter settings
-├── config/secrets/       # Random bootstrap secrets; excluded from Git
+├── docker-compose.yml    # The only required deployment file
+├── config/secrets/       # Optional legacy secret import location
+├── data/secrets/         # Automatically generated persistent secrets
 ├── data/address/         # Address pool and synchronization staging
 ├── data/postgres/        # PostgreSQL data
 ├── runtime/              # Synchronization runtime state
@@ -52,7 +50,7 @@ Every mount is relative to the Compose directory. No `/root/address` or other fi
 
 ## Optional Deployment Settings
 
-The defaults start without an `.env` file. Create one only to override the image, port, or reverse-proxy settings:
+The defaults start without an `.env` file. Edit the Compose `environment` values directly, or create one only to override the image, port, or reverse-proxy settings:
 
 ```bash
 cp ops/compose.env.example .env
@@ -62,16 +60,17 @@ cp ops/compose.env.example .env
 ADDRESS_IMAGE=daimon23/address:latest
 API_BIND_ADDRESS=127.0.0.1
 API_PORT=8787
-ALLOWED_ORIGIN=*
+ALLOWED_ORIGINS=*
 TRUST_PROXY=false
 COOKIE_SECURE=false
 ```
 
-For production behind HTTPS, set an exact `ALLOWED_ORIGIN` and set `TRUST_PROXY` and `COOKIE_SECURE` to `true`. Manage provider API keys and ordinary business settings in the administrator console. The empty, ignored `config/address.env` is reserved for advanced synchronization-adapter switches and limits that must exist before the sync process starts.
+For production behind HTTPS, set `ALLOWED_ORIGINS` to one or more comma-separated HTTPS origins and set `TRUST_PROXY` and `COOKIE_SECURE` to `true`. Manage provider API keys and ordinary business settings in the administrator console.
 
 ## Services and Network
 
 - `postgres`: PostgreSQL 16 on the internal network only
+- `bootstrap`: creates or validates persistent internal secrets, then exits
 - `migrate`: runs database migrations once before application startup
 - `api`: WebUI and API, bound to `127.0.0.1:8787` by default
 - `sync`: automatic synchronization on the private Compose network
@@ -92,7 +91,8 @@ docker compose up -d
 Upgrade the image:
 
 ```bash
-sh ops/backup.sh
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -101,11 +101,15 @@ docker compose ps
 ## Backup and Restore
 
 ```bash
-sh ops/backup.sh
-sh ops/restore.sh ./backups/address-YYYYMMDDTHHMMSSZ.dump
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+docker compose stop api sync credential-broker
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' < ./backups/address-YYYYMMDDTHHMMSSZ.dump
+docker compose up -d
 ```
 
-A backup contains addresses, control data, encrypted credentials, synchronization state, and audit records. Securely retain `config/secrets/config_master_key` with the database backup or stored provider credentials cannot be decrypted. PostgreSQL major-version upgrades require `pg_dump` and `pg_restore`; do not reuse the data directory directly.
+A backup contains addresses, control data, encrypted credentials, synchronization state, and audit records. Securely retain `data/secrets/config_master_key` with the database backup or stored provider credentials cannot be decrypted. PostgreSQL major-version upgrades require `pg_dump` and `pg_restore`; do not reuse the data directory directly.
 
 ## Nginx Example
 

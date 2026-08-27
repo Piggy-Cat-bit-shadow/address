@@ -13,6 +13,7 @@ import {
 import { ChinaDataService } from '../china/service';
 import { createCredentialBrokerClient } from '../credential-broker/client.mjs';
 import { InFlightLimiter, isGenerationPath } from './in-flight-limiter';
+import { parseAllowedOrigins } from '../lib/origin-policy';
 
 const integer = (value: string | undefined, fallback: number): number => {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -43,6 +44,8 @@ const syncControlPublic = process.env.SYNC_CONTROL_PUBLIC === 'true';
 const releaseId = process.env.ADDRESS_RELEASE?.trim() || 'development';
 const generationInFlightLimit = integer(process.env.API_MAX_INFLIGHT_GENERATIONS, 4);
 const generationLimiter = new InFlightLimiter(Math.min(generationInFlightLimit, 128));
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.trim() || process.env.ALLOWED_ORIGIN?.trim() || '*';
+parseAllowedOrigins(allowedOrigins);
 const runGenerationRequest = async (path: string, task: () => Promise<Response>): Promise<Response> => {
   if (!isGenerationPath(path)) return task();
   if (!generationLimiter.tryAcquire()) {
@@ -94,7 +97,7 @@ const environment = {
   ADDRESS_DB: database,
   LOCATION_DB: database,
   BATCH_GENERATION_CONCURRENCY: process.env.BATCH_GENERATION_CONCURRENCY || '4',
-  ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN || '*',
+  ALLOWED_ORIGINS: allowedOrigins,
   AMAP_API_KEY: process.env.AMAP_API_KEY,
   GEOAPIFY_API_KEY: process.env.GEOAPIFY_API_KEY,
   GOOGLE_GEOCODING_API_KEY: process.env.GOOGLE_GEOCODING_API_KEY,
@@ -150,7 +153,7 @@ const server = serve({
       if (!await authorizeWebRequest(control, request)) {
         return securityHeaders(Response.json({ error: 'FRONTEND_AUTH_REQUIRED' }, { status: 401, headers: { 'Cache-Control': 'no-store' } }));
       }
-      return securityHeaders(await proxyAmapServiceRequest(control, request, fetch, process.env.ALLOWED_ORIGIN));
+      return securityHeaders(await proxyAmapServiceRequest(control, request, fetch, allowedOrigins));
     }
     if (url.pathname.startsWith('/web-api/v1/auth/') || url.pathname.startsWith('/web-api/v1/config/')
       || url.pathname === '/web-api/v1/public-monitor') {
@@ -171,6 +174,9 @@ const server = serve({
       ));
     }
     if (url.pathname.startsWith('/api/')) {
+      if (request.method === 'OPTIONS') {
+        return securityHeaders(await app.fetch(request, { ...environment, ...node }));
+      }
       if (!['/api/v1/health', '/api/v1/ready', '/api/v1/openapi.json'].includes(url.pathname)) {
         const authorization = await apiAuthorization(control, request);
         if (authorization.status !== 'authorized') {

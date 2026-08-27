@@ -35,6 +35,90 @@ describe('control database security', () => {
     expect(masterKeyFrom(masterKey.toString('base64'))).toEqual(masterKey);
   });
 
+  it('bootstraps the default administrator and optional frontend password only once', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('admin', { FRONTEND_BOOTSTRAP_PASSWORD: '' });
+      expect(await freshStore.verifyIdentity('admin', 'admin')).toBe(true);
+      expect(await freshStore.status()).toMatchObject({
+        initialized: true,
+        frontendPasswordEnabled: false,
+        passwordChangeRequired: true
+      });
+      await freshStore.initialize('replacement administrator password', {
+        FRONTEND_BOOTSTRAP_PASSWORD: 'replacement frontend password'
+      });
+      expect(await freshStore.verifyIdentity('admin', 'admin')).toBe(true);
+      expect(await freshStore.verifyIdentity('admin', 'replacement administrator password')).toBe(false);
+      expect(await freshStore.verifyIdentity('frontend', 'replacement frontend password')).toBe(false);
+      expect(await freshStore.status()).toMatchObject({ frontendPasswordEnabled: false });
+      const session = await freshStore.createSession('admin');
+      await freshStore.updateAccessSettings({
+        adminPassword: 'new administrator password',
+        adminPasswordConfirmation: 'new administrator password'
+      }, session.token);
+      expect(await freshStore.status()).toMatchObject({ passwordChangeRequired: false });
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
+  it('requires the default administrator password to be changed before other admin operations', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('admin');
+      const admin = createAdminApi({ control: freshStore, china: {} as never, addressDb: freshDatabase });
+      const login = await admin.request('/admin/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'admin' })
+      });
+      expect(login.status).toBe(200);
+      expect(await login.json()).toEqual({ data: expect.objectContaining({ passwordChangeRequired: true }) });
+
+      const session = await freshStore.createSession('admin');
+      const cookie = `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`;
+      const blocked = await admin.request('/admin/api/tokens', { headers: { Cookie: cookie } });
+      expect(blocked.status).toBe(403);
+      expect(await blocked.json()).toEqual({ error: 'ADMIN_PASSWORD_CHANGE_REQUIRED' });
+      expect((await admin.request('/admin/api/settings/access', { headers: { Cookie: cookie } })).status).toBe(200);
+
+      const changed = await admin.request('/admin/api/settings/access', {
+        method: 'PUT',
+        headers: { Cookie: cookie, 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminPassword: 'new administrator password',
+          adminPasswordConfirmation: 'new administrator password'
+        })
+      });
+      expect(changed.status).toBe(200);
+      expect(await changed.json()).toEqual({ data: expect.objectContaining({ passwordChangeRequired: false }) });
+      expect((await admin.request('/admin/api/tokens', { headers: { Cookie: cookie } })).status).toBe(200);
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
+  it('enables a configured frontend password during the first initialization', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('custom administrator password', {
+        FRONTEND_BOOTSTRAP_PASSWORD: 'custom frontend password'
+      });
+      expect(await freshStore.verifyIdentity('frontend', 'custom frontend password')).toBe(true);
+      expect(await freshStore.status()).toMatchObject({
+        frontendPasswordEnabled: true,
+        passwordChangeRequired: false
+      });
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
   it('tests OneMap with a bearer token without returning it', async () => {
     const token = 'fixture.onemap.token';
     const result = await testOneMapCredential(token, async (_input, init) => {
@@ -421,6 +505,12 @@ describe('control database security', () => {
     expect((await proxyAmapServiceRequest(store, new Request(
       'https://address.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://other.example' } }
     ))).status).toBe(403);
+    expect((await proxyAmapServiceRequest(store, new Request(
+      'https://address2.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://address2.example' } }
+    ), async () => Response.json({ status: '1' }), 'https://address.example,https://address2.example')).status).toBe(200);
+    expect((await proxyAmapServiceRequest(store, new Request(
+      'https://address.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://address2.example' } }
+    ), async () => Response.json({ status: '1' }), 'https://address.example,https://address2.example')).status).toBe(403);
     expect((await proxyAmapServiceRequest(store, new Request(
       'https://address.example/_AMapService/private?key=browser-js-key', { headers: { Referer: 'https://address.example/' } }
     ))).status).toBe(404);
