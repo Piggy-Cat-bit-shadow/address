@@ -21,7 +21,7 @@ import {
 } from './repositories/address-repository';
 import { loadAddressPoolV2AddressById, pickAddressPoolV2Address, pickNearestAddressPoolV2Address } from './repositories/address-pool-v2';
 import { decodeSyntheticDistrictId, queryLocationCatalog, type CatalogField } from './repositories/location-catalog';
-import { countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
+import { chinaCommunityPublicationClause, countChinaCommunities, loadChinaCommunityAddressById, pickChinaCommunityAddress } from './repositories/china-community';
 import { isTranslatableLocale, translateAddressComponents } from './services/address-translation';
 import { clientContextFromRequest } from './services/client-context';
 import { lookupManualIpContext, ManualIpLookupError } from './services/ip-geolocation';
@@ -346,6 +346,8 @@ app.get('/api/v1/availability', async (context) => {
       SELECT country_code AS code,residential_count AS count FROM sync_country_state WHERE status='ready'
       UNION ALL SELECT country_code AS code,SUM(address_count) AS count FROM residential_coverage GROUP BY country_code
       UNION ALL SELECT country_code AS code,SUM(active_count) AS count FROM address_datasets WHERE status='active' GROUP BY country_code
+      UNION ALL SELECT 'CN' AS code,COUNT(*) AS count FROM cn_communities_v2 community
+        WHERE ${chinaCommunityPublicationClause('community')}
     ) GROUP BY code HAVING MAX(count)>0 ORDER BY code`).all<{ code: string; count: number }>()).results;
   context.header('Cache-Control', 'public, max-age=30, stale-while-revalidate=300');
   return context.json({ data: rows.map((row) => ({ code: row.code, residentialAvailable: Number(row.count) > 0 })) });

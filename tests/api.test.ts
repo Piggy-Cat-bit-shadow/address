@@ -128,6 +128,7 @@ describe('synchronized address registry', () => {
     expect(statements[0]).toContain('sync_country_state');
     expect(statements[0]).toContain('residential_coverage');
     expect(statements[0]).toContain('address_datasets');
+    expect(statements[0]).toContain('cn_communities_v2');
     expect(statements[0]).toContain('HAVING MAX(count)>0');
     expect(statements[0]).not.toContain('address_pool_runtime');
     expect(response.headers.get('Cache-Control')).toContain('max-age=30');
