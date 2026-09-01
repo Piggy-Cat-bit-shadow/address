@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# One-command deploy from the local repo to the server.
-# Usage:
-#   cp ops/deploy.env.example .deploy.env  # configure private SSH values first
-#   ops/deploy.sh            # deploy server code + docs, restart services
-#   ops/deploy.sh --dist     # also rebuild and deploy the frontend (dist/)
-#   ops/deploy.sh --no-restart  # sync files only (docs-only changes)
+# Deploy the current non-ignored worktree as an immutable Docker Compose release.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -43,63 +38,96 @@ if [[ ! -f "$KEY" ]]; then
   echo "DEPLOY_KEY does not point to a file" >&2
   exit 1
 fi
-REMOTE=$DEPLOY_USER@$DEPLOY_HOST
-APP=$ADDRESS_ROOT/app
-RUNTIME=$ADDRESS_ROOT/runtime
 
-cd "$REPO_ROOT"
-REL=$(git rev-parse --short HEAD)
-TARBALL=/tmp/address-$REL.tar.gz
-WITH_DIST=false
 RESTART=true
 for arg in "$@"; do
   case "$arg" in
-    --dist) WITH_DIST=true ;;
+    --dist) ;;
     --no-restart) RESTART=false ;;
+    *) echo "Unsupported argument: $arg" >&2; exit 1 ;;
   esac
 done
 
-echo "==> packaging $REL"
-git archive --format=tar.gz -o "$TARBALL" HEAD
+REMOTE=$DEPLOY_USER@$DEPLOY_HOST
+RUNTIME=$ADDRESS_ROOT/runtime
+SSH_OPTIONS=(
+  -o BatchMode=yes
+  -o PreferredAuthentications=publickey
+  -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no
+  -o GSSAPIAuthentication=no
+  -o ConnectTimeout=15
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4
+)
+STAGE=$(mktemp -d)
+TARBALL=''
+cleanup() {
+  rm -rf "$STAGE"
+  [[ -z "$TARBALL" ]] || rm -f "$TARBALL"
+}
+trap cleanup EXIT
 
-if $WITH_DIST; then
-  echo "==> building frontend"
-  npm run build
-  tar -czf /tmp/dist-$REL.tar.gz dist
-fi
+cd "$REPO_ROOT"
+git ls-files -co --exclude-standard -z \
+  | while IFS= read -r -d '' file; do
+      [[ -f "$file" || -L "$file" ]] && printf '%s\0' "$file"
+    done \
+  | tar --null -T - -cf - \
+  | tar -xf - -C "$STAGE"
+(
+  cd "$STAGE"
+  find . -type f \
+    ! -path './.github/*' \
+    ! -name '.env.example' \
+    ! -name '.release-manifest.sha256' \
+    ! -name '.image-manifest.sha256' \
+    -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > .image-manifest.sha256
+  find . -type f ! -name '.release-manifest.sha256' -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > .release-manifest.sha256
+)
+TREE_HASH=$(sha256sum "$STAGE/.release-manifest.sha256" | cut -c1-12)
+REL="$(git rev-parse --short HEAD)-$TREE_HASH"
+TARBALL=$(mktemp "${TMPDIR:-/tmp}/address-$REL.XXXXXX.tar.gz")
+tar -C "$STAGE" -czf "$TARBALL" .
 
 scp_retry() {
   for i in 1 2 3 4 5; do
-    scp -i "$KEY" -P "$DEPLOY_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$@" && return 0
+    scp -i "$KEY" -P "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$@" && return 0
     echo "scp retry $i"; sleep 30
   done
   return 1
 }
 ssh_retry() {
   for i in 1 2 3 4 5; do
-    ssh -i "$KEY" -p "$DEPLOY_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" "$@" && return 0
+    ssh -i "$KEY" -p "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$REMOTE" "$@" </dev/null && return 0
     echo "ssh retry $i"; sleep 30
   done
   return 1
 }
 
-echo "==> uploading"
-scp_retry "$TARBALL" "$REMOTE:$RUNTIME/"
-$WITH_DIST && scp_retry /tmp/dist-$REL.tar.gz "$REMOTE:$RUNTIME/"
+ssh_once() {
+  ssh -i "$KEY" -p "$DEPLOY_PORT" "${SSH_OPTIONS[@]}" "$REMOTE" "$@" </dev/null
+}
 
-echo "==> extracting (server data and dist are preserved unless --dist)"
-ssh_retry "cd $APP && tar --exclude=dist --exclude=data -xzf $RUNTIME/address-$REL.tar.gz && echo $REL > RELEASE"
-if $WITH_DIST; then
-  ssh_retry "cd $APP && rm -rf dist && tar -xzf $RUNTIME/dist-$REL.tar.gz"
-fi
+echo "==> uploading $REL"
+ssh_retry "mkdir -p '$RUNTIME/releases/$REL'"
+scp_retry "$TARBALL" "$REMOTE:$RUNTIME/address-$REL.tar.gz"
+ssh_retry "tar -xzf '$RUNTIME/address-$REL.tar.gz' -C '$RUNTIME/releases/$REL' && rm -f '$RUNTIME/address-$REL.tar.gz'"
+ssh_retry "cd '$RUNTIME/releases/$REL' && sha256sum --quiet -c .release-manifest.sha256"
+ssh_retry "tar -C '$RUNTIME/releases/$REL' -cf - . | tar -C '$ADDRESS_ROOT' -xf - && printf '%s\n' '$REL' > '$ADDRESS_ROOT/RELEASE'"
 
 if $RESTART; then
-  echo "==> restarting"
-  ssh_retry "$APP/ops/stop.sh && sleep 3 && $APP/ops/start.sh"
-  sleep 15
-  echo "==> health check"
-  ssh_retry "$APP/ops/status.sh"
+  IMAGE="address-local:$REL"
+  echo "==> building $IMAGE"
+  ssh_retry "docker build -t '$IMAGE' '$RUNTIME/releases/$REL'"
+  ssh_retry "docker run --rm --entrypoint sh '$IMAGE' -c 'cd /srv/address/app && sha256sum --quiet -c .image-manifest.sha256'"
+  ssh_once "cd '$ADDRESS_ROOT' && bash ./ops/activate-production-release.sh '$REL' '$IMAGE'"
 else
-  echo "==> files synced, no restart"
+  echo "==> files synchronized without rebuilding services"
 fi
+
 echo "==> deployed $REL"

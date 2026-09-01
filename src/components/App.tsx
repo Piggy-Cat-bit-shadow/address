@@ -1,20 +1,42 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { Activity, Bookmark } from 'lucide-react';
 import AmapPreview from './AmapPreview';
+import {
+  addressDisplayComponents,
+  addressDisplayCountryName,
+  addressDisplayPresentation,
+  matchesNativeLanguage,
+  storedVariantLooksLocalized,
+  type AddressDisplayLanguage
+} from '../domain/address-display';
 import { countries, countryByCode, isCountryCode } from '../domain/countries';
+import { favoriteIdFor } from '../domain/favorites';
+import { favoritesCopy } from '../domain/favorites-i18n';
 import { countryCodeFrom, type ClientContext, type GenerationMode } from '../domain/client-context';
 import { messages } from '../domain/i18n';
+import { localeDefinitions, localizedCountryName, pathForLocale, uiTextLocale } from '../domain/locales';
+import { locationOptionLabel } from '../domain/location-options';
+import { localizedProfileValue, profileLanguageControlText, profileLanguageNames, resolvedProfileLocale } from '../domain/profile-localization';
 import { isChineseNativeCountry, nativeProfileLabel } from '../domain/profile-native-labels';
-import type { AddressComponents, AddressFilterField, AddressLanguage, AddressResultField, CountryCode, CountryGroup, GeneratedBundle, Locale, LocationOption, LocationShortcut } from '../domain/types';
+import { supportedLocales, type AddressComponents, type AddressFilterField, type AddressResultField, type CountryCode, type CountryGroup, type CountryShortcutConfig, type GeneratedBundle, type Locale, type LocationOption, type LocationShortcut, type ProfileLanguage } from '../domain/types';
+import { listFavorites, removeFavorite, saveFavorite, subscribeToFavorites } from '../services/favorite-store';
 
 interface AppProps { locale: Locale; apiBaseUrl: string }
-interface Locations { regions: LocationOption[]; cities: LocationOption[]; postcodes: LocationOption[]; matches: LocationOption[] }
-interface LocationMeta { total: number; nextCursor?: string }
+const monitorLabels: Record<Locale, string> = {
+  en: 'Address count monitor', 'zh-CN': '地址数量监控', 'zh-TW': '地址數量監控', ja: '住所数モニター', ko: '주소 수 모니터',
+  de: 'Adresszahlen', fr: "Nombre d'adresses", es: 'Cantidad de direcciones', pt: 'Quantidade de endereços'
+};
+interface Locations { regions: LocationOption[]; cities: LocationOption[]; districts: LocationOption[]; postcodes: LocationOption[]; matches: LocationOption[] }
+interface LocationMeta { total: number; availableTotal: number; nextCursor?: string }
+interface LocationCacheEntry { expiresAt: number; values: LocationOption[]; meta: LocationMeta }
+interface CountryAvailability { code: CountryCode; residentialAvailable: boolean }
 interface GenerationOptions {
   countryCode?: CountryCode;
   region?: string;
   regionId?: string;
   city?: string;
   cityId?: string;
+  district?: string;
   postcode?: string;
   postcodeId?: string;
   mode?: Mode;
@@ -34,6 +56,7 @@ interface GenerateResponseData {
   requestId: string;
   mode: Mode | 'ip-region';
   country: CountryCode;
+  eligibleCount?: number;
   sourcesTried?: string[];
   filterMatchLevel?: 'exact' | 'nearby' | 'region' | 'country';
   ipMatchLevel?: IpRegionResult['matchLevel'];
@@ -55,15 +78,21 @@ interface GenerationRequestSpec {
   regionId: string;
   city: string;
   cityId: string;
+  district: string;
   postcode: string;
   postcodeId: string;
   ipRegion: boolean;
   ip: string;
-  live: boolean;
 }
 type Mode = GenerationMode;
+type LocationField = 'region' | 'city' | 'district' | 'postcode';
+type LocationLoadState = 'idle' | 'loading' | 'ready' | 'error';
+const emptyLocationMeta: Record<LocationField, LocationMeta> = {
+  region: { total: 0, availableTotal: 0 }, city: { total: 0, availableTotal: 0 },
+  district: { total: 0, availableTotal: 0 }, postcode: { total: 0, availableTotal: 0 }
+};
 
-const emptyLocations: Locations = { regions: [], cities: [], postcodes: [], matches: [] };
+const emptyLocations: Locations = { regions: [], cities: [], districts: [], postcodes: [], matches: [] };
 const groupOrder: CountryGroup[] = ['north-america', 'europe', 'east-asia', 'southeast-asia', 'south-asia', 'oceania', 'middle-east', 'south-america', 'africa'];
 const groupMessage = {
   'north-america': 'northAmerica', europe: 'europe', 'east-asia': 'eastAsia',
@@ -71,6 +100,34 @@ const groupMessage = {
   'middle-east': 'middleEast', 'south-america': 'southAmerica', africa: 'africa'
 } as const;
 const countrySessionKey = 'address-generator-country';
+export const addressLanguageStorageKey = 'address-generator-address-language';
+export const profileLanguageStorageKey = 'address-generator-profile-language';
+const displayLanguages = new Set<string>(['native', ...supportedLocales]);
+type LanguageStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+export const readStoredDisplayLanguage = <T extends AddressDisplayLanguage | ProfileLanguage>(
+  key: string,
+  storage?: LanguageStorage
+): T | 'en' => {
+  try {
+    const source = storage || (typeof window === 'undefined' ? undefined : window.localStorage);
+    const value = source?.getItem(key);
+    return value && displayLanguages.has(value) ? value as T : 'en';
+  } catch {
+    return 'en';
+  }
+};
+const emptyLocationLoadState: Record<LocationField, LocationLoadState> = {
+  region: 'idle', city: 'idle', district: 'idle', postcode: 'idle'
+};
+
+export const storeDisplayLanguage = (key: string, value: AddressDisplayLanguage | ProfileLanguage, storage?: LanguageStorage): void => {
+  try {
+    (storage || (typeof window === 'undefined' ? undefined : window.localStorage))?.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in restricted browser contexts; state remains authoritative.
+  }
+};
 interface CryptoSource {
   randomUUID?: () => string;
   getRandomValues?: (array: Uint8Array) => Uint8Array;
@@ -80,6 +137,12 @@ export const GENERATION_REQUEST_TIMEOUT_MS = 20_000;
 export const IP_GENERATION_REQUEST_TIMEOUT_MS = 60_000;
 export const CLIENT_CONTEXT_REQUEST_TIMEOUT_MS = 12_000;
 export const LOCATION_REQUEST_TIMEOUT_MS = 60_000;
+export const LOCATION_CACHE_TTL_MS = 30_000;
+export const TRANSLATION_REQUEST_TIMEOUT_MS = 15_000;
+
+type AddressTranslation =
+  | { status: 'ready'; components: AddressComponents; postalLines: string[]; singleLine: string }
+  | { status: 'fallback' };
 
 export const createRequestId = (source: CryptoSource | undefined = globalThis.crypto as unknown as CryptoSource): string => {
   if (typeof source?.randomUUID === 'function') return source.randomUUID();
@@ -119,10 +182,6 @@ export const fetchWithTimeout = async (
 };
 
 const randomSeed = () => createRequestId().slice(0, 12);
-const sameLocation = (left: string, right: string): boolean => {
-  const normalize = (value: string) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().replace(/^city of\s+|\s+city$/g, '').trim();
-  return normalize(left) === normalize(right);
-};
 const normalizeLocationSearch = (value: string): string => value
   .normalize('NFKD')
   .replace(/[\u0300-\u036f]/g, '')
@@ -223,11 +282,17 @@ export const localizedExtensionValue = (value: string, locale: Locale): string =
     : value;
 };
 
+export const generatorTitle = (countryName: string, locale: Locale, residentialLabel: string): string =>
+  `${countryName}${locale === 'zh-CN' || locale === 'zh-TW' || locale === 'ja' ? '' : ' '}${residentialLabel}`;
+
 // Resolves a profile data value to the chosen display language. "native" prefers the
 // country's own language dictionary, then Chinese for CN-family countries, then English.
-export const profileValue = (value: string, language: AddressLanguage, countryCode: CountryCode): string => {
+export const profileValue = (value: string, language: ProfileLanguage, countryCode: CountryCode): string => {
+  const localized = localizedProfileValue(value, language, countryCode);
+  if (localized) return localized;
   if (language === 'zh-CN') return localizedExtensionValue(value, 'zh-CN');
   if (language === 'en') return localizedExtensionValue(value, 'en');
+  if (language !== 'native') return value;
   const native = nativeProfileLabel(value, countryCode);
   if (native) return native;
   return localizedExtensionValue(value, isChineseNativeCountry(countryCode) ? 'zh-CN' : 'en');
@@ -252,6 +317,7 @@ const streetValue = (countryCode: CountryCode, components: AddressComponents): s
 
 export default function App({ locale, apiBaseUrl }: AppProps) {
   const t = messages[locale];
+  const textLocale = uiTextLocale(locale);
   const endpoint = apiBaseUrl.replace(/\/$/, '');
   const [mode, setMode] = useState<Mode>('residential');
   const [countryCode, setCountryCode] = useState<CountryCode>('US');
@@ -259,24 +325,21 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [regionId, setRegionId] = useState('');
   const [city, setCity] = useState('');
   const [cityId, setCityId] = useState('');
+  const [district, setDistrict] = useState('');
   const [postcode, setPostcode] = useState('');
   const [postcodeId, setPostcodeId] = useState('');
   const [locations, setLocations] = useState<Locations>(emptyLocations);
-  const [locationMeta, setLocationMeta] = useState<Record<'region' | 'city' | 'postcode', LocationMeta>>({ region: { total: 0 }, city: { total: 0 }, postcode: { total: 0 } });
+  const [locationMeta, setLocationMeta] = useState<Record<LocationField, LocationMeta>>(emptyLocationMeta);
+  const [locationLoadState, setLocationLoadState] = useState<Record<LocationField, LocationLoadState>>(emptyLocationLoadState);
   const [result, setResult] = useState<GeneratedBundle | null>(null);
-  const [addressLanguage, setAddressLanguage] = useState<AddressLanguage>('native');
-  const [sectionLanguages, setSectionLanguages] = useState<Record<'profile' | 'employment' | 'finance' | 'internet', AddressLanguage>>({
-    profile: 'native', employment: 'native', finance: 'native', internet: 'native'
-  });
-  const setSectionLanguage = (section: 'profile' | 'employment' | 'finance' | 'internet', language: AddressLanguage) =>
-    setSectionLanguages((current) => ({ ...current, [section]: language }));
+  const [addressLanguage, setAddressLanguage] = useState<AddressDisplayLanguage>(() => readStoredDisplayLanguage<AddressDisplayLanguage>(addressLanguageStorageKey));
+  const [addressTranslations, setAddressTranslations] = useState<Record<string, AddressTranslation>>({});
+  const [profileLanguage, setProfileLanguage] = useState<ProfileLanguage>(() => readStoredDisplayLanguage<ProfileLanguage>(profileLanguageStorageKey));
   const [loading, setLoading] = useState(false);
   const [ipLoading, setIpLoading] = useState(false);
   const [error, setError] = useState('');
-  const [locationErrors, setLocationErrors] = useState<Partial<Record<'region' | 'city' | 'postcode', string>>>({});
+  const [locationErrors, setLocationErrors] = useState<Partial<Record<LocationField, string>>>({});
   const [manualIp, setManualIp] = useState('');
-  const [liveApi, setLiveApi] = useState(false);
-  const liveApiRef = useRef(false);
   const [ipContext, setIpContext] = useState<ClientContext | null>(null);
   const [ipRegionResult, setIpRegionResult] = useState<IpRegionResult | null>(null);
   const [copied, setCopied] = useState('');
@@ -285,29 +348,43 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const [residentialCountries, setResidentialCountries] = useState<Set<CountryCode>>(new Set());
   const [countriesReady, setCountriesReady] = useState(false);
   const [mapDisplay, setMapDisplay] = useState<MapDisplayConfig | null>(null);
+  const [shortcutConfigs, setShortcutConfigs] = useState<Partial<Record<CountryCode, CountryShortcutConfig>>>({});
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [favoriteCount, setFavoriteCount] = useState(0);
   const activeRequest = useRef<{ requestId: string; country: CountryCode; mode: Mode } | null>(null);
   const selectionRef = useRef<{ country: CountryCode; mode: Mode }>({ country: 'US', mode: 'residential' });
   const generationController = useRef<AbortController | null>(null);
-  const locationControllers = useRef<Partial<Record<'region' | 'city' | 'postcode', AbortController>>>({});
-  const locationQueries = useRef<Record<'region' | 'city' | 'postcode', string>>({ region: '', city: '', postcode: '' });
+  const locationControllers = useRef<Partial<Record<LocationField, AbortController>>>({});
+  const locationRequestKeys = useRef<Partial<Record<LocationField, string>>>({});
+  const locationCache = useRef<Map<string, LocationCacheEntry>>(new Map());
+  const locationQueries = useRef<Record<LocationField, string>>({ region: '', city: '', district: '', postcode: '' });
   const copyToastTimer = useRef<number | undefined>(undefined);
   const prefetchedResults = useRef<Map<string, GeneratedBundle[]>>(new Map());
+  const recentAddressIds = useRef<Map<string, string[]>>(new Map());
+  const eligibleCounts = useRef<Map<string, number>>(new Map());
   const prefetchController = useRef<AbortController | null>(null);
   const prefetchingKey = useRef('');
   const userNavigated = useRef(false);
   const residentialCountriesRef = useRef<Set<CountryCode>>(new Set());
 
+  const refreshFavoriteState = async () => {
+    const { values } = await listFavorites();
+    setFavoriteIds(new Set(values.map(({ id }) => id))); setFavoriteCount(values.length);
+  };
+  useEffect(() => { void refreshFavoriteState(); return subscribeToFavorites(() => void refreshFavoriteState()); }, []);
+
   const residential = mode === 'residential';
   const selectedCountry = countryByCode.get(countryCode) || countries[0];
+  const selectedShortcuts = shortcutConfigs[countryCode] || selectedCountry;
   const addressSchema = selectedCountry.addressSchema;
   const filterFields: AddressFilterField[] = addressSchema.filters;
   const visibleCountries = useMemo(() => countries.filter((country) => residentialCountries.has(country.code)), [residentialCountries]);
   const countryGroups = useMemo(() => groupOrder.map((group) => ({ group, countries: visibleCountries.filter((country) => country.group === group) })).filter((item) => item.countries.length), [visibleCountries]);
 
-  const updateUrl = (nextCountry: CountryCode, nextMode: Mode, action: 'push' | 'replace') => {
+  const updateUrl = (nextCountry: CountryCode, action: 'push' | 'replace') => {
     const url = new URL(window.location.href);
     url.searchParams.set('country', nextCountry.toLowerCase());
-    url.searchParams.set('mode', nextMode);
+    url.searchParams.delete('mode');
     window.history[action === 'push' ? 'pushState' : 'replaceState']({}, '', url);
   };
 
@@ -341,13 +418,13 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
 
   const queueKeyFor = (spec: GenerationRequestSpec): string => [
     spec.country, spec.mode, spec.regionId || spec.region, spec.cityId || spec.city,
-    spec.postcodeId || spec.postcode, spec.live ? 'live' : 'pool'
+    spec.district, spec.postcodeId || spec.postcode
   ].join(':');
 
   const paramsFor = (spec: GenerationRequestSpec, requestId: string, strategy: 'instant' | 'random') => {
     const params = new URLSearchParams({
       requestId, country: spec.country, residential: String(spec.mode === 'residential'),
-      seed: randomSeed(), strategy, live: String(spec.live)
+      seed: randomSeed(), strategy
     });
     if (spec.ipRegion) params.set('mode', 'ip-region');
     if (spec.ip.trim()) params.set('ip', spec.ip.trim());
@@ -355,6 +432,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     if (spec.regionId) params.set('regionId', spec.regionId);
     if (spec.city) params.set('city', spec.city);
     if (spec.cityId) params.set('cityId', spec.cityId);
+    if (spec.district) params.set('district', spec.district);
     if (spec.postcode) params.set('postcode', spec.postcode);
     if (spec.postcodeId) params.set('postcodeId', spec.postcodeId);
     return params;
@@ -366,27 +444,38 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     const controller = new AbortController();
     prefetchController.current = controller;
     prefetchingKey.current = key;
-    if (!prefetchedResults.current.has(key)) prefetchedResults.current.clear();
     const existing = prefetchedResults.current.get(key) || [];
-    const needed = Math.max(0, 5 - existing.length);
+    const needed = Math.max(0, 2 - existing.length);
     try {
       const responses = await Promise.allSettled(Array.from({ length: needed }, async () => {
         const requestId = createRequestId();
         const response = await fetchWithTimeout(`${endpoint}/v1/generate?${paramsFor(spec, requestId, 'instant')}`, { signal: controller.signal });
         if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return undefined;
         const payload = await response.json() as { data?: GenerateResponseData };
-        if (payload.data?.requestId !== requestId || !payload.data.sourcesTried?.includes('address-pool-v2')) return undefined;
-        return payload.data.result;
+        if (payload.data?.requestId !== requestId) return undefined;
+        return { result: payload.data.result, eligibleCount: payload.data.eligibleCount };
       }));
       if (controller.signal.aborted) return;
       const queued = [...existing];
       const ids = new Set(queued.map((item) => item.address.id));
+      const reportedCount = responses.flatMap((response) =>
+        response.status === 'fulfilled' && response.value?.eligibleCount ? [response.value.eligibleCount] : []
+      )[0];
+      if (reportedCount) eligibleCounts.current.set(key, reportedCount);
+      const eligibleCount = reportedCount || eligibleCounts.current.get(key) || 100;
+      const recentLimit = Math.min(20, Math.max(1, Math.floor(eligibleCount / 2)));
+      const recent = new Set((recentAddressIds.current.get(key) || []).slice(-recentLimit));
       for (const response of responses) {
-        if (response.status !== 'fulfilled' || !response.value || ids.has(response.value.address.id)) continue;
-        ids.add(response.value.address.id);
-        queued.push(response.value);
+        const result = response.status === 'fulfilled' ? response.value?.result : undefined;
+        if (!result || ids.has(result.address.id) || recent.has(result.address.id)) continue;
+        ids.add(result.address.id);
+        queued.push(result);
       }
-      prefetchedResults.current.set(key, queued.slice(0, 5));
+      if (!prefetchedResults.current.has(key) && prefetchedResults.current.size >= 32) {
+        prefetchedResults.current.delete(prefetchedResults.current.keys().next().value as string);
+      }
+      prefetchedResults.current.delete(key);
+      prefetchedResults.current.set(key, queued.slice(0, 2));
     } finally {
       if (prefetchController.current === controller) {
         prefetchController.current = null;
@@ -395,15 +484,20 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     }
   };
 
-  const clearPrefetchQueue = () => {
+  const abortPrefetch = () => {
     prefetchController.current?.abort();
     prefetchController.current = null;
-    prefetchedResults.current.clear();
     prefetchingKey.current = '';
   };
 
+  const rememberAddress = (key: string, addressId: string) => {
+    const recent = (recentAddressIds.current.get(key) || []).filter((id) => id !== addressId);
+    recent.push(addressId);
+    recentAddressIds.current.set(key, recent.slice(-20));
+  };
+
   const loadOptions = async (
-    field: 'region' | 'city' | 'postcode',
+    field: LocationField,
     query = '',
     overrides: { country?: CountryCode; residential?: boolean; region?: string; regionId?: string; cityId?: string; cursor?: string; append?: boolean } = {}
   ) => {
@@ -411,67 +505,86 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     const controller = new AbortController();
     locationControllers.current[field] = controller;
     locationQueries.current[field] = query;
+    const requestCountry = overrides.country || countryCode;
+    const requestResidential = overrides.residential ?? residential;
+    const parentRegion = overrides.region ?? region;
+    const parentRegionId = overrides.regionId ?? regionId;
+    const parentCityId = overrides.cityId ?? cityId;
+    const requestKey = [requestCountry, requestResidential, field, query.trim(), parentRegion, parentRegionId, parentCityId, overrides.cursor || ''].join('\u001f');
+    locationRequestKeys.current[field] = requestKey;
+    const optionKey = field === 'region' ? 'regions' : field === 'city' ? 'cities' : field === 'district' ? 'districts' : 'postcodes';
+    if (!overrides.append) {
+      const cached = locationCache.current.get(requestKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        setLocations((current) => ({ ...current, [optionKey]: cached.values }));
+        setLocationMeta((current) => ({ ...current, [field]: cached.meta }));
+        setLocationErrors((current) => ({ ...current, [field]: '' }));
+        setLocationLoadState((current) => ({ ...current, [field]: 'ready' }));
+        return;
+      }
+      if (cached) locationCache.current.delete(requestKey);
+    }
     const params = new URLSearchParams({
-      country: overrides.country || countryCode,
-      residential: String(overrides.residential ?? residential),
+      country: requestCountry,
+      residential: String(requestResidential),
       field,
       schema: '6',
-      limit: field === 'postcode' ? '100' : '20000'
+      limit: field === 'postcode' ? '100' : '200'
     });
-    if (field !== 'city' && query.trim()) params.set('q', query.trim());
-    const parentRegion = overrides.region ?? region;
+    if (query.trim()) params.set('q', query.trim());
     if (parentRegion) params.set('region', parentRegion);
-    const parentRegionId = overrides.regionId ?? regionId;
     if (parentRegionId) params.set('regionId', parentRegionId);
-    const parentCityId = overrides.cityId ?? cityId;
     if (parentCityId) params.set('cityId', parentCityId);
-    if (field !== 'city' && overrides.cursor) params.set('cursor', overrides.cursor);
+    if (overrides.cursor) params.set('cursor', overrides.cursor);
+    setLocationLoadState((current) => ({ ...current, [field]: 'loading' }));
     try {
       const response = await fetchWithTimeout(`${endpoint}/v1/locations/search?${params}`, { signal: controller.signal }, LOCATION_REQUEST_TIMEOUT_MS);
       if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('API response is not JSON');
       const payload = await response.json() as { data?: Locations & LocationMeta };
-      if (locationControllers.current[field] !== controller || locationQueries.current[field] !== query) return;
-      const values = field === 'region' ? payload.data?.regions : field === 'city' ? payload.data?.cities : payload.data?.postcodes;
-      const key = field === 'region' ? 'regions' : field === 'city' ? 'cities' : 'postcodes';
-      setLocations((current) => ({ ...current, [key]: overrides.append ? [...current[key], ...(values || [])] : values || [] }));
-      setLocationMeta((current) => ({
-        ...current,
-        [field]: {
-          total: payload.data?.total ?? values?.length ?? 0,
-          nextCursor: field === 'city' ? undefined : payload.data?.nextCursor
-        }
-      }));
+      if (locationControllers.current[field] !== controller || locationRequestKeys.current[field] !== requestKey) return;
+      const values = field === 'region' ? payload.data?.regions : field === 'city' ? payload.data?.cities : field === 'district' ? payload.data?.districts : payload.data?.postcodes;
+      const meta = {
+        total: payload.data?.total ?? values?.length ?? 0,
+        availableTotal: payload.data?.availableTotal ?? values?.filter((option) => !option.disabled).length ?? 0,
+        nextCursor: payload.data?.nextCursor
+      };
+      setLocations((current) => ({ ...current, [optionKey]: overrides.append ? [...current[optionKey], ...(values || [])] : values || [] }));
+      setLocationMeta((current) => ({ ...current, [field]: meta }));
+      if (!overrides.append) locationCache.current.set(requestKey, { expiresAt: Date.now() + LOCATION_CACHE_TTL_MS, values: values || [], meta });
       setLocationErrors((current) => ({ ...current, [field]: '' }));
+      setLocationLoadState((current) => ({ ...current, [field]: 'ready' }));
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      if (locationControllers.current[field] !== controller || locationQueries.current[field] !== query) return;
-      setLocations((current) => ({ ...current, [`${field === 'region' ? 'regions' : field === 'city' ? 'cities' : 'postcodes'}`]: [] }));
+      if (locationControllers.current[field] !== controller || locationRequestKeys.current[field] !== requestKey) return;
+      setLocations((current) => ({ ...current, [optionKey]: [] }));
       setLocationErrors((current) => ({ ...current, [field]: t.locationLoadFailed }));
+      setLocationLoadState((current) => ({ ...current, [field]: 'error' }));
     }
   };
 
   const resetFor = (nextCountry: CountryCode, nextMode: Mode, history: 'push' | 'replace' | 'none' = 'replace') => {
     generationController.current?.abort();
-    clearPrefetchQueue();
+    abortPrefetch();
     activeRequest.current = null;
     selectionRef.current = { country: nextCountry, mode: nextMode };
-    setCountryCode(nextCountry); setMode(nextMode); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setPostcode(''); setPostcodeId('');
-    setLocations(emptyLocations); setLocationMeta({ region: { total: 0 }, city: { total: 0 }, postcode: { total: 0 } }); setAddressLanguage('native'); setError(''); setLocationErrors({}); setLoading(false); setFallbackNotice('');
+    setCountryCode(nextCountry); setMode(nextMode); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+    setLocations(emptyLocations); setLocationMeta(emptyLocationMeta); setLocationLoadState(emptyLocationLoadState); setError(''); setLocationErrors({}); setLoading(false); setFallbackNotice('');
     setResult(null); setIpRegionResult(null);
-    if (history !== 'none') updateUrl(nextCountry, nextMode, history);
-    window.setTimeout(() => void generate({
+    if (history !== 'none') updateUrl(nextCountry, history);
+    void generate({
       countryCode: nextCountry,
-      region: '', regionId: '', city: '', cityId: '', postcode: '', postcodeId: '',
+      region: '', regionId: '', city: '', cityId: '', district: '', postcode: '', postcodeId: '',
       mode: nextMode,
       strategy: 'instant'
-    }), 0);
+    });
   };
 
   const loadResidentialCountries = async (): Promise<Set<CountryCode>> => {
-    const response = await fetchWithTimeout(`${endpoint}/v1/availability`, { cache: 'default', headers: { Accept: 'application/json' } }, 8000);
+    const response = await fetchWithTimeout(`${endpoint}/v1/availability`, { headers: { Accept: 'application/json' } }, 8000);
     if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) throw new Error('COUNTRIES_UNAVAILABLE');
-    const payload = await response.json() as { data?: Array<{ code: CountryCode; residentialAvailable?: boolean }> };
-    const available = new Set((payload.data || []).filter((country) => country.residentialAvailable).map((country) => country.code));
+    const payload = await response.json() as { data?: CountryAvailability[] };
+    const records = payload.data || [];
+    const available = new Set(records.filter((country) => country.residentialAvailable).map((country) => country.code));
     residentialCountriesRef.current = available;
     setResidentialCountries(available);
     setCountriesReady(true);
@@ -483,6 +596,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     const bootstrap = async () => {
       const params = new URLSearchParams(window.location.search);
       const urlCountry = countryCodeFrom(params.get('country'));
+      const requestedCountry = urlCountry || 'US';
+      resetFor(requestedCountry, 'residential', 'replace');
+      void loadClientContext().then((value) => { if (!disposed) setIpContext(value); }).catch(() => undefined);
       const availableResult = await Promise.resolve(loadResidentialCountries()).then(
         (value) => ({ status: 'fulfilled' as const, value }),
         () => ({ status: 'rejected' as const })
@@ -497,9 +613,8 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         setCountriesReady(true);
       }
       if (userNavigated.current) return;
-      const nextCountry = selectAvailableCountry(urlCountry, available);
-      if (nextCountry) resetFor(nextCountry, 'residential', 'replace');
-      void loadClientContext().then((value) => { if (!disposed) setIpContext(value); }).catch(() => undefined);
+      const nextCountry = selectAvailableCountry(requestedCountry, available);
+      if (nextCountry && nextCountry !== requestedCountry) resetFor(nextCountry, 'residential', 'replace');
     };
     const restoreHistory = () => {
       userNavigated.current = true;
@@ -522,8 +637,20 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     window.clearTimeout(copyToastTimer.current);
     prefetchController.current?.abort();
   }, []);
+
   useEffect(() => {
-    const pageTitle = locale === 'zh-CN' ? `${selectedCountry.name[locale]}地址生成器` : `${selectedCountry.name[locale]} Address Generator`;
+    const controller = new AbortController();
+    void fetch(`${endpoint}/v1/config/country-shortcuts`, {
+      cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal
+    }).then(async (response) => {
+      if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
+      const payload = await response.json() as { data?: Partial<Record<CountryCode, CountryShortcutConfig>> };
+      if (payload.data) setShortcutConfigs(payload.data);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [endpoint]);
+  useEffect(() => {
+    const pageTitle = `${localizedCountryName(selectedCountry.code, locale, selectedCountry.name[textLocale])} · ${t.brand}`;
     document.title = `${pageTitle} | ${t.brand}`;
   }, [countryCode, locale]);
 
@@ -545,7 +672,6 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   useEffect(() => {
     if (!countriesReady || !residentialCountries.has(countryCode)) return;
     void loadOptions('region');
-    void loadOptions('city');
     return () => Object.values(locationControllers.current).forEach((controller) => controller?.abort());
   }, [countryCode, mode, countriesReady, residentialCountries]);
 
@@ -556,6 +682,20 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     resetFor(nextCountry, 'residential', 'push');
   };
 
+  const prefetchCountry = (nextCountry: CountryCode) => {
+    if (nextCountry === countryCode) return;
+    const spec: GenerationRequestSpec = {
+      country: nextCountry,
+      mode: 'residential',
+      region: '', regionId: '', city: '', cityId: '', district: '', postcode: '', postcodeId: '',
+      ipRegion: false,
+      ip: ''
+    };
+    const key = queueKeyFor(spec);
+    if ((prefetchedResults.current.get(key) || []).length) return;
+    void fillPrefetchQueue(spec, key);
+  };
+
   const generate = async (overrides: GenerationOptions = {}) => {
     const context = {
       requestId: createRequestId(), country: overrides.countryCode ?? countryCode, mode: overrides.mode ?? mode
@@ -564,6 +704,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     const nextRegionId = overrides.regionId ?? regionId;
     const nextCity = overrides.city ?? city;
     const nextCityId = overrides.cityId ?? cityId;
+    const nextDistrict = overrides.district ?? district;
     const nextPostcode = overrides.postcode ?? postcode;
     const nextPostcodeId = overrides.postcodeId ?? postcodeId;
     const strategy = overrides.strategy || 'random';
@@ -575,20 +716,21 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
       regionId: nextRegionId,
       city: nextCity,
       cityId: nextCityId,
+      district: nextDistrict,
       postcode: nextPostcode,
       postcodeId: nextPostcodeId,
       ipRegion: Boolean(overrides.ipRegion),
-      ip: requestedIp,
-      live: liveApiRef.current
+      ip: requestedIp
     };
     const queueKey = queueKeyFor(spec);
-    if (spec.ipRegion || spec.live) clearPrefetchQueue();
-    if (!spec.ipRegion && !spec.live && strategy === 'random' && selectionRef.current.country === spec.country && selectionRef.current.mode === spec.mode) {
+    if (spec.ipRegion) abortPrefetch();
+    if (!spec.ipRegion && selectionRef.current.country === spec.country && selectionRef.current.mode === spec.mode) {
       const queue = prefetchedResults.current.get(queueKey);
       const queued = queue?.shift();
       if (queued) {
         generationController.current?.abort(); activeRequest.current = null;
-        setResult(queued); setAddressLanguage('native'); setIpRegionResult(null); setError(''); setFallbackNotice(''); setLoading(false);
+        rememberAddress(queueKey, queued.address.id);
+        setResult(queued); setIpRegionResult(null); setError(''); setFallbackNotice(''); setLoading(false);
         void fillPrefetchQueue(spec, queueKey);
         return;
       }
@@ -622,9 +764,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         userNavigated.current = true;
         selectionRef.current = { country: nextCountry, mode: context.mode };
         window.sessionStorage.setItem(countrySessionKey, nextCountry);
-        setCountryCode(nextCountry); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setPostcode(''); setPostcodeId('');
-        setLocations(emptyLocations); setLocationMeta({ region: { total: 0 }, city: { total: 0 }, postcode: { total: 0 } });
-        updateUrl(nextCountry, context.mode, 'replace');
+        setCountryCode(nextCountry); setRegion(''); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+        setLocations(emptyLocations); setLocationMeta(emptyLocationMeta);
+        updateUrl(nextCountry, 'replace');
         setIpRegionResult({ matchLevel: payload.data.ipMatchLevel, ...payload.data.ipRegion });
         void loadOptions('region', '', { country: nextCountry, residential: context.mode === 'residential', region: '', regionId: '', cityId: '' });
         void loadOptions('city', '', { country: nextCountry, residential: context.mode === 'residential', region: '', regionId: '', cityId: '' });
@@ -632,15 +774,17 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         setIpRegionResult(null);
         const level = payload.data.filterMatchLevel;
         setFallbackNotice(level === 'nearby' ? t.fallbackNearby : level === 'region' ? t.fallbackRegion : level === 'country' ? t.fallbackCountry : '');
-        if (!spec.live && payload.data.sourcesTried?.includes('address-pool-v2')) void fillPrefetchQueue(spec, queueKey);
+        if (payload.data.eligibleCount) eligibleCounts.current.set(queueKey, payload.data.eligibleCount);
+        void fillPrefetchQueue(spec, queueKey);
       }
-      setResult(payload.data.result); setAddressLanguage('native');
+      if (!overrides.ipRegion) rememberAddress(queueKey, payload.data.result.address.id);
+      setResult(payload.data.result);
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
       if (activeRequest.current?.requestId !== context.requestId) return;
       if (!overrides.ipRegion) setResult(null);
       const errorCode = reason instanceof Error ? reason.message : 'API_ERROR';
-      setAddressLanguage('native'); setError(t[generationErrorMessageKey(errorCode, Boolean(overrides.ipRegion))]);
+      setError(t[generationErrorMessageKey(errorCode, Boolean(overrides.ipRegion))]);
     } finally {
       if (activeRequest.current?.requestId === context.requestId) setLoading(false);
     }
@@ -652,11 +796,12 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   };
 
   const submit = (event: SyntheticEvent<HTMLFormElement, SubmitEvent>) => { event.preventDefault(); void generate(); };
-  const showCopyToast = (kind: 'success' | 'error') => {
+  const showToastMessage = (kind: 'success' | 'error', message: string) => {
     window.clearTimeout(copyToastTimer.current);
-    setCopyToast({ kind, message: kind === 'success' ? t.copySuccess : t.copyFailed });
+    setCopyToast({ kind, message });
     copyToastTimer.current = window.setTimeout(() => { setCopyToast(null); setCopied(''); }, 2200);
   };
+  const showCopyToast = (kind: 'success' | 'error') => showToastMessage(kind, kind === 'success' ? t.copySuccess : t.copyFailed);
   const fallbackCopy = (value: string): boolean => {
     const textarea = document.createElement('textarea');
     textarea.value = value;
@@ -688,16 +833,16 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     }
   };
   const applyShortcut = (shortcut: LocationShortcut) => {
-    clearPrefetchQueue();
+    abortPrefetch();
     const overrides: GenerationOptions = {};
     if (shortcut.type === 'region') {
-      setRegion(shortcut.value); setRegionId(''); setCity(''); setCityId(''); setPostcode(''); setPostcodeId('');
-      Object.assign(overrides, { region: shortcut.value, regionId: '', city: '', cityId: '', postcode: '', postcodeId: '' });
+      setRegion(shortcut.value); setRegionId(''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+      Object.assign(overrides, { region: shortcut.value, regionId: '', city: '', cityId: '', district: '', postcode: '', postcodeId: '' });
       void loadOptions('city', '', { region: shortcut.value, regionId: '' });
     }
     if (shortcut.type === 'city') {
-      setCity(shortcut.value); setCityId(''); setPostcode(''); setPostcodeId('');
-      Object.assign(overrides, { city: shortcut.value, cityId: '', postcode: '', postcodeId: '' });
+      setCity(shortcut.value); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+      Object.assign(overrides, { city: shortcut.value, cityId: '', district: '', postcode: '', postcodeId: '' });
     }
     if (shortcut.type === 'postcode') {
       setPostcode(shortcut.value); setPostcodeId('');
@@ -705,16 +850,101 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
     }
     void generate(overrides);
   };
+  const changeAddressLanguage = (language: AddressDisplayLanguage) => {
+    setAddressLanguage(language);
+    storeDisplayLanguage(addressLanguageStorageKey, language);
+  };
+  const changeProfileLanguage = (language: ProfileLanguage) => {
+    setProfileLanguage(language);
+    storeDisplayLanguage(profileLanguageStorageKey, language);
+  };
+  const toggleFavorite = async () => {
+    if (!result) return;
+    const id = favoriteIdFor(result);
+    try {
+      if (favoriteIds.has(id)) {
+        await removeFavorite(id);
+        showToastMessage('success', favoritesCopy[locale].removed);
+      } else {
+        await saveFavorite(result);
+        showToastMessage('success', favoritesCopy[locale].saved);
+      }
+      await refreshFavoriteState();
+    } catch {
+      showToastMessage('error', t.copyFailed);
+    }
+  };
 
-  const localeUrl = `/${locale === 'en' ? 'zh-CN' : 'en'}/?country=${countryCode.toLowerCase()}&mode=residential`;
-  const presentation = result?.addressFormats[addressLanguage];
-  const components = result?.address.componentVariants[addressLanguage];
+  // Unified display pipeline for every selected locale: a locale matching the
+  // address's own language renders the stored native variant; en/zh-CN render
+  // the stored variant only when every semantic component already reads in the
+  // target script; every other case goes through the translation endpoint.
+  const storedVariantTrusted = Boolean(result) && (addressLanguage === 'en' || addressLanguage === 'zh-CN')
+    && storedVariantLooksLocalized(result!.address.componentVariants[addressLanguage], addressLanguage);
+  const untrustedAddressLanguage = Boolean(result) && addressLanguage !== 'native'
+    && !matchesNativeLanguage(addressLanguage, result!.address.nativeLanguage)
+    && !storedVariantTrusted;
+  const translationKey = result && untrustedAddressLanguage ? `${result.address.id}:${addressLanguage}` : '';
+
+  useEffect(() => {
+    if (!translationKey || !result || addressTranslations[translationKey]) return;
+    const controller = new AbortController();
+    const request = { addressId: result.address.id, targetLocale: addressLanguage };
+    void (async () => {
+      let entry: AddressTranslation = { status: 'fallback' };
+      try {
+        const response = await fetchWithTimeout(`${endpoint}/v1/address-translation`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify(request),
+          signal: controller.signal
+        }, TRANSLATION_REQUEST_TIMEOUT_MS);
+        if (response.ok && response.headers.get('content-type')?.includes('application/json')) {
+          const payload = await response.json() as { data?: { components?: AddressComponents; lines?: string[]; singleLine?: string } };
+          if (payload.data?.components && payload.data.lines?.length && payload.data.singleLine) {
+            entry = { status: 'ready', components: payload.data.components, postalLines: payload.data.lines, singleLine: payload.data.singleLine };
+          }
+        }
+      } catch (reason) {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return;
+      }
+      setAddressTranslations((current) => {
+        const entries = Object.entries(current);
+        const bounded = entries.length >= 60 ? Object.fromEntries(entries.slice(-30)) : current;
+        return { ...bounded, [translationKey]: entry };
+      });
+    })();
+    return () => controller.abort();
+  }, [translationKey]);
+
+  const translationEntry = translationKey ? addressTranslations[translationKey] : undefined;
+  const translationReady = translationEntry?.status === 'ready';
+  const translationLoading = Boolean(translationKey) && !translationEntry;
+  // An untrusted display locale renders the server translation when it is
+  // ready and the complete original address otherwise — never a mixed line.
+  const displayedAddressLanguage: AddressDisplayLanguage = untrustedAddressLanguage && !translationReady ? 'native' : addressLanguage;
+  const presentation = result
+    ? translationReady
+      ? { language: 'native' as const, postalLines: translationEntry.postalLines, singleLine: translationEntry.singleLine }
+      : addressDisplayPresentation(result, displayedAddressLanguage, locale)
+    : undefined;
+  const components = result
+    ? translationReady
+      ? translationEntry.components
+      : addressDisplayComponents(result, displayedAddressLanguage)
+    : undefined;
   const source = result?.address.evidence[0];
-  const fullCopy = result && presentation ? [presentation.singleLine, result.profile.fullName, result.profile.phone, result.profile.email].join('\n') : '';
+  const profileLocale = resolvedProfileLocale(profileLanguage, countryCode);
+  const profileValueText = profileLocale ? messages[profileLocale] : t;
+  const profilePresentation = profileLocale ? result?.profilePresentations?.[profileLocale] : undefined;
+  const displayedFullName = profilePresentation?.fullName || result?.profile.fullName || '';
+  const fullCopy = result && presentation ? [presentation.singleLine, displayedFullName, result.profile.phone, result.profile.email].join('\n') : '';
   const rowProps = { copy, copied, copyLabel: t.copy };
-  const resultFields = addressSchema.resultFields.map(({ field, label }) => ({ field, label: label[locale] }));
+  const profileRowProps = { copy, copied, copyLabel: t.copy };
+  const selectedCountryName = localizedCountryName(selectedCountry.code, locale, selectedCountry.name[textLocale]);
+  const resultFields = addressSchema.resultFields.map(({ field, label }) => ({ field, label: label[textLocale] }));
   const resultValues: Record<AddressResultField, string | undefined> = {
-    country: selectedCountry.name[locale],
+    country: addressDisplayCountryName(selectedCountry.code, displayedAddressLanguage, locale),
     buildingName: components?.buildingName,
     street: result && components ? streetValue(result.address.countryCode, components) : undefined,
     completeAddress: presentation?.singleLine,
@@ -736,14 +966,19 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   const googleMapEnabled = Boolean(mapDisplay?.googleEnabled);
   const amapMapEnabled = Boolean(mapDisplay?.amapEnabled && mapDisplay.amapConfigured && mapDisplay.amapApiKey && mapDisplay.serviceHost);
   const mapPreviewEnabled = googleMapEnabled || amapMapEnabled;
-  const currency = (amount: number, code: string) => new Intl.NumberFormat(locale, { style: 'currency', currency: code, maximumFractionDigits: 0 }).format(amount);
+  const profileCurrency = (amount: number, code: string) => new Intl.NumberFormat(profileLocale || locale, { style: 'currency', currency: code, maximumFractionDigits: 0 }).format(amount);
 
   return <div className="site-shell">
     <header className="topbar">
       <a className="logo" href={`/${locale}/`}><b>{t.brand}</b></a>
       <nav className="top-links">
+        <a className="favorites-link" href={`/${locale}/favorites/`} aria-label={favoritesCopy[locale].title} title={favoritesCopy[locale].title}><Bookmark size={17} aria-hidden="true"/>{favoriteCount > 0 && <span>{favoriteCount > 99 ? '99+' : favoriteCount}</span>}</a>
+        <a className="monitor-link" href={`/${locale}/monitor/`}><Activity size={17} aria-hidden="true" /><span>{monitorLabels[locale]}</span></a>
         <a href={`/${locale}/api/`}>{t.apiDocs}</a>
-        <a className="language" href={localeUrl}>{t.language}</a>
+        <select className="language-select" aria-label="Language" value={locale} onChange={(event) => {
+          const target = pathForLocale(window.location.pathname, event.target.value as Locale);
+          window.location.assign(`${target}${window.location.search}${window.location.hash}`);
+        }}>{localeDefinitions.map((definition) => <option key={definition.code} value={definition.code}>{definition.label}</option>)}</select>
         <a className="github-link" href="https://github.com/daimon3332/address" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.23.7-3.91-1.37-3.91-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.39.97.1-.75.4-1.27.74-1.56-2.58-.3-5.29-1.29-5.29-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18A10.9 10.9 0 0 1 12 6.08c.98 0 1.95.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.72 5.39-5.3 5.68.42.36.79 1.07.79 2.15v3.26c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" /></svg>
         </a>
@@ -755,7 +990,7 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         : !visibleCountries.length ? <section className="panel availability-state">{t.noCountriesAvailable}</section> : <>
       <section className="country-browser" aria-label={t.countryRegion}>
         {countryGroups.map(({ group, countries: items }) => <div className="country-group" key={group}>
-          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`https://flagcdn.com/24x18/${country.code.toLowerCase()}.png`} width="24" height="18" alt=""/>{country.name[locale]}</button>)}</div>
+          <h2>{t[groupMessage[group]]}</h2><div>{items.map((country) => <button type="button" key={country.code} aria-current={country.code === countryCode ? 'page' : undefined} className={country.code === countryCode ? 'active' : ''} onMouseEnter={() => prefetchCountry(country.code)} onFocus={() => prefetchCountry(country.code)} onClick={() => changeCountry(country.code)}><img className="country-flag" src={`https://flagcdn.com/24x18/${country.code.toLowerCase()}.png`} width="24" height="18" alt=""/>{localizedCountryName(country.code, locale, country.name[textLocale])}</button>)}</div>
         </div>)}
       </section>
 
@@ -771,69 +1006,83 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
             {ipRegionResult && <div className="ip-region-result"><span><b>{t.matchLevel}</b>{ipMatchLabel}</span><span>{[ipRegionResult.targetRegion, ipRegionResult.targetCity].filter(Boolean).join(' · ')}</span>{ipRegionResult.distanceKm !== undefined && <span>{ipRegionResult.distanceKm.toFixed(1)} km</span>}</div>}
           </section>
           <section className="generator-card panel">
-            <header className="generator-heading"><div><span>{t.residentialMode}</span><h1>{locale === 'zh-CN' ? `${selectedCountry.name[locale]}地址生成器` : `${selectedCountry.name[locale]} Address Generator`}</h1></div></header>
+            <header className="generator-heading"><h1>{generatorTitle(selectedCountryName, locale, t.residentialMode)}</h1></header>
             <form className={`filter-grid filters-${filterFields.length}`} onSubmit={submit}>
-              {filterFields.includes('region') && <Combobox label={selectedCountry.searchLabels.region[locale]} value={region} options={locations.regions} placeholder={t.allRegions} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
-                clearPrefetchQueue();
-                setRegion(value); setRegionId(option.id || ''); setCity(''); setCityId(''); setPostcode(''); setPostcodeId('');
+              {filterFields.includes('region') && <Combobox locale={locale} label={selectedCountry.searchLabels.region[textLocale]} value={region} options={locations.regions} placeholder={t.allRegions} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.region} state={locationLoadState.region} total={locationMeta.region.total} hasMore={Boolean(locationMeta.region.nextCursor)} onOpen={() => void loadOptions('region')} onRetry={() => void loadOptions('region', locationQueries.current.region)} onLoadMore={() => loadOptions('region', locationQueries.current.region, { cursor: locationMeta.region.nextCursor, append: true })} onSearch={(query) => loadOptions('region', query)} onChange={(value, option) => {
+                abortPrefetch();
+                setRegion(value); setRegionId(option.id || ''); setCity(''); setCityId(''); setDistrict(''); setPostcode(''); setPostcodeId('');
+                setLocations((current) => ({ ...current, cities: [], districts: [], postcodes: [] }));
+                setLocationMeta((current) => ({ ...current, city: emptyLocationMeta.city, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
+                setLocationLoadState((current) => ({ ...current, city: 'idle', district: 'idle', postcode: 'idle' }));
+                setLocationErrors((current) => ({ ...current, city: '', district: '', postcode: '' }));
                 void loadOptions('city', '', { region: value, regionId: option.id || '' });
               }}/>}
-              {filterFields.includes('city') && <Combobox label={selectedCountry.searchLabels.city[locale]} value={city} options={locations.cities} placeholder={t.allCities} total={locationMeta.city.total} clientFilter onChange={(value, option) => {
-                clearPrefetchQueue();
-                setCity(value); setCityId(option.id || ''); setPostcode(''); setPostcodeId('');
+              {filterFields.includes('city') && <Combobox locale={locale} label={selectedCountry.searchLabels.city[textLocale]} value={city} options={locations.cities} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.city} state={locationLoadState.city} total={locationMeta.city.total} hasMore={Boolean(locationMeta.city.nextCursor)} onOpen={() => void loadOptions('city')} onRetry={() => void loadOptions('city', locationQueries.current.city)} onLoadMore={() => loadOptions('city', locationQueries.current.city, { cursor: locationMeta.city.nextCursor, append: true })} onSearch={(query) => loadOptions('city', query)} onChange={(value, option) => {
+                abortPrefetch();
+                setCity(value); setCityId(option.id || ''); setDistrict(''); setPostcode(''); setPostcodeId('');
+                setLocations((current) => ({ ...current, districts: [], postcodes: [] }));
+                setLocationMeta((current) => ({ ...current, district: emptyLocationMeta.district, postcode: emptyLocationMeta.postcode }));
+                setLocationLoadState((current) => ({ ...current, district: 'idle', postcode: 'idle' }));
+                setLocationErrors((current) => ({ ...current, district: '', postcode: '' }));
                 if (value && option.regionId && option.regionValue) { setRegion(option.regionValue); setRegionId(option.regionId); }
+                if (filterFields.includes('district')) void loadOptions('district', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
                 if (filterFields.includes('postcode')) void loadOptions('postcode', '', { regionId: option.regionId || regionId, cityId: option.id || '' });
               }}/>}
-              {filterFields.includes('postcode') && <Combobox label={selectedCountry.searchLabels.postcode[locale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
-                clearPrefetchQueue();
+              {filterFields.includes('district') && <Combobox locale={locale} label={(selectedCountry.searchLabels.district || selectedCountry.searchLabels.city)[textLocale]} value={district} options={locations.districts} placeholder={t.allCities} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.district} state={locationLoadState.district} total={locationMeta.district.total} hasMore={Boolean(locationMeta.district.nextCursor)} onOpen={() => void loadOptions('district')} onRetry={() => void loadOptions('district', locationQueries.current.district)} onLoadMore={() => loadOptions('district', locationQueries.current.district, { cursor: locationMeta.district.nextCursor, append: true })} onSearch={(query) => loadOptions('district', query)} onChange={(value) => {
+                abortPrefetch();
+                setDistrict(value);
+              }}/>}
+              {filterFields.includes('postcode') && <Combobox locale={locale} label={selectedCountry.searchLabels.postcode[textLocale]} value={postcode} options={locations.postcodes} placeholder={t.allPostcodes} unavailableLabel={t.noAddressOption} loadingLabel={t.loading} errorLabel={locationErrors.postcode} state={locationLoadState.postcode} total={locationMeta.postcode.total} hasMore={Boolean(locationMeta.postcode.nextCursor)} onOpen={() => void loadOptions('postcode')} onRetry={() => void loadOptions('postcode', locationQueries.current.postcode)} onLoadMore={() => loadOptions('postcode', locationQueries.current.postcode, { cursor: locationMeta.postcode.nextCursor, append: true })} onSearch={(query) => loadOptions('postcode', query)} onChange={(value, option) => {
+                abortPrefetch();
                 setPostcode(value); setPostcodeId(option.id || '');
                 if (value && option.parentId && option.parentValue) { setCity(option.parentValue); setCityId(option.parentId); }
                 if (value && option.regionId && option.regionValue) { setRegion(option.regionValue); setRegionId(option.regionId); }
               }}/>}
               <button className="generate-button" disabled={loading} type="submit">{loading ? t.generating : t.generate}</button>
             </form>
-            <label className="live-api-toggle"><input type="checkbox" checked={liveApi} onChange={(event) => { liveApiRef.current = event.target.checked; setLiveApi(event.target.checked); }}/><span><b>{t.liveApiLabel}</b>{t.liveApiHint}</span></label>
             {(error || locationError) && <div className="compact-error" role="alert">{error || locationError}</div>}
             {!error && !locationError && fallbackNotice && <div className="compact-notice" role="status">{fallbackNotice}</div>}
           </section>
 
           {result && presentation && components && <>
             <section className="address-card panel">
-              <header className="section-heading"><h2>{t.address}</h2><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></header>
-              <div className="language-tabs" role="tablist">{([['native', t.originalAddress], ['en', t.englishAddress], ['zh-CN', t.chineseAddress]] as Array<[AddressLanguage, string]>).map(([language, label]) => <button type="button" role="tab" aria-selected={addressLanguage === language} className={addressLanguage === language ? 'active' : ''} key={language} onClick={() => setAddressLanguage(language)}>{label}</button>)}</div>
-              <div className="address-table">
+              <header className="section-heading"><h2>{t.address}</h2><span className="address-heading-actions"><button type="button" className={`favorite-toggle ${favoriteIds.has(favoriteIdFor(result)) ? 'active' : ''}`} aria-pressed={favoriteIds.has(favoriteIdFor(result))} aria-label={favoritesCopy[locale].save} title={favoritesCopy[locale].save} onClick={() => void toggleFavorite()}><Bookmark aria-hidden="true"/></button><button type="button" className="text-button" onClick={() => void copy('all', fullCopy)}>{copied === 'all' ? t.copied : t.copyAll}</button></span></header>
+              <AddressLanguageControl value={addressLanguage} onChange={changeAddressLanguage} locale={locale} />
+              <div className="address-table" aria-busy={translationLoading || undefined} style={translationLoading ? { opacity: 0.55, transition: 'opacity .2s' } : undefined}>
                 {resultFields.map(({ field, label }) => {
                   const value = resultValues[field];
                   return value?.trim() ? <ResultRow key={field} id={field} label={label} value={value} {...rowProps}/> : null;
                 })}
               </div>
-              <div className="address-format-grid">
+              <div className="address-format-grid" aria-busy={translationLoading || undefined} style={translationLoading ? { opacity: 0.55, transition: 'opacity .2s' } : undefined}>
                 <AddressBlock title={t.standardAddress} copyLabel={copied === 'postal' ? t.copied : t.copy} onCopy={() => void copy('postal', presentation.postalLines.join('\n'))}><address>{presentation.postalLines.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</address></AddressBlock>
                 <AddressBlock title={t.singleLine} copyLabel={copied === 'single' ? t.copied : t.copy} onCopy={() => void copy('single', presentation.singleLine)}><p>{presentation.singleLine}</p></AddressBlock>
               </div>
               <div className="address-meta"><span><b>{t.propertyType}</b>{result.address.propertyType === 'apartment' ? t.apartment : result.address.propertyType === 'residential' ? t.residential : t.unknown}</span>{result.generatedUnit?.provenance === 'synthetic' && <span><b>{t.unitSource}</b>{t.syntheticUnit}</span>}{source && <span><b>{t.source}</b><a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.sourceName}</a></span>}{source?.sourceLicense && <span><b>{t.license}</b>{source.sourceLicenseUrl ? <a href={source.sourceLicenseUrl} target="_blank" rel="noreferrer">{source.sourceLicense}</a> : source.sourceLicense}</span>}</div>
             </section>
 
+            <ProfileLanguageControl value={profileLanguage} onChange={changeProfileLanguage} locale={locale} />
+
             <div className="details-grid">
-              <section className="profile-card panel"><header className="section-heading"><h2>{t.basicProfile}</h2><SectionLanguageTabs value={sectionLanguages.profile} onChange={(language) => setSectionLanguage('profile', language)} labels={[t.originalAddress, t.englishAddress, t.chineseAddress]}/></header><ResultRow id="name" label={t.fullName} value={result.profile.fullName} {...rowProps}/><ResultRow id="gender" label={t.gender} value={t[result.profile.gender]} {...rowProps}/><ResultRow id="birth" label={t.birthDate} value={result.profile.dateOfBirth} {...rowProps}/><ResultRow id="phone" label={t.phone} value={result.profile.phone} {...rowProps}/><ResultRow id="email" label={t.email} value={result.profile.email} {...rowProps}/>{extensions && <><ResultRow id="age" label={t.age} value={String(extensions.basic.age)} {...rowProps}/><ResultRow id="honorific" label={t.honorific} value={profileValue(extensions.basic.honorific, sectionLanguages.profile, countryCode)} {...rowProps}/><ResultRow id="zodiac" label={t.zodiacSign} value={profileValue(extensions.basic.zodiacSign, sectionLanguages.profile, countryCode)} {...rowProps}/><ResultRow id="height" label={t.height} value={`${extensions.basic.heightCm} cm`} {...rowProps}/><ResultRow id="weight" label={t.weight} value={`${extensions.basic.weightKg} kg`} {...rowProps}/><ResultRow id="bmi" label={t.bmi} value={String(extensions.basic.bmi)} {...rowProps}/><ResultRow id="blood" label={t.bloodType} value={extensions.basic.bloodType} {...rowProps}/><ResultRow id="education" label={t.education} value={profileValue(extensions.basic.education, sectionLanguages.profile, countryCode)} {...rowProps}/></>}</section>
-              <section className="card-section panel"><header className="section-heading"><h2>{t.testCard}</h2></header><p className="sandbox-notice">{t.cardNotice}</p><ResultRow id="card-holder" label={t.fullName} value={result.profile.fullName} {...rowProps}/><ResultRow id="card-network" label={t.cardNetwork} value={result.card.network} {...rowProps}/><ResultRow id="card" label={t.testCard} value={result.card.number} {...rowProps}/><ResultRow id="expiry" label={t.expiry} value={result.card.expiry} {...rowProps}/><ResultRow id="cvc" label={t.cvc} value={result.card.cvc} {...rowProps}/></section>
+              <section className="profile-card panel"><header className="section-heading"><h2>{t.basicProfile}</h2></header><ResultRow id="name" label={t.fullName} value={displayedFullName} {...profileRowProps}/><ResultRow id="gender" label={t.gender} value={profileValueText[result.profile.gender]} {...profileRowProps}/><ResultRow id="birth" label={t.birthDate} value={result.profile.dateOfBirth} {...profileRowProps}/><ResultRow id="phone" label={t.phone} value={result.profile.phone} {...profileRowProps}/><ResultRow id="email" label={t.email} value={result.profile.email} {...profileRowProps}/>{extensions && <><ResultRow id="age" label={t.age} value={String(extensions.basic.age)} {...profileRowProps}/><ResultRow id="honorific" label={t.honorific} value={profileValue(extensions.basic.honorific, profileLanguage, countryCode)} {...profileRowProps}/><ResultRow id="zodiac" label={t.zodiacSign} value={profileValue(extensions.basic.zodiacSign, profileLanguage, countryCode)} {...profileRowProps}/><ResultRow id="height" label={t.height} value={`${extensions.basic.heightCm} cm`} {...profileRowProps}/><ResultRow id="weight" label={t.weight} value={`${extensions.basic.weightKg} kg`} {...profileRowProps}/><ResultRow id="bmi" label={t.bmi} value={String(extensions.basic.bmi)} {...profileRowProps}/><ResultRow id="blood" label={t.bloodType} value={extensions.basic.bloodType} {...profileRowProps}/><ResultRow id="education" label={t.education} value={profileValue(extensions.basic.education, profileLanguage, countryCode)} {...profileRowProps}/></>}</section>
+              <section className="card-section panel"><header className="section-heading"><h2>{t.testCard}</h2></header><p className="sandbox-notice">{t.cardNotice}</p><ResultRow id="card-holder" label={t.fullName} value={displayedFullName} {...profileRowProps}/><ResultRow id="card-network" label={t.cardNetwork} value={result.card.network} {...profileRowProps}/><ResultRow id="card" label={t.testCard} value={result.card.number} {...profileRowProps}/><ResultRow id="expiry" label={t.expiry} value={result.card.expiry} {...profileRowProps}/><ResultRow id="cvc" label={t.cvc} value={result.card.cvc} {...profileRowProps}/></section>
             </div>
 
             {extensions && <div className="extension-grid">
               <section className="extension-section panel">
-                <header className="section-heading"><h2>{t.employment}</h2><SectionLanguageTabs value={sectionLanguages.employment} onChange={(language) => setSectionLanguage('employment', language)} labels={[t.originalAddress, t.englishAddress, t.chineseAddress]}/></header>
-                <ResultRow id="employment-status" label={t.employmentStatus} value={profileValue(extensions.employment.employmentStatus, sectionLanguages.employment, countryCode)} {...rowProps}/>
+                <header className="section-heading"><h2>{t.employment}</h2></header>
+                <ResultRow id="employment-status" label={t.employmentStatus} value={profileValue(extensions.employment.employmentStatus, profileLanguage, countryCode)} {...profileRowProps}/>
                 {hasEmploymentDetails(extensions.employment) && <>
-                  <ResultRow id="work-schedule" label={t.workSchedule} value={profileValue(extensions.employment.workSchedule, sectionLanguages.employment, countryCode)} {...rowProps}/>
-                  <ResultRow id="occupation" label={t.occupation} value={profileValue(extensions.employment.occupation, sectionLanguages.employment, countryCode)} {...rowProps}/>
-                  <ResultRow id="company" label={t.company} value={extensions.employment.company} {...rowProps}/>
-                  <ResultRow id="department" label={t.department} value={profileValue(extensions.employment.department, sectionLanguages.employment, countryCode)} {...rowProps}/>
-                  <ResultRow id="company-size" label={t.companySize} value={extensions.employment.companySize} {...rowProps}/>
-                  <ResultRow id="salary" label={t.salary} value={currency(extensions.employment.salary.amount, extensions.employment.salary.currency)} {...rowProps}/>
+                  <ResultRow id="work-schedule" label={t.workSchedule} value={profileValue(extensions.employment.workSchedule, profileLanguage, countryCode)} {...profileRowProps}/>
+                  <ResultRow id="occupation" label={t.occupation} value={profileValue(extensions.employment.occupation, profileLanguage, countryCode)} {...profileRowProps}/>
+                  <ResultRow id="company" label={t.company} value={profilePresentation?.company || extensions.employment.company} {...profileRowProps}/>
+                  <ResultRow id="department" label={t.department} value={profileValue(extensions.employment.department, profileLanguage, countryCode)} {...profileRowProps}/>
+                  <ResultRow id="company-size" label={t.companySize} value={extensions.employment.companySize} {...profileRowProps}/>
+                  <ResultRow id="salary" label={t.salary} value={profileCurrency(extensions.employment.salary.amount, extensions.employment.salary.currency)} {...profileRowProps}/>
                 </>}
               </section>
-              <section className="extension-section panel"><header className="section-heading"><h2>{t.finance}</h2><SectionLanguageTabs value={sectionLanguages.finance} onChange={(language) => setSectionLanguage('finance', language)} labels={[t.originalAddress, t.englishAddress, t.chineseAddress]}/></header><ResultRow id="account-name" label={t.accountDisplayName} value={profileValue(extensions.finance.accountDisplayName, sectionLanguages.finance, countryCode)} {...rowProps}/>{extensions.finance.incomeRange && <ResultRow id="income" label={t.incomeRange} value={`${currency(extensions.finance.incomeRange.min, extensions.finance.incomeRange.currency)} - ${currency(extensions.finance.incomeRange.max, extensions.finance.incomeRange.currency)}`} {...rowProps}/>}<ResultRow id="transaction" label={t.transactionDescription} value={extensions.finance.transactionDescription} {...rowProps}/></section>
-              <section className="extension-section panel extension-wide"><header className="section-heading"><h2>{t.internetProfile}</h2><SectionLanguageTabs value={sectionLanguages.internet} onChange={(language) => setSectionLanguage('internet', language)} labels={[t.originalAddress, t.englishAddress, t.chineseAddress]}/></header><div className="extension-columns"><div><ResultRow id="username" label={t.username} value={extensions.internet.username} {...rowProps}/><ResultRow id="password" label={t.testPassword} value={extensions.internet.testPassword} {...rowProps}/><ResultRow id="os" label={t.operatingSystem} value={extensions.internet.os} {...rowProps}/><ResultRow id="user-agent" label={t.userAgent} value={extensions.internet.userAgent} {...rowProps}/></div><div><ResultRow id="ip" label={t.ipAddress} value={extensions.internet.ipAddress} {...rowProps}/><ResultRow id="mac" label={t.macAddress} value={extensions.internet.macAddress} {...rowProps}/><ResultRow id="uuid" label={t.uuid} value={extensions.internet.uuid} {...rowProps}/><ResultRow id="profile-url" label={t.personalUrl} value={extensions.internet.url} {...rowProps}/><ResultRow id="security-question" label={t.securityQuestion} value={profileValue(extensions.internet.securityQuestion, sectionLanguages.internet, countryCode)} {...rowProps}/><ResultRow id="security-answer" label={t.securityAnswer} value={extensions.internet.securityAnswer} {...rowProps}/></div></div></section>
+              <section className="extension-section panel"><header className="section-heading"><h2>{t.finance}</h2></header><ResultRow id="account-name" label={t.accountDisplayName} value={profilePresentation?.accountDisplayName || extensions.finance.accountDisplayName} {...profileRowProps}/>{extensions.finance.incomeRange && <ResultRow id="income" label={t.incomeRange} value={`${profileCurrency(extensions.finance.incomeRange.min, extensions.finance.incomeRange.currency)} - ${profileCurrency(extensions.finance.incomeRange.max, extensions.finance.incomeRange.currency)}`} {...profileRowProps}/>}<ResultRow id="transaction" label={t.transactionDescription} value={profilePresentation?.transactionDescription || extensions.finance.transactionDescription} {...profileRowProps}/></section>
+              <section className="extension-section panel extension-wide"><header className="section-heading"><h2>{t.internetProfile}</h2></header><div className="extension-columns"><div><ResultRow id="username" label={t.username} value={extensions.internet.username} {...profileRowProps}/><ResultRow id="password" label={t.testPassword} value={extensions.internet.testPassword} {...profileRowProps}/><ResultRow id="os" label={t.operatingSystem} value={extensions.internet.os} {...profileRowProps}/><ResultRow id="user-agent" label={t.userAgent} value={extensions.internet.userAgent} {...profileRowProps}/></div><div><ResultRow id="ip" label={t.ipAddress} value={extensions.internet.ipAddress} {...profileRowProps}/><ResultRow id="mac" label={t.macAddress} value={extensions.internet.macAddress} {...profileRowProps}/><ResultRow id="uuid" label={t.uuid} value={extensions.internet.uuid} {...profileRowProps}/><ResultRow id="profile-url" label={t.personalUrl} value={extensions.internet.url} {...profileRowProps}/><ResultRow id="security-question" label={t.securityQuestion} value={profileValue(extensions.internet.securityQuestion, profileLanguage, countryCode)} {...profileRowProps}/><ResultRow id="security-answer" label={t.securityAnswer} value={profilePresentation?.securityAnswer || extensions.internet.securityAnswer} {...profileRowProps}/></div></div></section>
             </div>}
 
             {mapPreviewEnabled && <section className="map-section panel">
@@ -854,8 +1103,9 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
         </div>
 
         <aside className="quick-sidebar">
-          <ShortcutSection title={t.popularCities} items={residential ? selectedCountry.popularCities.filter((item) => locations.cities.some((cityOption) => sameLocation(cityOption.value, item.value))) : selectedCountry.popularCities} locale={locale} apply={applyShortcut}/>
-          <ShortcutSection title={t.adminShortcuts} items={residential ? selectedCountry.adminShortcuts.filter((item) => locations.regions.some((regionOption) => sameLocation(regionOption.value, item.value))) : selectedCountry.adminShortcuts} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="special" title={selectedShortcuts.specialAreaTitle[textLocale] || t.specialAreas} items={selectedShortcuts.specialAreas} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="admin" title={t.adminShortcuts} items={selectedShortcuts.adminShortcuts} locale={locale} apply={applyShortcut}/>
+          <ShortcutSection tone="cities" title={t.popularCities} items={selectedShortcuts.popularCities} locale={locale} apply={applyShortcut}/>
         </aside>
       </div>
       </>}
@@ -865,9 +1115,15 @@ export default function App({ locale, apiBaseUrl }: AppProps) {
   </div>;
 }
 
-function Combobox({ label, value, options, placeholder, total, hasMore = false, clientFilter = false, onLoadMore, onChange, onSearch }: {
-  label: string; value: string; options: LocationOption[]; placeholder: string;
-  total: number; hasMore?: boolean; clientFilter?: boolean; onLoadMore?: () => void | Promise<void>;
+const filterRetryLabel: Record<Locale, string> = {
+  en: 'Retry', 'zh-CN': '重试', 'zh-TW': '重試', ja: '再試行', ko: '다시 시도',
+  de: 'Erneut versuchen', fr: 'Réessayer', es: 'Reintentar', pt: 'Tentar novamente'
+};
+
+function Combobox({ locale, label, value, options, placeholder, unavailableLabel, loadingLabel, errorLabel, state, total, hasMore = false, clientFilter = false, onOpen, onRetry, onLoadMore, onChange, onSearch }: {
+  locale: Locale; label: string; value: string; options: LocationOption[]; placeholder: string; unavailableLabel: string;
+  loadingLabel: string; errorLabel?: string; state: LocationLoadState; total: number; hasMore?: boolean; clientFilter?: boolean;
+  onOpen?: () => void | Promise<void>; onRetry?: () => void | Promise<void>; onLoadMore?: () => void | Promise<void>;
   onChange: (value: string, option: LocationOption) => void; onSearch?: (query: string) => void | Promise<void>;
 }) {
   const id = useId();
@@ -876,61 +1132,103 @@ function Combobox({ label, value, options, placeholder, total, hasMore = false, 
   const [query, setQuery] = useState(value);
   const [activeIndex, setActiveIndex] = useState(0);
   const skipValueSync = useRef(false);
+  const onSearchRef = useRef(onSearch);
+  const onOpenRef = useRef(onOpen);
   const selected = options.find((option) => option.value === value);
+  const selectedLabel = selected ? locationOptionLabel(selected, locale) : value;
+  useEffect(() => { onSearchRef.current = onSearch; }, [onSearch]);
+  useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
   useEffect(() => {
     if (skipValueSync.current) { skipValueSync.current = false; return; }
-    setQuery(selected?.label || value);
-  }, [value, selected?.label]);
+    setQuery(selectedLabel);
+  }, [value, selectedLabel]);
   useEffect(() => {
-    if (!open || clientFilter || !onSearch) return;
-    const searchQuery = selected?.label === query ? '' : query;
-    const timer = window.setTimeout(() => void onSearch(searchQuery), 280);
+    if (!open || clientFilter || !onSearchRef.current) return;
+    const searchQuery = selectedLabel === query ? '' : query;
+    const timer = window.setTimeout(() => void onSearchRef.current?.(searchQuery), 280);
     return () => window.clearTimeout(timer);
-  }, [query, open, selected?.label, clientFilter, onSearch]);
+  }, [query, open, selectedLabel, clientFilter]);
   useEffect(() => setActiveIndex(0), [query, clientFilter]);
   useEffect(() => {
     const close = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) { setOpen(false); setQuery(selected?.label || value); }
+      if (!root.current?.contains(event.target as Node)) { setOpen(false); setQuery(selectedLabel); }
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
-  }, [selected?.label, value]);
-  const searchQuery = selected?.label === query ? '' : query;
+  }, [selectedLabel]);
+  const searchQuery = selectedLabel === query ? '' : query;
   const visibleOptions = clientFilter ? filterLocationOptions(options, searchQuery) : options;
-  const renderedOptions = visibleOptions.slice(0, LOCATION_OPTION_RENDER_LIMIT);
+  const openMenu = () => {
+    if (!open) void onOpenRef.current?.();
+    setOpen(true);
+  };
+  const renderedOptions = visibleOptions.slice(0, LOCATION_OPTION_RENDER_LIMIT)
+    .map((option) => ({ ...option, label: locationOptionLabel(option, locale) }));
   const values: LocationOption[] = [{ value: '', label: placeholder }, ...renderedOptions];
   const select = (option: LocationOption) => {
+    if (option.disabled) return;
     setQuery(option.label === placeholder ? '' : option.label); onChange(option.value, option); setOpen(false); setActiveIndex(0);
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'ArrowDown') { event.preventDefault(); setOpen(true); setActiveIndex((index) => Math.min(index + 1, values.length - 1)); }
+    if (event.key === 'ArrowDown') { event.preventDefault(); openMenu(); setActiveIndex((index) => Math.min(index + 1, values.length - 1)); }
     if (event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex((index) => Math.max(index - 1, 0)); }
     if (event.key === 'Enter' && open) { event.preventDefault(); select(values[activeIndex] || values[0]); }
-    if (event.key === 'Escape') { setOpen(false); setQuery(selected?.label || value); }
+    if (event.key === 'Escape') { setOpen(false); setQuery(selectedLabel); }
   };
   return <div className="filter custom-combobox" ref={root}>
     <label htmlFor={id}>{label}</label>
     <div className={`combobox-control ${open ? 'open' : ''}`}>
-      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-autocomplete="list" value={query} placeholder={placeholder} onFocus={() => setOpen(true)} onChange={(event) => {
+      <input id={id} role="combobox" aria-expanded={open} aria-controls={`${id}-list`} aria-activedescendant={open ? `${id}-option-${activeIndex}` : undefined} aria-autocomplete="list" aria-busy={state === 'loading'} value={query} placeholder={placeholder} onFocus={openMenu} onChange={(event) => {
         const nextQuery = event.target.value;
-        if (value && nextQuery !== selected?.label) {
+        if (value && nextQuery !== selectedLabel) {
           skipValueSync.current = true;
           onChange('', { value: '', label: placeholder });
         }
         setQuery(nextQuery); setOpen(true); setActiveIndex(0);
       }} onKeyDown={keyDown}/>
-      <button type="button" aria-label={label} onClick={() => setOpen((current) => !current)}>▾</button>
+      <button type="button" aria-label={label} onClick={() => open ? setOpen(false) : openMenu()}>▾</button>
     </div>
     {open && <div className="combobox-popup" id={`${id}-list`} role="listbox">
-      {values.map((option, index) => <button type="button" role="option" aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} key={`${option.value}-${index}`} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}>{option.label}</button>)}
-      <div className="combobox-status"><span>{visibleOptions.length}/{clientFilter ? options.length : total}</span>{hasMore && onLoadMore && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>+100</button>}</div>
+      {values.map((option, index) => <button id={`${id}-option-${index}`} type="button" role="option" tabIndex={-1} aria-selected={!option.value ? !value : option.value === value} className={index === activeIndex ? 'active' : ''} disabled={option.disabled} key={`${option.value}-${index}`} onMouseDown={(event) => event.preventDefault()} onClick={() => select(option)}><span>{option.label}</span>{option.availableCount !== undefined && <small>{option.availableCount > 0 ? new Intl.NumberFormat(locale).format(option.availableCount) : unavailableLabel}</small>}</button>)}
+      <div className="combobox-status" role="status" aria-live="polite">
+        {state === 'loading' ? <span>{loadingLabel}</span>
+          : state === 'error' ? <><span>{errorLabel}</span>{onRetry && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onRetry()}>{filterRetryLabel[locale]}</button>}</>
+            : <span>{visibleOptions.length}/{clientFilter ? options.length : total}</span>}
+        {state !== 'error' && hasMore && onLoadMore && <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void onLoadMore()}>+100</button>}
+      </div>
     </div>}
   </div>;
 }
-function SectionLanguageTabs({ value, onChange, labels }: { value: AddressLanguage; onChange: (language: AddressLanguage) => void; labels: [string, string, string] | string[] }) {
-  const options: Array<[AddressLanguage, string]> = [['native', labels[0]], ['en', labels[1]], ['zh-CN', labels[2]]];
-  return <div className="language-tabs profile-language-tabs" role="tablist">{options.map(([language, label]) =>
-    <button type="button" role="tab" aria-selected={value === language} className={value === language ? 'active' : ''} key={language} onClick={() => onChange(language)}>{label}</button>)}</div>;
+function AddressLanguageControl({ value, onChange, locale }: { value: AddressDisplayLanguage; onChange: (language: AddressDisplayLanguage) => void; locale: Locale }) {
+  const t = messages[locale];
+  const otherLanguages = localeDefinitions.filter(({ code }) => code !== 'en' && code !== 'zh-CN');
+  const otherSelected = value !== 'native' && value !== 'en' && value !== 'zh-CN';
+  return <div className="language-tabs address-language-control" role="group" aria-label={t.address}>
+    <button type="button" className={value === 'en' ? 'active' : ''} aria-pressed={value === 'en'} onClick={() => onChange('en')}>{profileLanguageNames.en}</button>
+    <button type="button" className={value === 'zh-CN' ? 'active' : ''} aria-pressed={value === 'zh-CN'} onClick={() => onChange('zh-CN')}>{profileLanguageNames['zh-CN']}</button>
+    <button type="button" className={value === 'native' ? 'active' : ''} aria-pressed={value === 'native'} onClick={() => onChange('native')}>{t.originalAddress}</button>
+    <select className={otherSelected ? 'active' : ''} aria-label={profileLanguageControlText[locale].other} value={otherSelected ? value : ''} onChange={(event) => onChange(event.target.value as Locale)}>
+      <option value="" disabled>{profileLanguageControlText[locale].other}</option>
+      {otherLanguages.map(({ code }) => <option key={code} value={code}>{profileLanguageNames[code]}</option>)}
+    </select>
+  </div>;
+}
+function ProfileLanguageControl({ value, onChange, locale }: { value: ProfileLanguage; onChange: (language: ProfileLanguage) => void; locale: Locale }) {
+  const text = profileLanguageControlText[locale];
+  const otherLanguages = localeDefinitions.filter(({ code }) => code !== 'en' && code !== 'zh-CN');
+  const otherSelected = value !== 'native' && value !== 'en' && value !== 'zh-CN';
+  return <div className="profile-language-control panel" role="group" aria-label={text.label}>
+    <span>{text.label}</span>
+    <div>
+      <button type="button" className={value === 'en' ? 'active' : ''} aria-pressed={value === 'en'} onClick={() => onChange('en')}>{profileLanguageNames.en}</button>
+      <button type="button" className={value === 'zh-CN' ? 'active' : ''} aria-pressed={value === 'zh-CN'} onClick={() => onChange('zh-CN')}>{profileLanguageNames['zh-CN']}</button>
+      <button type="button" className={value === 'native' ? 'active' : ''} aria-pressed={value === 'native'} onClick={() => onChange('native')}>{text.native}</button>
+      <select className={otherSelected ? 'active' : ''} aria-label={text.other} value={otherSelected ? value : ''} onChange={(event) => onChange(event.target.value as Locale)}>
+        <option value="" disabled>{text.other}</option>
+        {otherLanguages.map(({ code }) => <option key={code} value={code}>{profileLanguageNames[code]}</option>)}
+      </select>
+    </div>
+  </div>;
 }
 function ResultRow({ id, label, value, copy, copied, copyLabel }: { id: string; label: string; value: string; copy: (key: string, value: string) => Promise<void>; copied: string; copyLabel: string }) {
   if (!value.trim()) return null;
@@ -939,9 +1237,7 @@ function ResultRow({ id, label, value, copy, copied, copyLabel }: { id: string; 
 function AddressBlock({ title, copyLabel, onCopy, children }: { title: string; copyLabel: string; onCopy: () => void; children: ReactNode }) {
   return <section className="address-block"><header><h3>{title}</h3><button type="button" onClick={onCopy}>{copyLabel}</button></header>{children}</section>;
 }
-function ShortcutSection({ title, items, locale, apply }: { title: string; items: LocationShortcut[]; locale: Locale; apply: (item: LocationShortcut) => void }) {
-  const [expanded, setExpanded] = useState(false);
+function ShortcutSection({ tone, title, items, locale, apply }: { tone: 'special' | 'admin' | 'cities'; title: string; items: LocationShortcut[]; locale: Locale; apply: (item: LocationShortcut) => void }) {
   if (!items.length) return null;
-  const shown = expanded ? items : items.slice(0, 10);
-  return <section className="shortcut-card panel"><header><h2>{title}</h2></header><div>{shown.map((item) => <button type="button" key={`${item.type}-${item.value}`} onClick={() => apply(item)}>{item.label[locale]}</button>)}</div>{items.length > 10 && <button type="button" className="show-all" onClick={() => setExpanded(!expanded)}>{expanded ? '收起' : '查看全部'}</button>}</section>;
+  return <section className={`shortcut-card shortcut-card-${tone} panel`}><header><h2>{title}</h2></header><div>{items.map((item) => <button type="button" key={`${item.type}-${item.value}`} onClick={() => apply(item)}>{item.label[uiTextLocale(locale)]}</button>)}</div></section>;
 }

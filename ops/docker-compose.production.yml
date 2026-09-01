@@ -1,0 +1,250 @@
+x-production-app: &production-app
+  init: true
+  env_file:
+    - ./config/address.env
+  environment: &production-environment
+    ADDRESS_ROOT: /srv/address
+    ADDRESS_DATA_ROOT: /srv/address/data
+    ADDRESS_SYNC_CACHE_DIR: /srv/address/data/staging
+    STATIC_ROOT: /srv/address/app/dist
+    SYNC_STATE_DIR: /srv/address/runtime/sync-control
+    CREDENTIAL_BROKER_URL: http://gateway:8792
+    CREDENTIAL_BROKER_TOKEN_FILE: /run/secrets/credential_broker_production_token
+    PYTHON_BIN: /srv/address/venv/bin/python
+    HOME: /srv/address/runtime/home
+    XDG_CACHE_HOME: /srv/address/runtime/cache
+    LOCATION_CATALOG_CACHE_DIR: /srv/address/runtime/cache/location-catalog
+    PIP_CACHE_DIR: /srv/address/runtime/pip-cache
+    POSTGRES_HOST: postgres
+    POSTGRES_DB: ${POSTGRES_DB:-address}
+    POSTGRES_USER: ${POSTGRES_USER:-address}
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    CONFIG_MASTER_KEY_FILE: /run/secrets/config_master_key
+    ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/secrets/admin_bootstrap_password
+    FRONTEND_BOOTSTRAP_PASSWORD_FILE: ""
+    SYNC_ADMIN_TOKEN_FILE: /run/secrets/sync_admin_token
+    COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+    TRUST_PROXY: ${TRUST_PROXY:-false}
+    SYNC_SCHEDULER_ENABLED: "true"
+  secrets: &production-secrets
+    - postgres_password
+    - config_master_key
+    - admin_bootstrap_password
+    - sync_admin_token
+    - credential_broker_production_token
+  volumes: &production-volumes
+    - ./data/address:/srv/address/data
+    - ./runtime:/srv/address/runtime
+  networks:
+    - internal
+    - egress
+  logging: &production-logging
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+x-production-api: &production-api
+  <<: *production-app
+  restart: unless-stopped
+  command: [node, node_modules/tsx/dist/cli.mjs, server/api/server.ts]
+  environment:
+    <<: *production-environment
+    API_HOST: 0.0.0.0
+    API_PORT: 8787
+    POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+    POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+    BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+    API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
+    SYNC_CONTROL_URL: http://address-sync-control:8791
+  healthcheck:
+    test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>{if(!r.ok||r.headers.get('x-address-release')!==process.env.ADDRESS_RELEASE)process.exit(1)}).catch(()=>process.exit(1))"]
+    interval: 5s
+    timeout: 5s
+    retries: 24
+    start_period: 20s
+  stop_grace_period: 95m
+
+x-production-broker: &production-broker
+  <<: *production-app
+  restart: unless-stopped
+  command: [node, server/credential-broker/index.mjs]
+  environment:
+    <<: *production-environment
+    CREDENTIAL_BROKER_HOST: 0.0.0.0
+    CREDENTIAL_BROKER_PORT: 8792
+    POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+    POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
+    CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
+    CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
+  secrets:
+    - postgres_password
+    - config_master_key
+    - admin_bootstrap_password
+    - sync_admin_token
+    - credential_broker_production_token
+    - credential_broker_test_token
+  healthcheck:
+    test: [CMD, node, -e, "fetch('http://127.0.0.1:8792/healthz').then(r=>{if(!r.ok||r.headers.get('x-address-release')!==process.env.ADDRESS_RELEASE)process.exit(1)}).catch(()=>process.exit(1))"]
+    interval: 5s
+    timeout: 5s
+    retries: 24
+    start_period: 20s
+  stop_grace_period: 30s
+
+services:
+  bootstrap:
+    profiles: [production-bootstrap-disabled]
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes: !override
+      - ./data/postgres:/var/lib/postgresql/data
+    depends_on: !reset {}
+
+  api:
+    profiles: [production-single-disabled]
+    ports: !reset []
+
+  credential-broker:
+    profiles: [production-single-disabled]
+
+  migrate:
+    image: ${ADDRESS_MIGRATION_IMAGE:?Set ADDRESS_MIGRATION_IMAGE}
+    environment: !override
+      <<: *production-environment
+      POSTGRES_STATEMENT_TIMEOUT_MS: 1800000
+    secrets: *production-secrets
+    volumes: !override
+      - ./data/address:/srv/address/data
+      - ./runtime:/srv/address/runtime
+
+  api-blue:
+    <<: *production-api
+    image: ${ADDRESS_BLUE_IMAGE:?Set ADDRESS_BLUE_IMAGE}
+    profiles: [production-blue]
+    environment:
+      <<: *production-environment
+      ADDRESS_RELEASE: ${ADDRESS_BLUE_RELEASE:?Set ADDRESS_BLUE_RELEASE}
+      API_HOST: 0.0.0.0
+      API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
+      SYNC_CONTROL_URL: http://address-sync-control:8791
+    depends_on:
+      postgres:
+        condition: service_healthy
+      credential-broker-blue:
+        condition: service_healthy
+
+  credential-broker-blue:
+    <<: *production-broker
+    image: ${ADDRESS_BLUE_IMAGE:?Set ADDRESS_BLUE_IMAGE}
+    profiles: [production-blue]
+    environment:
+      <<: *production-environment
+      ADDRESS_RELEASE: ${ADDRESS_BLUE_RELEASE:?Set ADDRESS_BLUE_RELEASE}
+      CREDENTIAL_BROKER_HOST: 0.0.0.0
+      CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
+      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
+      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api-green:
+    <<: *production-api
+    image: ${ADDRESS_GREEN_IMAGE:?Set ADDRESS_GREEN_IMAGE}
+    profiles: [production-green]
+    environment:
+      <<: *production-environment
+      ADDRESS_RELEASE: ${ADDRESS_GREEN_RELEASE:?Set ADDRESS_GREEN_RELEASE}
+      API_HOST: 0.0.0.0
+      API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
+      SYNC_CONTROL_URL: http://address-sync-control:8791
+    depends_on:
+      postgres:
+        condition: service_healthy
+      credential-broker-green:
+        condition: service_healthy
+
+  credential-broker-green:
+    <<: *production-broker
+    image: ${ADDRESS_GREEN_IMAGE:?Set ADDRESS_GREEN_IMAGE}
+    profiles: [production-green]
+    environment:
+      <<: *production-environment
+      ADDRESS_RELEASE: ${ADDRESS_GREEN_RELEASE:?Set ADDRESS_GREEN_RELEASE}
+      CREDENTIAL_BROKER_HOST: 0.0.0.0
+      CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
+      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/secrets/credential_broker_production_token
+      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/secrets/credential_broker_test_token
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine}
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:20022:8080
+    volumes:
+      - ./runtime/gateway:/etc/caddy:ro
+    networks:
+      - internal
+      - egress
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/api/v1/ready]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    logging: *production-logging
+
+  sync:
+    image: ${ADDRESS_SYNC_IMAGE:?Set ADDRESS_SYNC_IMAGE}
+    environment: !override
+      <<: *production-environment
+      SYNC_HOST: 0.0.0.0
+      SYNC_PORT: 8791
+      POSTGRES_POOL_MAX: ${SYNC_POSTGRES_POOL_MAX:-6}
+      POSTGRES_POOL_MIN: ${SYNC_POSTGRES_POOL_MIN:-1}
+    secrets: *production-secrets
+    volumes: !override
+      - ./data/address:/srv/address/data
+      - ./runtime:/srv/address/runtime
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    stop_grace_period: 95m
+
+secrets:
+  postgres_password:
+    file: ./config/secrets/postgres_password
+  config_master_key:
+    file: ./config/secrets/config_master_key
+  admin_bootstrap_password:
+    file: ./config/secrets/admin_bootstrap_password
+  sync_admin_token:
+    file: ./config/secrets/sync_admin_token
+  credential_broker_production_token:
+    file: ./config/secrets/credential_broker_production_token
+  credential_broker_test_token:
+    file: ./config/secrets/credential_broker_test_token

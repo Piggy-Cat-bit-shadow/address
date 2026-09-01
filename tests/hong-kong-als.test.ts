@@ -60,12 +60,13 @@ describe('Hong Kong Address Lookup Service contract', () => {
     expect(address.coordinates).toEqual({ latitude: 22.33123, longitude: 114.16234 });
     expect(address.propertyType).toBe('residential');
     expect(address.components).toMatchObject({
-      houseNumber: '8號', street: '正德街', buildingName: '龍安樓', locality: '深水埗',
-      district: '深水埗區', admin1: '九龍', admin1Code: 'KLN', postcode: ''
+      houseNumber: '8號', street: '正德街', buildingName: '龍安樓', locality: '深水埗區',
+      admin1: '九龍', admin1Code: 'KLN', postcode: ''
     });
+    expect(address.components.district).toBeUndefined();
     expect(address.componentVariants.en).toMatchObject({
       houseNumber: '8', street: 'CHING TAK STREET', buildingName: 'LUNG ON HOUSE',
-      locality: 'SHAM SHUI PO', admin1: 'KOWLOON', admin1Code: 'KLN', postcode: ''
+      locality: 'Sham Shui Po', admin1: 'Kowloon', admin1Code: 'KLN', postcode: ''
     });
     expect(address.componentVariants['zh-CN'].street).toBe('正德街');
     expect(address.componentVariants['zh-CN'].buildingName).toBe('龙安楼');

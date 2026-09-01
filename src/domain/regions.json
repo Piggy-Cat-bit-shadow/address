@@ -737,7 +737,7 @@
   {
     "countryCode": "ES",
     "name": "Castile and Leon",
-    "native": "Castile and Leon",
+    "native": "Castilla y León",
     "zh": "卡斯蒂利亚和莱昂",
     "code": "CL"
   },
@@ -1051,129 +1051,24 @@
   },
   {
     "countryCode": "HK",
-    "name": "Central and Western",
-    "native": "Central and Western",
-    "zh": "中西区",
-    "code": "HCW"
+    "name": "Hong Kong Island",
+    "native": "香港島",
+    "zh": "香港岛",
+    "code": "HK"
   },
   {
     "countryCode": "HK",
-    "name": "Eastern",
-    "native": "Eastern",
-    "zh": "东",
-    "code": "HEA"
+    "name": "Kowloon",
+    "native": "九龍",
+    "zh": "九龙",
+    "code": "KLN"
   },
   {
     "countryCode": "HK",
-    "name": "Islands",
-    "native": "Islands",
-    "zh": "岛屿",
-    "code": "NIS"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Kowloon City",
-    "native": "Kowloon City",
-    "zh": "九龙城",
-    "code": "KKC"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Kwai Tsing",
-    "native": "Kwai Tsing",
-    "zh": "葵青",
-    "code": "NKT"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Kwun Tong",
-    "native": "Kwun Tong",
-    "zh": "观塘",
-    "code": "KKT"
-  },
-  {
-    "countryCode": "HK",
-    "name": "North",
-    "native": "North",
-    "zh": "北",
-    "code": "NNO"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Sai Kung",
-    "native": "Sai Kung",
-    "zh": "西贡",
-    "code": "NSK"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Sha Tin",
-    "native": "Sha Tin",
-    "zh": "沙田",
-    "code": "NST"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Sham Shui Po",
-    "native": "Sham Shui Po",
-    "zh": "深水埗",
-    "code": "KSS"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Southern",
-    "native": "Southern",
-    "zh": "南方",
-    "code": "HSO"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Tai Po",
-    "native": "Tai Po",
-    "zh": "大埔",
-    "code": "NTP"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Tsuen Wan",
-    "native": "Tsuen Wan",
-    "zh": "荃湾",
-    "code": "NTW"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Tuen Mun",
-    "native": "Tuen Mun",
-    "zh": "屯门",
-    "code": "NTM"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Wan Chai",
-    "native": "Wan Chai",
-    "zh": "湾仔",
-    "code": "HWC"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Wong Tai Sin",
-    "native": "Wong Tai Sin",
-    "zh": "黄大仙",
-    "code": "KWT"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Yau Tsim Mong",
-    "native": "Yau Tsim Mong",
-    "zh": "油尖旺",
-    "code": "KYT"
-  },
-  {
-    "countryCode": "HK",
-    "name": "Yuen Long",
-    "native": "Yuen Long",
-    "zh": "元朗",
-    "code": "NYL"
+    "name": "New Territories",
+    "native": "新界",
+    "zh": "新界",
+    "code": "NT"
   },
   {
     "countryCode": "IN",
@@ -2627,7 +2522,7 @@
   {
     "countryCode": "NL",
     "name": "Friesland",
-    "native": "Frieland",
+    "native": "Fryslân",
     "zh": "弗里斯兰",
     "code": "FR"
   },

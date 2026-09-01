@@ -6,6 +6,11 @@
       "license": "ODbL-1.0"
     },
     {
+      "name": "Hong Kong official administrative catalog",
+      "url": "https://www.had.gov.hk/en/18_districts/my_map.htm",
+      "license": "See source terms"
+    },
+    {
       "name": "GeoNames Postal Codes",
       "url": "https://download.geonames.org/export/zip/",
       "license": "CC-BY-4.0",
@@ -19,8 +24,8 @@
     "postcodes": "e59aae2897aadb0e1155df3696d22304480bef73a2f1893293c3207e68b658ba"
   },
   "totals": {
-    "regions": 1328,
-    "cities": 103474,
+    "regions": 1313,
+    "cities": 103465,
     "postcodes": 1270008
   },
   "countries": {
@@ -80,8 +85,8 @@
       "postcodes": 267124
     },
     "HK": {
-      "regions": 18,
-      "cities": 27,
+      "regions": 3,
+      "cities": 18,
       "postcodes": 0
     },
     "SG": {

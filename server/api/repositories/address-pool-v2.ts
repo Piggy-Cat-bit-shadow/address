@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { hashSeed } from '../../../src/domain/generator';
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
-import type { SqliteDatabase } from '../../database/sqlite.mjs';
+import type { Database } from '../../database/database.mjs';
 import { matchesCustomBlacklist } from '../../lib/custom-blacklist.mjs';
 import {
   addressQualitySqlClause,
@@ -13,6 +14,8 @@ import {
   validateAdministrativeHierarchy
 } from '../../../src/domain/administrative-integrity.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
+import { addressContracts, requiresAdminCode, validateAddressContract } from '../../../src/domain/address-contracts.mjs';
+import { storedVariantLooksLocalized } from '../../../src/domain/address-display';
 import type { AddressComponents, AddressEvidence, CountryCode, PropertyType, VerifiedAddress } from '../../../src/domain/types';
 import type { AddressFilters, CatalogTarget } from './address-repository';
 
@@ -79,12 +82,31 @@ const normalize = (value: string | undefined): string => (value || '')
   .replace(/\s+/gu, ' ')
   .trim();
 
-const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
-const toTraditionalHan = createTraditionalizer({ from: 'cn', to: 'tw' });
-const hanScript = /\p{Script=Han}/u;
+const candidateOffset = (seed: string, length: number): number => length <= 1 ? 0
+  : Number(createHash('sha256').update(seed).digest().readBigUInt64BE(0) % BigInt(length));
 
-const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區'];
-const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區)$/u;
+const rankSeed = (seed: string): string => (createHash('sha256').update(seed).digest().readBigUInt64BE(0)
+  & 0x7fffffffffffffffn).toString();
+
+const rotateCandidates = <T>(values: T[], seed: string): T[] => {
+  const offset = candidateOffset(seed, values.length);
+  return offset ? [...values.slice(offset), ...values.slice(0, offset)] : values;
+};
+
+const toSimplifiedHan = createSimplifier({ from: 'hk', to: 'cn' });
+const toTraditionalHongKong = createTraditionalizer({ from: 'cn', to: 'hk' });
+const toTraditionalTaiwan = createTraditionalizer({ from: 'cn', to: 'tw' });
+const hanScript = /\p{Script=Han}/u;
+const latinScript = /\p{Script=Latin}/u;
+const nativeSemanticFields = new Set(['street', 'locality', 'postalLocality', 'district', 'dependentLocality', 'admin1', 'buildingName']);
+const hasHanSemanticContent = (components: AddressComponents): boolean => [...nativeSemanticFields]
+  .some((field) => hanScript.test(String(components[field as keyof AddressComponents] || '')));
+export const chineseVariantHasHanClause = (prefix = ''): string => `(${[...nativeSemanticFields]
+  .map((field) => `(${prefix}component_variants_json::jsonb -> 'zh-CN' ->> '${field}') ~ '[一-龥]'`)
+  .join(' OR ')})`;
+
+const adminSuffixes = ['市', '縣', '县', '区', '區', '省', '自治区', '自治區', '特别行政区', '特別行政區', '都', '道', '府', '県'];
+const adminSuffixPattern = /(?:自治区|自治區|特别行政区|特別行政區|省|市|縣|县|区|區|都|道|府|県)$/u;
 
 const aliases = (values: Array<string | undefined>): string[] => [...new Set(values.flatMap((value) => {
   const normalized = normalize(value);
@@ -94,7 +116,12 @@ const aliases = (values: Array<string | undefined>): string[] => [...new Set(val
   }
   // Han values match across scripts (simplified 台中 <-> traditional 臺中) and
   // across admin-suffix presence (pool stores 臺中市, catalog stores 台中).
-  const scriptVariants = [...new Set([normalized, toSimplifiedHan(normalized), toTraditionalHan(normalized)])];
+  const scriptVariants = [...new Set([
+    normalized,
+    toSimplifiedHan(normalized),
+    toTraditionalHongKong(normalized),
+    toTraditionalTaiwan(normalized)
+  ])];
   return scriptVariants.flatMap((variant) => {
     const stem = variant.replace(adminSuffixPattern, '');
     if (!stem) return [variant];
@@ -149,6 +176,25 @@ const parseVariants = <T>(value: string, fallback: T): Record<'native' | 'en' | 
   }
 };
 
+export const repairHongKongNativeVariants = (
+  country: CountryCode,
+  variants: Record<'native' | 'en' | 'zh-CN', AddressComponents>
+): Record<'native' | 'en' | 'zh-CN', AddressComponents> => {
+  if (country !== 'HK' && country !== 'TW') return variants;
+  const nativeText = Object.values(variants.native).join(' ');
+  const source = hanScript.test(nativeText) ? variants.native : variants['zh-CN'];
+  if (!hanScript.test(Object.values(source).join(' '))) return variants;
+  const traditionalize = country === 'HK' ? toTraditionalHongKong : toTraditionalTaiwan;
+  const native = Object.fromEntries(Object.entries(source).map(([field, value]) => [
+    field,
+    typeof value === 'string' && nativeSemanticFields.has(field)
+      ? traditionalize(value).replace(/[\p{Script=Latin}][\p{Script=Latin}\p{N}' .&/-]*/gu, ' ').replace(/\s+/gu, ' ').trim()
+      : value
+  ])) as unknown as AddressComponents;
+  if (latinScript.test([...nativeSemanticFields].map((field) => native[field as keyof AddressComponents] || '').join(' '))) return variants;
+  return { ...variants, native };
+};
+
 const storedAddress = (components: AddressComponents, country: CountryCode): string => [
   [components.houseNumber, components.street].filter(Boolean).join(' '),
   components.buildingName,
@@ -159,26 +205,56 @@ const storedAddress = (components: AddressComponents, country: CountryCode): str
   country === 'CN' || country === 'HK' ? '' : components.postcode
 ].filter(Boolean).join(', ');
 
+const nativeStoredAddress = (components: AddressComponents, country: CountryCode): string => {
+  if (country === 'HK' || country === 'TW') return [
+    components.postcode,
+    components.admin1,
+    components.postalLocality || components.locality,
+    components.district || components.dependentLocality,
+    [components.houseNumber, components.street].filter(Boolean).join(' '),
+    components.buildingName,
+    components.unit
+  ].filter(Boolean).join(', ');
+  return storedAddress(components, country);
+};
+
 const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undefined => {
   if (!row.source_id || !row.source_name || !row.source_url) return undefined;
   if (!validateAdministrativeHierarchy({
-    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code
+    countryCode: row.country_code, admin1: row.admin1, admin1Code: row.admin1_code, locality: row.locality
   }).valid) return undefined;
   const fallback = fallbackComponents(row);
   const fallbackAddress = [row.house_number, row.street, row.postal_locality || row.locality, row.admin1_code || row.admin1, row.postcode]
     .filter(Boolean).join(', ');
   const parsedComponents = parseVariants(row.component_variants_json, fallback);
   for (const language of ['native', 'en', 'zh-CN'] as const) {
-    parsedComponents[language] = { ...fallback, ...parsedComponents[language] };
+    const stored = parsedComponents[language];
+    parsedComponents[language] = { ...fallback, ...stored };
+    if (!Object.hasOwn(stored, 'dependentLocality')) {
+      if (stored.district) parsedComponents[language].dependentLocality = stored.district;
+      else delete parsedComponents[language].dependentLocality;
+    }
   }
-  const componentVariants = {
+  const componentVariants = repairHongKongNativeVariants(row.country_code, {
     native: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.native)),
     en: normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents.en)),
     'zh-CN': normalizeAddressComponents(row.country_code, normalizeAddressFacts(row.country_code, parsedComponents['zh-CN']))
-  };
-  if (!validateAddressQuality({ countryCode: row.country_code, components: componentVariants.native }).valid) return undefined;
+  });
+  if (!storedVariantLooksLocalized(componentVariants.en, 'en')
+    || !storedVariantLooksLocalized(componentVariants['zh-CN'], 'zh-CN')
+    || !hasHanSemanticContent(componentVariants['zh-CN'])) return undefined;
+  if (!validateAddressContract(row.country_code, componentVariants.native, { strict: true, requireAdminCode: false }).valid) return undefined;
+  if (!validateAddressQuality({
+    countryCode: row.country_code, components: componentVariants.native,
+    latitude: row.latitude, longitude: row.longitude
+  }).valid) return undefined;
   const parsedAddresses = parseVariants(row.address_variants_json, fallbackAddress);
-  const addressVariants = /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
+  const addressVariants = ['HK', 'TW'].includes(row.country_code) && hanScript.test(Object.values(componentVariants.native).join(' '))
+    ? {
+        ...parsedAddresses,
+        native: nativeStoredAddress(componentVariants.native, row.country_code)
+      }
+    : /^\d+[\p{L}\p{N}./-]*$/u.test(row.building_name.trim())
     ? {
         native: storedAddress(componentVariants.native, row.country_code),
         en: storedAddress(componentVariants.en, row.country_code),
@@ -244,7 +320,7 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     countryCode: row.country_code,
     nativeAddress: addressVariants.native,
     formattedAddress: addressVariants.en,
-    nativeLanguage: row.native_language,
+    nativeLanguage: row.country_code === 'HK' ? 'zh-HK' : row.native_language,
     addressVariants,
     components: componentVariants.native,
     componentVariants,
@@ -258,15 +334,21 @@ const rowToAddress = (row: AddressPoolV2Row, now: Date): VerifiedAddress | undef
     sourceVersion: `${row.dataset_id || row.source_id}:${row.dataset_version || row.generation}`,
     sourceUpdatedAt,
     verifiedAt: now.toISOString(),
-    expiresAt: row.expires_at || new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000).toISOString(),
+    expiresAt: '9999-12-31T23:59:59.999Z',
     evidence,
     exclusionFlags: row.quality_score < 0.7 ? ['low_quality_score'] : []
   };
 };
 
+export const storedAddressPoolV2RowIsPublishable = (
+  row: AddressPoolV2Row,
+  now = new Date()
+): boolean => Boolean(rowToAddress(row, now))
+  && (!row.expires_at || new Date(row.expires_at).getTime() > now.getTime());
+
 const missingSchema = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
-  return /no such (?:table|view).*address_pool_runtime|does not exist.*address_pool_runtime/i.test(message);
+  return /no such (?:table|view).*(?:address_pool_runtime|address_generation_index)|(?:does not exist.*(?:address_pool_runtime|address_generation_index)|(?:address_pool_runtime|address_generation_index).*does not exist)/i.test(message);
 };
 
 interface RegionNameRow { code: string; name: string; native_name: string; zh_name: string }
@@ -274,7 +356,7 @@ interface RegionNameRow { code: string; name: string; native_name: string; zh_na
 const regionNameCaches = new WeakMap<object, Map<string, RegionNameRow | null>>();
 const cityZhCaches = new WeakMap<object, Map<string, string | null>>();
 const regionPresenceCaches = new WeakMap<object, Map<string, boolean>>();
-const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: SqliteDatabase): Map<string, T> => {
+const cacheFor = <T,>(store: WeakMap<object, Map<string, T>>, db: Database): Map<string, T> => {
   let cache = store.get(db as object);
   if (!cache) {
     cache = new Map();
@@ -288,7 +370,7 @@ const samePlaceKey = (value: string | undefined): string => (value || '')
   .normalize('NFKC').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, '');
 
 const lookupRegionNames = async (
-  db: SqliteDatabase,
+  db: Database,
   country: CountryCode,
   admin1: string,
   admin1Code: string
@@ -314,7 +396,7 @@ const lookupRegionNames = async (
   return row;
 };
 
-const hasCatalogRegions = async (db: SqliteDatabase, country: CountryCode): Promise<boolean> => {
+const hasCatalogRegions = async (db: Database, country: CountryCode): Promise<boolean> => {
   const cache = cacheFor(regionPresenceCaches, db);
   if (cache.has(country)) return Boolean(cache.get(country));
   let present = false;
@@ -328,7 +410,7 @@ const hasCatalogRegions = async (db: SqliteDatabase, country: CountryCode): Prom
   return present;
 };
 
-const lookupCityZhName = async (db: SqliteDatabase, country: CountryCode, locality: string): Promise<string | null> => {
+const lookupCityZhName = async (db: Database, country: CountryCode, locality: string): Promise<string | null> => {
   const cache = cacheFor(cityZhCaches, db);
   const key = `${country}:${samePlaceKey(locality)}`;
   if (cache.has(key)) return cache.get(key) || null;
@@ -346,7 +428,7 @@ const lookupCityZhName = async (db: SqliteDatabase, country: CountryCode, locali
   return zhName;
 };
 
-export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedAddress): Promise<VerifiedAddress> => {
+export const enrichPickedAddress = async (db: Database, address: VerifiedAddress): Promise<VerifiedAddress> => {
   const variants = address.componentVariants;
   const updated: Record<'native' | 'en' | 'zh-CN', AddressComponents> = {
     native: { ...variants.native },
@@ -389,7 +471,8 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
       assign('native', names.native_name || names.name);
       assign('en', names.name);
       assign('zh-CN', names.zh_name || names.native_name || names.name);
-    } else if ((samePlaceKey(native.admin1) === samePlaceKey(native.locality)
+    } else if (!addressContracts[address.countryCode]?.required.includes('admin1')
+      && (samePlaceKey(native.admin1) === samePlaceKey(native.locality)
       || samePlaceKey(native.admin1) === samePlaceKey(native.postalLocality))
       && await hasCatalogRegions(db, address.countryCode)) {
       for (const language of languages) {
@@ -446,6 +529,11 @@ export const enrichPickedAddress = async (db: SqliteDatabase, address: VerifiedA
   };
 };
 
+const enrichPublishableAddress = async (db: Database, address: VerifiedAddress): Promise<VerifiedAddress | undefined> => {
+  const enriched = await enrichPickedAddress(db, address);
+  return requiresAdminCode(enriched.countryCode) && !enriched.components.admin1Code ? undefined : enriched;
+};
+
 const geographicDistanceKm = (
   left: { latitude: number; longitude: number },
   right: { latitude: number; longitude: number }
@@ -465,7 +553,7 @@ export interface NearestAddressPoolV2Result {
 }
 
 export const pickNearestAddressPoolV2Address = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   country: CountryCode,
   residential: boolean,
   coordinates: { latitude: number; longitude: number },
@@ -479,9 +567,9 @@ export const pickNearestAddressPoolV2Address = async (
     'active = 1',
     'quality_score >= 0.7',
     completenessClause(),
-    '(expires_at IS NULL OR (datetime(expires_at) IS NOT NULL AND datetime(expires_at) > datetime(?)))'
+    chineseVariantHasHanClause()
   ];
-  const baseBindings: unknown[] = [country, now.toISOString()];
+  const baseBindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`, 'residential_evidence = 1');
   const longitudeScale = Math.max(0.1, Math.cos(coordinates.latitude * Math.PI / 180));
   const radii = [...new Set([Math.min(25, maximumDistanceKm), maximumDistanceKm])].filter((radius) => radius > 0);
@@ -490,17 +578,13 @@ export const pickNearestAddressPoolV2Address = async (
     for (const radiusKm of radii) {
       const latitudeRadius = radiusKm / 111.32;
       const longitudeRadius = Math.min(180, latitudeRadius / longitudeScale);
+      const coordinateFilter = 'latitude >= ? AND latitude <= ? AND longitude >= ? AND longitude <= ?';
       const result = await db.prepare(`SELECT *,
         ((latitude - ?) * (latitude - ?)) +
         ((longitude - ?) * (longitude - ?) * ? * ?) AS distance_score
         FROM address_pool_runtime
         WHERE ${clauses.join(' AND ')}
-          AND id IN (
-            SELECT address.id FROM address_coordinate_index coordinate
-            JOIN address_pool address ON address.rowid = coordinate.address_rowid
-            WHERE coordinate.min_latitude >= ? AND coordinate.max_latitude <= ?
-              AND coordinate.min_longitude >= ? AND coordinate.max_longitude <= ?
-          )
+          AND ${coordinateFilter}
         ORDER BY distance_score, random_key, id LIMIT 16`).bind(
         coordinates.latitude,
         coordinates.latitude,
@@ -521,7 +605,8 @@ export const pickNearestAddressPoolV2Address = async (
       }).filter((candidate) => candidate.distanceKm <= radiusKm);
       if (candidates.length) {
         const picked = candidates[hashSeed(`${country}:${seed}:ip-nearest`) % Math.min(8, candidates.length)];
-        return { ...picked, address: await enrichPickedAddress(db, picked.address) };
+        const address = await enrichPublishableAddress(db, picked.address);
+        if (address) return { ...picked, address };
       }
     }
     return undefined;
@@ -531,8 +616,26 @@ export const pickNearestAddressPoolV2Address = async (
   }
 };
 
+export const loadAddressPoolV2AddressById = async (
+  db: Database | undefined,
+  addressId: string,
+  now = new Date()
+): Promise<VerifiedAddress | undefined> => {
+  if (!db || !addressId.startsWith('pool-v2-')) return undefined;
+  try {
+    const row = await db.prepare('SELECT * FROM address_pool_runtime WHERE id = ? AND active = 1 LIMIT 1')
+      .bind(addressId.slice('pool-v2-'.length).split(':')[0]).first<AddressPoolV2Row>();
+    if (!row) return undefined;
+    const address = rowToAddress(row, now);
+    return address ? enrichPublishableAddress(db, address) : undefined;
+  } catch (error) {
+    if (missingSchema(error)) return undefined;
+    throw error;
+  }
+};
+
 export const pickAddressPoolV2Address = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   country: CountryCode,
   residential: boolean,
   filters: AddressFilters,
@@ -541,8 +644,8 @@ export const pickAddressPoolV2Address = async (
   now = new Date()
 ): Promise<VerifiedAddress | undefined> => {
   if (!db) return undefined;
-  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), '(expires_at IS NULL OR (datetime(expires_at) IS NOT NULL AND datetime(expires_at) > datetime(?)))'];
-  const bindings: unknown[] = [country, now.toISOString()];
+  const clauses = ['country_code = ?', 'active = 1', 'quality_score >= 0.7', completenessClause(), chineseVariantHasHanClause()];
+  const bindings: unknown[] = [country];
   if (residential) clauses.push(`property_type IN ('residential','apartment')`);
 
   const regionClause = aliasClause(
@@ -567,27 +670,91 @@ export const pickAddressPoolV2Address = async (
     bindings.push(`%${normalize(filters.q).replace(/[\\%_]/g, '\\$&')}%`);
   }
 
+  const generationClauses = ['country_code = ?', 'active = 1'];
+  const generationBindings: unknown[] = [country];
+  if (residential) generationClauses.push('residential_ready = 1');
+  const generationRegionClause = aliasClause(
+    ['admin1_key', 'admin1_code_key'],
+    aliases([filters.region, target?.region, target?.regionNative, target?.regionCode, ...target?.regionAliases || []]),
+    generationBindings
+  );
+  if ((filters.region || target?.region) && generationRegionClause) generationClauses.push(generationRegionClause);
+  const generationCityClause = aliasClause(
+    ['locality_key', 'postal_locality_key'],
+    aliases([filters.city, target?.city, target?.cityNative, ...target?.cityAliases || []]),
+    generationBindings
+  );
+  if ((filters.city || target?.city) && generationCityClause) generationClauses.push(generationCityClause);
+  const generationPostcode = filters.postcode || target?.postcode;
+  if (generationPostcode) {
+    generationClauses.push('postcode_key = ?');
+    generationBindings.push(normalize(generationPostcode).replace(/\s/gu, ''));
+  }
+  if (filters.q?.trim()) {
+    generationClauses.push(`search_text LIKE ? ESCAPE '\\'`);
+    generationBindings.push(`%${normalize(filters.q).replace(/[\\%_]/g, '\\$&')}%`);
+  }
+
   const pivot = hashSeed(`${country}:${seed}:address-pool-v2`) & 0x7fffffff;
   const candidateLimit = residential ? 16 : 64;
+  const nationwide = !target && !filters.region && !filters.regionId && !filters.city && !filters.cityId
+    && !filters.district && !filters.districtId && !filters.postcode && !filters.postcodeId && !filters.q?.trim();
   try {
     const select = `SELECT id FROM address_pool WHERE ${clauses.join(' AND ')}${residential ? ` AND ${residentialEvidenceClause}` : ''}`;
-    const pickEligible = async (sql: string, values: unknown[]): Promise<VerifiedAddress | undefined> => {
-      const identifiers = (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
+    const generationSelect = `SELECT address_id AS id FROM address_generation_index WHERE ${generationClauses.join(' AND ')}`;
+    const loadIdentifiers = async (sql: string, values: unknown[]): Promise<Array<{ id: string }>> =>
+      (await db.prepare(sql).bind(...values).all<{ id: string }>()).results || [];
+    const loadWindow = async (select: string, values: unknown[], idColumn: string): Promise<Array<{ id: string }>> => {
+      const forward = await loadIdentifiers(
+        `${select} AND random_key >= ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
+        [...values, pivot]
+      );
+      if (forward.length >= candidateLimit || typeof (db as { exec?: unknown }).exec !== 'function') return forward;
+      const seen = new Set(forward.map(({ id }) => id));
+      const wrapped = await loadIdentifiers(
+        `${select} AND random_key < ? ORDER BY random_key, ${idColumn} LIMIT ${candidateLimit}`,
+        [...values, pivot]
+      );
+      return [...forward, ...wrapped.filter(({ id }) => !seen.has(id))].slice(0, candidateLimit);
+    };
+    const pickEligible = async (identifiers: Array<{ id: string }>): Promise<VerifiedAddress | undefined> => {
       if (!identifiers.length) return undefined;
       const ids = identifiers.map(({ id }) => id);
       const placeholders = ids.map(() => '?').join(',');
       const rows = (await db.prepare(`SELECT * FROM address_pool_runtime WHERE id IN (${placeholders})`)
         .bind(...ids).all<AddressPoolV2Row>()).results || [];
       const byId = new Map(rows.map((row) => [row.id, row]));
-      for (const { id } of identifiers) {
+      for (const { id } of rotateCandidates(identifiers, `${country}:${seed}:address-pool-v2:candidate`)) {
         const row = byId.get(id);
         const address = row ? rowToAddress(row, now) : undefined;
-        if (address) return enrichPickedAddress(db, address);
+        if (address) {
+          const enriched = await enrichPublishableAddress(db, address);
+          if (enriched) return enriched;
+        }
       }
       return undefined;
     };
-    return await pickEligible(`${select} AND random_key >= ? ORDER BY random_key, id LIMIT ${candidateLimit}`, [...bindings, pivot])
-      || await pickEligible(`${select} ORDER BY random_key, id LIMIT ${candidateLimit}`, bindings);
+    // Test doubles and older database adapters may not expose exec(); in that
+    // case use the original indexed address_pool query directly.
+    if (typeof (db as { exec?: unknown }).exec === 'function') {
+      if (nationwide) {
+        const rank = residential ? 'residential_rank' : 'country_rank';
+        const readiness = residential ? ' AND residential_ready=1' : '';
+        const ranked = await loadIdentifiers(`WITH selected AS (
+            SELECT (CAST(? AS bigint) % MAX(${rank}))+1 AS target
+            FROM address_generation_index
+            WHERE country_code=? AND active=1${readiness}
+          )
+          SELECT address_id AS id FROM address_generation_index,selected
+          WHERE country_code=? AND active=1${readiness} AND ${rank}=selected.target
+          LIMIT 1`, [rankSeed(`${country}:${seed}:address-pool-v2:rank`), country, country]);
+        const exact = await pickEligible(ranked);
+        if (exact) return exact;
+      }
+      const indexed = await pickEligible(await loadWindow(generationSelect, generationBindings, 'address_id'));
+      if (indexed) return indexed;
+    }
+    return await pickEligible(await loadWindow(select, bindings, 'id'));
   } catch (error) {
     if (missingSchema(error)) return undefined;
     throw error;

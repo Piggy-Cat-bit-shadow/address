@@ -1,0 +1,18 @@
+---
+import PublicMonitor from '../../components/PublicMonitor';
+import Layout from '../../layouts/Layout.astro';
+import { localeStaticPaths } from '../../domain/locales';
+import type { Locale } from '../../domain/types';
+import '../../styles/admin.css';
+
+export const getStaticPaths = localeStaticPaths;
+
+const locale = Astro.params.locale as Locale;
+const titles: Record<Locale, string> = {
+  en: 'Address Data Monitor', 'zh-CN': '地址数据监控', 'zh-TW': '地址資料監控', ja: '住所データ監視', ko: '주소 데이터 모니터',
+  de: 'Adressdatenmonitor', fr: "Suivi des données d'adresse", es: 'Monitor de datos de direcciones', pt: 'Monitor de dados de endereços'
+};
+---
+<Layout locale={locale} pagePath="monitor" title={titles[locale]}>
+  <PublicMonitor client:load locale={locale} />
+</Layout>

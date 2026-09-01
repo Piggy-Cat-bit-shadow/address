@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v1.0
+        description: Release version, for example v2.0.6
         required: true
-        default: v1.0
+        default: v2.0.6
 
 permissions:
   contents: read
@@ -85,7 +85,7 @@ jobs:
           version='${{ steps.version.outputs.value }}'
           name="address-$version"
           mkdir -p "release/$name"
-          for path in .env.example LICENSE README.md README.zh-CN.md README.zh-TW.md astro.config.mjs package.json package-lock.json tsconfig.json config docs ops public scripts server src; do
+          for path in .dockerignore .env.example Dockerfile docker-compose.yml LICENSE README.md README.zh-CN.md README.zh-TW.md astro.config.mjs package.json package-lock.json tsconfig.json config docs image ops public scripts server src; do
             cp -a "$path" "release/$name/"
           done
           cp -a dist "release/$name/dist"
@@ -107,32 +107,24 @@ jobs:
             exit 1
           fi
           (cd release && sha256sum -c SHA256SUMS.txt)
-      - name: Write bilingual release notes
+      - name: Write release notes
         shell: bash
         run: |
+          version='${{ steps.version.outputs.value }}'
           cat > release/RELEASE_NOTES.md <<'NOTES'
-          ## Address v1.0
+          ### Deployment
+          - Added a single-file Docker Compose deployment: download `docker-compose.yml` and run `docker compose up -d` without cloning the repository or running an initialization script.
+          - Added an idempotent bootstrap service that generates and persists PostgreSQL, encryption, synchronization, and broker secrets.
+          - Preserved existing `config/secrets` installations and hardened the production Compose overlay so PostgreSQL and legacy secrets are not recreated during blue-green upgrades.
 
-          ### New features
-          - Self-hosted address and test-profile generation for 27 countries and regions.
-          - Source-language, English, and Simplified-Chinese address presentations.
-          - Evidence-backed residential mode, location filters, IP-nearby generation, and deterministic fallbacks.
-          - Resumable Overture/Geofabrik synchronization with SQLite WAL/RTree storage.
+          ### Access and security
+          - Set the first-run administrator password to `admin`, disabled the frontend password by default, and require the default administrator password to be changed before other administrator features are available.
+          - Added optional first-run administrator and frontend password settings directly in `docker-compose.yml`.
+          - Added validated multi-origin CORS support while retaining backward compatibility with the previous single-origin setting.
 
-          ### Quick start
-          Download either archive, verify it with `SHA256SUMS.txt`, then follow the VPS deployment section in the README. Address databases and private credentials are intentionally excluded.
-
-          ### 新功能
-          - 支持 27 个国家和地区的自托管地址与测试资料生成。
-          - 提供原文、English、简体中文三种地址表示。
-          - 支持住宅证据、地区筛选、IP 就近生成和确定性回退。
-          - 使用 SQLite WAL/RTree，并支持 Overture/Geofabrik 断点续跑同步。
-
-          ### 快速开始
-          下载任一压缩包，使用 `SHA256SUMS.txt` 校验，然后按照 README 的 VPS 部署章节操作。发布包不包含地址数据库或私人凭据。
-
-          ### License and attribution / 许可证与来源
-          Project code is MIT-licensed. OpenStreetMap-derived data remains under ODbL and Overture records retain source-specific terms. No production database is included.
+          ### Documentation and verification
+          - Updated the English, Simplified Chinese, and Traditional Chinese README, API, deployment, backup, and restore instructions for the one-file deployment flow.
+          - Added bootstrap persistence, legacy-secret conflict, forced-password-change, multi-origin, and production deployment regression coverage.
           NOTES
       - name: Publish stable GitHub release
         shell: bash
@@ -143,6 +135,6 @@ jobs:
             "release/address-$version.zip" \
             release/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Address $version" \
+            --title "$version" \
             --notes-file release/RELEASE_NOTES.md \
             --verify-tag

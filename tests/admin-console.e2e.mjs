@@ -37,10 +37,25 @@ const waitForServer = async (baseUrl, server, errors) => {
 };
 
 const panel = (page, value) => page.locator('.admin-panel > header h2').filter({ hasText: new RegExp(`^${value}$`) });
-const login = async (page, password) => {
+const selectLocale = async (page, label) => {
+  await page.getByRole('button', { name: 'Language', exact: true }).click();
+  await page.getByRole('option', { name: label, exact: true }).click();
+};
+const fillLogin = async (page, password) => {
+  await page.waitForFunction(() => !document.querySelector('astro-island[ssr]'));
   await page.locator('input[type=password]').fill(password);
-  await page.getByRole('button', { name: '登录', exact: true }).click();
-  await panel(page, '地址数据').waitFor();
+  const button = page.getByRole('button', { name: '登录', exact: true });
+  await page.waitForFunction((element) => !element.disabled, await button.elementHandle());
+  return button;
+};
+const login = async (page, password, failedResponses = []) => {
+  const button = await fillLogin(page, password);
+  await button.click();
+  try { await page.locator('.admin-shell').waitFor(); }
+  catch (error) {
+    const detail = await page.locator('.admin-error').textContent().catch(() => '');
+    throw new Error(`ADMIN_LOGIN_FAILED:${detail || page.url()}:${failedResponses.join(',')}`, { cause: error });
+  }
 };
 
 await mkdir(resolve(runtime, 'imports'), { recursive: true });
@@ -53,80 +68,155 @@ await writeFile(resolve(runtime, 'imports', 'area.json'), JSON.stringify([{
 }]), 'utf8');
 
 const port = await availablePort();
+let syncPort = await availablePort();
+while (syncPort === port) syncPort = await availablePort();
 const baseUrl = `http://127.0.0.1:${port}`;
+const syncBaseUrl = `http://127.0.0.1:${syncPort}`;
 const serverErrors = [];
 const server = spawn(process.execPath, ['--import', 'tsx', 'server/api/server.ts'], {
   cwd: root,
   env: {
     ...process.env,
+    NODE_ENV: 'test', ADDRESS_TEST_DATABASE: 'memory',
     API_HOST: '127.0.0.1', API_PORT: String(port),
-    ADDRESS_DATABASE_PATH: resolve(runtime, 'address.sqlite'), CONTROL_DATABASE_PATH: resolve(runtime, 'control.sqlite'),
     CONFIG_MASTER_KEY: '3333333333333333333333333333333333333333333333333333333333333333',
     ADMIN_BOOTSTRAP_PASSWORD: 'initial admin password', COOKIE_SECURE: 'false', STATIC_ROOT: resolve(root, 'dist'),
-    ADDRESS_DATA_ROOT: runtime, ADDRESS_SYNC_CACHE_DIR: resolve(runtime, 'staging'), AMAP_API_KEY: ''
+    ALLOWED_ORIGINS: 'https://address.daimonna.com,https://address.333186.xyz',
+    ADDRESS_DATA_ROOT: runtime, ADDRESS_SYNC_CACHE_DIR: resolve(runtime, 'staging'), AMAP_API_KEY: '',
+    SYNC_CONTROL_URL: syncBaseUrl, SYNC_ADMIN_TOKEN: 'e2e-sync-admin-token'
   },
   stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true
 });
 server.stderr.on('data', (value) => serverErrors.push(String(value)));
 
+const syncErrors = [];
+const syncControl = spawn(process.execPath, ['--import', 'tsx', 'server/sync/index.mjs'], {
+  cwd: root,
+  env: {
+    ...process.env,
+    NODE_ENV: 'test', ADDRESS_TEST_DATABASE: 'memory',
+    SYNC_HOST: '127.0.0.1', SYNC_PORT: String(syncPort),
+    SYNC_ADMIN_TOKEN: 'e2e-sync-admin-token',
+    SYNC_STATE_DIR: resolve(runtime, 'sync-control'),
+    SYNC_SCHEDULER_ENABLED: 'false', TRANSLATION_BACKFILL_ENABLED: 'false'
+  },
+  stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true
+});
+syncControl.stderr.on('data', (value) => syncErrors.push(String(value)));
+const waitForSyncControl = async () => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (syncControl.exitCode !== null) throw new Error(`ADMIN_E2E_SYNC_CONTROL_EXITED:${syncErrors.join('')}`);
+    try { if ((await fetch(`${syncBaseUrl}/healthz`)).ok) return; } catch {}
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`ADMIN_E2E_SYNC_CONTROL_TIMEOUT:${syncErrors.join('')}`);
+};
+
 let browser;
 try {
   await waitForServer(baseUrl, server, serverErrors);
+  await waitForSyncControl();
+  const preflight = await fetch(`${baseUrl}/api/v1/generate`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://address.daimonna.com',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'authorization,content-type'
+    }
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://address.daimonna.com');
   const browserPath = executablePath();
   assert.ok(browserPath, 'Set PLAYWRIGHT_EXECUTABLE_PATH to a Chromium-compatible browser');
   browser = await chromium.launch({ headless: true, executablePath: browserPath });
-  const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+  const context = await browser.newContext({ locale: 'zh-CN', permissions: ['clipboard-read', 'clipboard-write'] });
   const pageErrors = [];
+  const failedResponses = [];
+  context.on('response', (response) => { if (response.status() >= 500) failedResponses.push(response.url()); });
   context.on('page', (page) => page.on('pageerror', (error) => pageErrors.push(error.message)));
 
   const loginPage = await context.newPage();
   await loginPage.goto(`${baseUrl}/admin/`);
-  await loginPage.locator('input[type=password]').fill('wrong administrator password');
-  await loginPage.getByRole('button', { name: '登录', exact: true }).click();
+  await (await fillLogin(loginPage, 'wrong administrator password')).click();
   await loginPage.locator('.admin-error').filter({ hasText: '管理员密码错误' }).waitFor();
-  await login(loginPage, 'initial admin password');
+  await login(loginPage, 'initial admin password', failedResponses);
 
   const page = await context.newPage();
   await page.goto(`${baseUrl}/admin/`);
-  await panel(page, '地址数据').waitFor();
+  await page.locator('.dashboard-page').waitFor();
   assert.equal(await page.locator('.admin-content > header.admin-topbar').count(), 1);
-  assert.equal(await page.locator('.admin-content > header.admin-topbar h1').count(), 0);
-  assert.equal(await page.getByRole('button', { name: '英文', exact: true }).count(), 1);
+  assert.equal(await page.locator('.admin-content > header.admin-topbar h1').count(), 1);
+  assert.equal(await page.locator('.admin-sidebar .nav-icon').count(), 9);
+  assert.equal(await page.locator('.dashboard-kpis .dashboard-kpi').count(), 4);
+  assert.equal(await page.locator('.world-distribution-map').count(), 1);
+  const mapCanvas = page.locator('.world-distribution-map .maplibregl-canvas').first();
+  await mapCanvas.waitFor();
+  assert.equal(await page.locator('.map-legend span').count(), 6);
+  assert.equal(await page.locator('.map-zoom-controls button').count(), 3);
+  assert.equal(await page.locator('.country-coverage-table').count(), 1);
+  assert.equal(await page.locator('.country-data-table > .table-pagination').count(), 0);
+  assert.equal(await page.getByRole('columnheader', { name: '更新数据', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('columnheader', { name: '操作', exact: true }).count(), 0);
+  assert.equal(await page.getByText('全部数据', { exact: true }).count(), 0);
+  assert.equal(await page.getByText('导出数据', { exact: true }).count(), 0);
+  assert.equal(await page.getByText('当前数据库没有地址记录。导入或同步数据后，可继续下钻查看国家、省市和区县。', { exact: true }).count(), 0);
+  assert.equal(await page.getByText('按真实住宅总量', { exact: true }).count(), 0);
+  await page.getByRole('button', { name: 'Zoom in', exact: true }).click({ clickCount: 2, delay: 250 });
+  await page.waitForTimeout(800);
+  const worldBox = await mapCanvas.boundingBox();
+  assert.ok(worldBox);
+  const worldBeforeDrag = await mapCanvas.screenshot();
+  await page.mouse.move(worldBox.x + worldBox.width / 2, worldBox.y + worldBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(worldBox.x + worldBox.width / 2 + 45, worldBox.y + worldBox.height / 2 + 35);
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert.equal(worldBeforeDrag.equals(await mapCanvas.screenshot()), false);
+  await page.getByRole('button', { name: 'Reset map', exact: true }).click();
+  await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await page.getByRole('button', { name: 'Zoom out', exact: true }).click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await mapCanvas.dispatchEvent('wheel', { deltaY: -120, ctrlKey: true, clientX: 400, clientY: 180 });
+  await page.waitForTimeout(250);
+  assert.equal(await page.evaluate(() => window.scrollY), 0);
+  await page.getByRole('button', { name: '展开地图', exact: true }).click();
+  const mapDialog = page.getByRole('dialog', { name: '全球地址分布', exact: true });
+  await mapDialog.waitFor();
+  await mapDialog.locator('.world-distribution-map .maplibregl-canvas').waitFor();
+  await mapDialog.getByRole('button', { name: '关闭', exact: true }).click();
+  assert.equal(await mapDialog.count(), 0);
+  assert.equal(await page.locator('.dashboard-ranking').count(), 0);
+  assert.equal(await page.locator('.country-data-table').count(), 1);
+  assert.equal(await page.locator('.admin-sidebar-status').count(), 1);
+  assert.equal(await page.getByText('管理员', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('超级管理员', { exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Language', exact: true }).count(), 1);
   assert.equal(await page.getByText('数据与系统管理', { exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '审计日志', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '系统管理', exact: true }).count(), 0);
-  assert.equal(await page.locator('button.drill-button').filter({ hasText: '美国' }).isDisabled(), true);
-  await page.getByRole('button', { name: '英文', exact: true }).click();
-  await panel(page, 'Address data').waitFor();
-  await page.getByRole('button', { name: 'Chinese', exact: true }).click();
-  await panel(page, '地址数据').waitFor();
+  await selectLocale(page, 'English');
+  await page.getByRole('heading', { name: 'Address Data Overview', exact: true }).waitFor();
+  await selectLocale(page, '简体中文');
+  await page.getByRole('heading', { name: '地址数据总览', exact: true }).waitFor();
 
   const views = [
-    ['仪表盘', '地址数据'], ['同步策略', '地址数量与并发'], ['地址黑名单', '地址黑名单'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
-    ['中国同步', '自动同步'], ['接口令牌', '接口令牌'], ['任务中心', '任务中心']
+    ['仪表盘', null], ['地址黑名单', '地址黑名单'], ['访问与安全', '访问策略'], ['地图密钥', '地图密钥'],
+    ['地址数据', 'address-data'], ['同步队列', 'sync-queue'], ['快捷区域', 'shortcuts'], ['接口令牌', '接口令牌']
   ];
   for (let round = 0; round < 3; round += 1) {
     for (const [tab, title] of views) {
       await page.getByRole('button', { name: tab, exact: true }).click();
-      await panel(page, title).waitFor();
+      if (title === 'address-data') await page.locator('.address-data-page').waitFor();
+      else if (title === 'sync-queue') await page.locator('.sync-queue-panel').waitFor();
+      else if (title === 'shortcuts') await page.locator('.shortcut-settings-page').waitFor();
+      else if (title) await panel(page, title).waitFor();
+      else await page.locator('.dashboard-page').waitFor();
     }
   }
 
-  await page.getByRole('button', { name: '同步策略', exact: true }).click();
-  assert.equal(await page.getByText('内置排除规则', { exact: true }).count(), 0);
-  await page.locator('.policy-runtime-form input').nth(0).fill('4');
-  await page.locator('.policy-runtime-form input').nth(1).fill('2');
-  await page.getByRole('button', { name: '保存并发设置', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '并发设置已保存' }).waitFor();
-  const usPolicyRow = page.locator('tbody tr').filter({ hasText: /美国.*US/s }).first();
-  await usPolicyRow.getByRole('button', { name: '修改策略', exact: true }).click();
-  const policyDialog = page.getByRole('dialog', { name: '修改策略' });
-  await policyDialog.locator('input[name=targetCount]').fill('12345');
-  await policyDialog.getByRole('button', { name: '保存', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '同步策略已保存' }).waitFor();
-  await usPolicyRow.getByRole('button', { name: '管理区域', exact: true }).click();
-  await page.locator('.admin-empty').filter({ hasText: '当前层级暂无行政节点' }).waitFor();
-  await page.getByRole('button', { name: '返回国家', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '同步策略', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: '任务中心', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('columnheader', { name: '普通地址', exact: true }).count(), 0);
 
   await page.getByRole('button', { name: '地址黑名单', exact: true }).click();
   await page.getByText('内置排除规则', { exact: true }).waitFor();
@@ -157,27 +247,38 @@ try {
   assert.equal(await page.locator('input[name=frontendPasswordEnabled]').isChecked(), true);
 
   await page.getByRole('button', { name: '地图密钥', exact: true }).click();
+  const providerSection = (name) => page.locator('.provider-group').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  assert.equal(await page.locator('.provider-group').count(), 7);
+  for (const provider of ['高德地图', '百度地图', '腾讯地图', 'OneMap', 'Geoapify', 'Google Geocoding', 'Mappls']) {
+    await providerSection(provider).waitFor();
+  }
+  await providerSection('Google Geocoding').getByText('0 个密钥', { exact: true }).waitFor();
   assert.equal(await page.locator('input[name=googleChina]').isChecked(), true);
   assert.equal(await page.locator('input[name=googleInternational]').isChecked(), true);
   assert.equal(await page.locator('input[name=amapChina]').isChecked(), false);
   assert.equal(await page.locator('input[name=amapInternational]').isChecked(), false);
-  await page.getByRole('button', { name: '+ 配置密钥', exact: true }).click();
-  const browserMapDialog = page.getByRole('dialog', { name: '配置高德地图浏览器密钥' });
+  assert.equal(await page.locator('input[name=amapChina]').isDisabled(), true);
+  await page.locator('.map-prerequisite').getByRole('button', { name: '配置凭据', exact: true }).click();
+  const browserMapDialog = page.getByRole('dialog', { name: '配置高德前端地图凭据' });
   await browserMapDialog.locator('input[name=label]').fill('e2e-browser-map');
   await browserMapDialog.locator('input[name=apiKey]').fill('e2e-public-browser-key');
   await browserMapDialog.locator('input[name=securityCode]').fill('e2e-private-security-code');
   await browserMapDialog.getByRole('button', { name: '保存', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '高德地图浏览器密钥已保存' }).waitFor();
+  await page.locator('.admin-notice').filter({ hasText: '高德前端地图凭据已保存' }).waitFor();
   assert.equal((await page.locator('body').textContent()).includes('e2e-public-browser-key'), false);
   assert.equal((await page.locator('body').textContent()).includes('e2e-private-security-code'), false);
-  const browserKeyCell = page.locator('.credential-summary > div').filter({ hasText: '浏览器接口密钥' });
+  const browserPanel = page.locator('.admin-panel').filter({ has: page.getByRole('heading', { name: '高德前端地图凭据', exact: true }) });
+  const browserRow = browserPanel.locator('.amap-browser-row');
+  await browserRow.waitFor();
+  assert.equal(await providerSection('高德地图').locator('.amap-browser-row').count(), 0);
+  const browserKeyCell = browserRow.locator('.amap-browser-secrets > div').filter({ hasText: 'JS API Key' });
   await browserKeyCell.getByRole('button', { name: '显示', exact: true }).click();
   await browserKeyCell.getByText('e2e-public-browser-key', { exact: true }).waitFor();
   await browserKeyCell.getByRole('button', { name: '复制', exact: true }).click();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'e2e-public-browser-key');
   await browserKeyCell.getByRole('button', { name: '隐藏', exact: true }).click();
   assert.equal(await browserKeyCell.getByText('e2e-public-browser-key', { exact: true }).count(), 0);
-  const browserCodeCell = page.locator('.credential-summary > div').filter({ hasText: '安全密钥' });
+  const browserCodeCell = browserRow.locator('.amap-browser-secrets > div').filter({ hasText: '安全密钥' });
   await browserCodeCell.getByRole('button', { name: '显示', exact: true }).click();
   await browserCodeCell.getByText('e2e-private-security-code', { exact: true }).waitFor();
   await browserCodeCell.getByRole('button', { name: '隐藏', exact: true }).click();
@@ -201,9 +302,17 @@ try {
     amapApiKey: 'e2e-public-browser-key', serviceHost: '/_AMapService'
   });
   assert.equal(JSON.stringify(mapConfiguration).includes('e2e-private-security-code'), false);
-  await page.getByRole('button', { name: '+ 添加密钥', exact: true }).click();
+  await providerSection('高德地图').getByRole('button', { name: '添加密钥', exact: true }).click();
   const keyDialog = page.getByRole('dialog', { name: '添加地图密钥' });
   await keyDialog.waitFor();
+  assert.equal(await keyDialog.getByRole('option', { name: '高德地图', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '百度地图', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '腾讯地图', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: 'OneMap', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Geoapify', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: '有道翻译', exact: true }).count(), 0);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Google Geocoding', exact: true }).count(), 1);
+  assert.equal(await keyDialog.getByRole('option', { name: 'Mappls', exact: true }).count(), 1);
   assert.equal(await keyDialog.getByText('QPS', { exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('每日额度', { exact: true }).count(), 0);
   assert.equal(await keyDialog.getByText('共享配额组', { exact: true }).count(), 0);
@@ -211,11 +320,10 @@ try {
   await keyDialog.locator('input[name=secret]').fill('fake-key-for-e2e');
   await keyDialog.getByRole('button', { name: '保存', exact: true }).click();
   await page.locator('.admin-notice').filter({ hasText: '地图密钥已保存' }).waitFor();
-  const providerRow = () => page.locator('tbody tr').filter({ hasText: 'e2e-amap' });
+  const providerRow = () => providerSection('高德地图').locator('.provider-key-row').filter({ hasText: 'e2e-amap' });
   await providerRow().waitFor();
-  await providerRow().getByText('每月', { exact: false }).waitFor();
-  await providerRow().getByText('0 / 5,000', { exact: true }).waitFor();
-  await providerRow().getByText('本地统计', { exact: false }).waitFor();
+  await providerRow().getByText('0/5,000 每月', { exact: true }).waitFor();
+  assert.equal((await providerRow().textContent()).includes('本地统计'), false);
   assert.equal((await providerRow().textContent()).includes('fake-key-for-e2e'), false);
   const providerSecretCell = providerRow().locator('.secret-cell');
   await providerSecretCell.getByRole('button', { name: '显示', exact: true }).click();
@@ -229,10 +337,41 @@ try {
   await providerRow().getByRole('button', { name: '启用', exact: true }).click();
   await providerRow().getByRole('button', { name: '停用', exact: true }).waitFor();
 
+  const translationPanel = page.locator('.admin-panel').filter({ has: page.getByRole('heading', { name: '在线翻译', exact: true }) });
+  assert.equal(await translationPanel.getByRole('switch', { name: '启用谷歌翻译', exact: true }).count(), 1);
+  assert.equal(await translationPanel.locator('input[name=googleTranslationEnabled]').count(), 0);
+  await translationPanel.getByText('未配置', { exact: true }).waitFor();
+  assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 0);
+  const createYoudao = async (label, appKey, appSecret) => {
+    await translationPanel.getByRole('button', { name: '添加密钥', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '添加密钥', exact: true });
+    await dialog.locator('input[name=label]').fill(label);
+    await dialog.locator('input[name=youdaoAppKey]').fill(appKey);
+    await dialog.locator('input[name=youdaoAppSecret]').fill(appSecret);
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.admin-notice').filter({ hasText: '有道翻译密钥已保存' }).waitFor();
+  };
+  await createYoudao('e2e-youdao-primary', 'e2e-youdao-app-key', 'e2e-youdao-app-secret');
+  await createYoudao('e2e-youdao-backup', 'e2e-youdao-backup-key', 'e2e-youdao-backup-secret');
+  await page.locator('.admin-notice').filter({ hasText: '有道翻译密钥已保存' }).waitFor();
+  await translationPanel.getByText('2 个密钥', { exact: true }).waitFor();
+  assert.equal(await translationPanel.locator('.provider-key-row').count(), 2);
+  assert.equal(await translationPanel.getByRole('button', { name: '测试', exact: true }).count(), 2);
+  assert.equal((await page.locator('body').textContent()).includes('e2e-youdao-app-secret'), false);
+  const youdaoPrimary = translationPanel.locator('.provider-key-row').filter({ hasText: 'e2e-youdao-primary' });
+  const youdaoAppKey = youdaoPrimary.locator('.provider-key-secret').filter({ hasText: '应用 ID（AppKey）' });
+  const youdaoAppSecret = youdaoPrimary.locator('.provider-key-secret').filter({ hasText: '应用密钥（AppSecret）' });
+  await youdaoAppKey.getByRole('button', { name: '显示', exact: true }).click();
+  await youdaoAppKey.getByText('e2e-youdao-app-key', { exact: true }).waitFor();
+  await youdaoAppSecret.getByRole('button', { name: '显示', exact: true }).click();
+  await youdaoAppSecret.getByText('e2e-youdao-app-secret', { exact: true }).waitFor();
+
   await page.getByRole('button', { name: '接口令牌', exact: true }).click();
-  await page.getByRole('button', { name: '英文', exact: true }).click();
+  await selectLocale(page, 'English');
+  await page.getByRole('button', { name: 'API Tokens', exact: true }).click();
   await panel(page, 'API tokens').waitFor();
-  await page.getByRole('button', { name: 'Chinese', exact: true }).click();
+  await selectLocale(page, '简体中文');
+  await page.getByRole('button', { name: '接口令牌', exact: true }).click();
   await panel(page, '接口令牌').waitFor();
   assert.equal(await page.getByRole('columnheader', { name: '前缀', exact: true }).count(), 0);
   assert.equal(await page.getByRole('columnheader', { name: '最近使用', exact: true }).count(), 0);
@@ -282,46 +421,116 @@ try {
   assert.equal(importStatus, 200);
 
   await page.getByRole('button', { name: '仪表盘', exact: true }).click();
-  const drill = (name) => page.locator('button.drill-button').filter({ hasText: new RegExp(`^${name}$`) });
+  const drill = (name) => page.locator('button.drill-button, button.country-name-button').filter({ hasText: new RegExp(`${name}$`) });
   await drill('中国').click();
   await drill('北京市').click();
   await drill('北京市').click();
   await page.getByText('朝阳区', { exact: true }).waitFor();
   await page.getByRole('button', { name: '全部国家', exact: true }).click();
+  await page.locator('.country-coverage-table tbody tr').first().waitFor();
+  assert.equal(await page.locator('.country-coverage-table tbody tr').count(), 27);
+  assert.equal(await page.locator('.country-data-table > .table-pagination').count(), 0);
+  assert.equal(await page.locator('.world-distribution-map .maplibregl-canvas').count(), 1);
+  assert.equal(await page.locator('.world-distribution-map img').count(), 0);
+  await page.locator('.country-coverage-table img.country-flag').first().waitFor();
+  assert.match(await page.locator('.country-coverage-table img.country-flag').first().getAttribute('src'), /^https:\/\/flagcdn\.com\/24x18\/[a-z]{2}\.png$/u);
+  await page.locator('.country-table-tools input').fill('美国');
   await drill('美国').waitFor();
+  assert.equal(await page.locator('.country-coverage-table tbody tr').count(), 1);
+  await page.locator('.country-table-tools input').fill('');
+  await page.getByLabel('大洲筛选').selectOption('asia');
+  assert.ok(await page.locator('.country-coverage-table tbody tr').count() > 1);
+  await page.getByLabel('排序方式').selectOption('residential-asc');
+  const ascendingCounts = await page.locator('.country-coverage-table tbody tr .numeric-cell').allTextContents();
+  const numericCounts = ascendingCounts.map((value) => Number(value.replaceAll(',', '')));
+  assert.deepEqual(numericCounts, [...numericCounts].sort((left, right) => left - right));
+  await page.getByLabel('大洲筛选').selectOption('all');
+  await page.getByLabel('排序方式').selectOption('residential-desc');
 
-  await page.getByRole('button', { name: '中国同步', exact: true }).click();
-  await page.getByText('系统优先为每个区县补齐 10 个合格住宅小区，完成基础覆盖后自动继续丰富数据。', { exact: true }).waitFor();
-  await page.getByRole('button', { name: '开始/继续同步', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '同步任务已提交' }).waitFor();
-  await page.waitForFunction(async () => {
-    const response = await fetch('/admin/api/runs', { cache: 'no-store' }); const body = await response.json();
-    return ['paused_quota', 'failed', 'succeeded'].includes(body.data?.[0]?.status);
-  }, undefined, { timeout: 30_000 });
-  await page.getByRole('button', { name: '任务中心', exact: true }).click();
-  await panel(page, '任务中心').waitFor();
-  await page.locator('.admin-panel').filter({ hasText: /paused_quota|failed|succeeded/u }).waitFor({ timeout: 30_000 });
+  let areaRequests = 0;
+  page.on('request', (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === '/admin/api/china/areas') areaRequests += 1;
+  });
+  await page.getByRole('button', { name: '同步队列', exact: true }).click();
+  const queuePanel = page.locator('.sync-queue-panel');
+  await queuePanel.waitFor();
+  await queuePanel.locator('h2').filter({ hasText: '同步队列' }).waitFor();
+  try { await queuePanel.locator('tr.queue-row[data-country="CN"]').waitFor({ timeout: 20_000 }); }
+  catch (error) {
+    throw new Error(`ADMIN_QUEUE_FAILED:${await queuePanel.textContent()}:${failedResponses.join(',')}`, { cause: error });
+  }
+  assert.ok(await queuePanel.locator('tr.queue-row').count() >= 1);
+  assert.equal(await queuePanel.locator('tr.queue-row').first().getAttribute('data-country'), 'CN');
+  assert.equal(await queuePanel.locator('.queue-unavailable').count(), 0);
+  await page.getByRole('button', { name: '地址数据', exact: true }).click();
+  await page.locator('.address-data-page').waitFor();
+  assert.equal(await page.locator('.sync-queue-panel').count(), 0);
+  const chinaRow = page.locator('.address-data-table tbody tr').filter({ has: page.getByText('中国', { exact: true }) });
+  try { await chinaRow.waitFor({ timeout: 20_000 }); }
+  catch (error) {
+    throw new Error(`ADMIN_ADDRESS_DATA_FAILED:${await page.locator('.address-data-page').textContent()}:${failedResponses.join(',')}`, { cause: error });
+  }
+  await chinaRow.getByRole('button', { name: '详情', exact: true }).click();
+  const addressDialog = page.getByRole('dialog', { name: /中国.*详情/u });
+  await addressDialog.getByText('区县覆盖', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '开始/继续同步', exact: true }).count(), 0);
+  await addressDialog.locator('.coverage-filters select').nth(0).selectOption('110000');
+  await addressDialog.locator('.coverage-filters select').nth(1).selectOption('110100');
+  await addressDialog.locator('.coverage-filters select').nth(2).selectOption('110105');
+  await addressDialog.locator('tbody tr').filter({ hasText: '朝阳区' }).waitFor();
+  await addressDialog.getByText('第 1 / 1 页，共 1 条', { exact: true }).waitFor();
+  const settledAreaRequests = areaRequests;
+  await page.waitForTimeout(3200);
+  assert.equal(areaRequests, settledAreaRequests);
+  assert.equal(await page.evaluate(async () => (await fetch('/admin/api/china/areas?provinceAdcode=invalid')).status), 400);
+
+  assert.ok(await page.locator('.address-data-table .badge.target-state').count() > 0);
+  assert.ok(await page.locator('.address-data-table .coverage-cell').count() > 0);
+
+  await addressDialog.getByRole('button', { name: '加载节点目标', exact: true }).click();
+  const nodeTable = addressDialog.locator('.node-target-table');
+  const beijingNodeRow = nodeTable.locator('tbody tr').filter({ hasText: '北京市' }).first();
+  await beijingNodeRow.waitFor();
+  await beijingNodeRow.getByRole('button', { name: '编辑', exact: true }).click();
+  await beijingNodeRow.locator('input').fill('8');
+  await beijingNodeRow.getByRole('button', { name: '保存', exact: true }).click();
+  await addressDialog.locator('.node-panel-notice').filter({ hasText: '节点目标已保存' }).waitFor();
+  await beijingNodeRow.locator('.target-source-tag.override').waitFor();
+  await beijingNodeRow.getByText('8', { exact: true }).waitFor();
+  await beijingNodeRow.getByRole('button', { name: '恢复默认', exact: true }).click();
+  await addressDialog.locator('.node-panel-notice').filter({ hasText: '已恢复默认目标' }).waitFor();
+  await beijingNodeRow.locator('.target-source-tag.default').waitFor();
+  await beijingNodeRow.getByText('800', { exact: true }).waitFor();
+
+  await addressDialog.locator('input[name=minPerNode]').fill('6');
+  await addressDialog.locator('input[name=coveragePercent]').fill('90');
+  await addressDialog.getByRole('button', { name: '保存设置', exact: true }).click();
+  await page.locator('.admin-notice').filter({ hasText: '国家数据设置已保存' }).waitFor();
+  await chinaRow.getByRole('button', { name: '详情', exact: true }).click();
+  await addressDialog.locator('input[name=minPerNode]').waitFor();
+  assert.equal(await addressDialog.locator('input[name=minPerNode]').inputValue(), '6');
+  assert.equal(await addressDialog.locator('input[name=coveragePercent]').inputValue(), '90');
+  await addressDialog.getByRole('button', { name: '关闭', exact: true }).click();
 
   await page.getByRole('button', { name: '地图密钥', exact: true }).click();
+  page.once('dialog', (dialog) => dialog.accept());
   await providerRow().getByRole('button', { name: '删除', exact: true }).click();
   await providerRow().waitFor({ state: 'detached' });
   page.once('dialog', (dialog) => dialog.accept());
-  await page.locator('.credential-summary').getByRole('button', { name: '删除', exact: true }).click();
-  await page.getByText('尚未配置高德地图浏览器密钥', { exact: true }).waitFor();
+  await browserRow.getByRole('button', { name: '删除', exact: true }).click();
+  await page.getByText('尚未配置高德前端地图凭据', { exact: true }).waitFor();
 
   await page.getByRole('button', { name: '访问与安全', exact: true }).click();
-  await page.locator('input[name=apiAuthEnabled]').uncheck();
-  await page.getByRole('button', { name: '保存设置', exact: true }).click();
-  await page.locator('.admin-notice').filter({ hasText: '访问设置已保存' }).waitFor();
-  assert.equal(await page.evaluate(async () => (await fetch('/api/v1/countries')).status), 200);
-  await page.locator('input[name=apiAuthEnabled]').check();
+  assert.equal(await page.locator('input[name=apiAuthEnabled]').count(), 0);
+  assert.equal(await page.evaluate(async () => (await fetch('/api/v1/countries')).status), 401);
   await page.locator('input[name=frontendPasswordEnabled]').uncheck();
   await page.getByRole('button', { name: '保存设置', exact: true }).click();
   await page.locator('.admin-notice').filter({ hasText: '访问设置已保存' }).waitFor();
-  const openContext = await browser.newContext();
+  const openContext = await browser.newContext({ locale: 'zh-CN' });
   const openPage = await openContext.newPage();
   await openPage.goto(`${baseUrl}/`);
-  assert.notEqual(new URL(openPage.url()).pathname, '/access/');
+  assert.notEqual(new URL(openPage.url()).pathname, '/zh-CN/access/');
   await openContext.close();
   await page.locator('input[name=frontendPasswordEnabled]').check();
   await page.getByRole('button', { name: '保存设置', exact: true }).click();
@@ -331,11 +540,11 @@ try {
   await page.getByRole('heading', { name: '管理员登录', exact: true }).waitFor();
   await login(page, 'new administrator password');
 
-  const frontendContext = await browser.newContext();
+  const frontendContext = await browser.newContext({ locale: 'zh-CN' });
   const frontend = await frontendContext.newPage();
   frontend.on('pageerror', (error) => pageErrors.push(error.message));
   await frontend.goto(`${baseUrl}/`);
-  assert.equal(new URL(frontend.url()).pathname, '/access/');
+  assert.equal(new URL(frontend.url()).pathname, '/zh-CN/access/');
   await frontend.locator('#password').fill('wrong frontend password');
   await frontend.getByRole('button', { name: '进入', exact: true }).click();
   await frontend.locator('#error').filter({ hasText: '密码不正确' }).waitFor();
@@ -348,6 +557,12 @@ try {
   console.log('admin console e2e passed');
 } finally {
   if (browser) await browser.close();
+  if (syncControl.exitCode === null) {
+    const exited = new Promise((resolveExit) => syncControl.once('exit', resolveExit));
+    syncControl.kill('SIGTERM');
+    await Promise.race([exited, new Promise((resolveWait) => setTimeout(resolveWait, 5_000))]);
+    if (syncControl.exitCode === null) syncControl.kill('SIGKILL');
+  }
   if (server.exitCode === null) {
     const exited = new Promise((resolveExit) => server.once('exit', resolveExit));
     server.kill('SIGTERM');

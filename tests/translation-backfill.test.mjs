@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runTranslationBackfillBatch } from '../server/sync/translation-backfill.mjs';
+import { runTranslationBackfillBatch, startTranslationBackfill } from '../server/sync/translation-backfill.mjs';
 
 const makeRow = (rid, overrides = {}) => ({
   rid,
@@ -24,20 +24,21 @@ const japaneseRow = (rid) => makeRow(rid, {
   })
 });
 
-const buildDb = (rows, updates) => ({
+const buildDb = (rows, updates, queries = []) => ({
   prepare(sql) {
+    queries.push(sql);
     const statement = {
       _args: [],
       bind(...args) { statement._args = args; return statement; },
       async all() {
         if (sql.includes('FROM address_pool WHERE active')) {
-          const cursor = Number(statement._args[0] || 0);
-          return { results: rows.filter((row) => row.rid > cursor) };
+          const cursor = String(statement._args[0] || '');
+          return { results: rows.filter((row) => row.id > cursor) };
         }
         return { results: [] };
       },
       async run() {
-        if (sql.startsWith('UPDATE address_pool')) updates.push({ id: statement._args[2], json: statement._args[0] });
+        if (sql.startsWith('UPDATE address_pool')) updates.push({ id: statement._args[1], json: statement._args[0] });
         return { success: true };
       },
       async first() { return null; }
@@ -91,5 +92,49 @@ describe('translation backfill worker', () => {
       fetchImpl
     });
     expect(again.updated).toBeGreaterThanOrEqual(0);
+  });
+
+  it('scans English-native rows whose stored Chinese variant is still English', async () => {
+    const updates = [];
+    const queries = [];
+    const native = { street: 'Main Street', locality: 'Toronto', houseNumber: '10' };
+    const row = makeRow(3, {
+      country_code: 'CA', native_language: 'en',
+      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': native })
+    });
+    const result = await runTranslationBackfillBatch({
+      database: buildDb([row], updates, queries),
+      environment: { TRANSLATION_BACKFILL_ENABLED: 'true' },
+      fetchImpl: translator({ 'zh-CN': new Map([['Main Street', '主街'], ['Toronto', '多伦多']]) })
+    });
+
+    expect(queries.find((sql) => sql.includes('FROM address_pool WHERE active')))
+      .not.toContain("native_language NOT LIKE 'en%'");
+    expect(result.updated).toBe(1);
+    expect(JSON.parse(updates[0].json)['zh-CN']).toMatchObject({ street: '主街', locality: '多伦多' });
+    expect(queries.find((sql) => sql.startsWith('UPDATE address_pool'))).not.toContain('last_seen_at');
+    expect(queries.some((sql) => sql.includes('address_pool_revisions'))).toBe(true);
+  });
+
+  it('continues bounded backfill batches while an address sync job is running', async () => {
+    const updates = [];
+    const native = { street: 'Main Street', locality: 'Toronto', houseNumber: '10' };
+    const row = makeRow(4, {
+      country_code: 'CA', native_language: 'en',
+      component_variants_json: JSON.stringify({ native, en: native, 'zh-CN': native })
+    });
+    let tick;
+    const stop = startTranslationBackfill({
+      database: buildDb([row], updates),
+      environment: { TRANSLATION_BACKFILL_ENABLED: 'true' },
+      isBusy: () => true,
+      intervalMs: 1,
+      setTimer: (callback) => { tick = callback; return { unref() {} }; }
+    });
+    vi.stubGlobal('fetch', translator({ 'zh-CN': new Map([['Main Street', '主街'], ['Toronto', '多伦多']]) }));
+
+    await tick();
+    stop();
+    expect(updates).toHaveLength(1);
   });
 });

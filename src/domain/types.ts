@@ -1,5 +1,7 @@
-export type Locale = 'en' | 'zh-CN';
+export const supportedLocales = ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'de', 'fr', 'es', 'pt'] as const;
+export type Locale = typeof supportedLocales[number];
 export type AddressLanguage = 'native' | 'en' | 'zh-CN';
+export type ProfileLanguage = 'native' | Locale;
 
 export type CountryCode =
   | 'US' | 'CA' | 'MX' | 'GB' | 'DE' | 'FR' | 'IT' | 'ES' | 'NL' | 'RU'
@@ -41,9 +43,19 @@ export interface LocationShortcut {
   type: 'region' | 'city' | 'postcode' | 'search';
 }
 
+export interface CountryShortcutConfig {
+  countryCode: CountryCode;
+  popularCities: LocationShortcut[];
+  adminShortcuts: LocationShortcut[];
+  specialAreaTitle: LocalizedText;
+  specialAreas: LocationShortcut[];
+}
+
 export interface LocationOption {
   value: string;
   label: string;
+  availableCount?: number;
+  disabled?: boolean;
   id?: string;
   parentId?: string;
   parentValue?: string;
@@ -57,7 +69,7 @@ export interface LocationOption {
   zhCN?: string;
 }
 
-export type AddressFilterField = 'region' | 'city' | 'postcode';
+export type AddressFilterField = 'region' | 'city' | 'district' | 'postcode';
 export type AddressResultField =
   | 'country'
   | 'buildingName'
@@ -82,7 +94,7 @@ export interface CountryAddressSchema {
 
 export interface CountryConfig {
   code: CountryCode;
-  name: Record<Locale, string>;
+  name: LocalizedText;
   nativeName: string;
   nativeLanguage: string;
   flag: string;
@@ -97,6 +109,7 @@ export interface CountryConfig {
     query: LocalizedText;
     region: LocalizedText;
     city: LocalizedText;
+    district?: LocalizedText;
     postcode: LocalizedText;
   };
   addressFormat: {
@@ -110,6 +123,7 @@ export interface CountryConfig {
   };
   popularCities: LocationShortcut[];
   adminShortcuts: LocationShortcut[];
+  specialAreaTitle: LocalizedText;
   specialAreas: LocationShortcut[];
   sources: SourceDefinition[];
 }
@@ -195,6 +209,14 @@ export interface GeneratedProfile {
   dateOfBirth: string;
 }
 
+export interface GeneratedProfilePresentation {
+  fullName: string;
+  company?: string;
+  accountDisplayName: string;
+  transactionDescription: string;
+  securityAnswer: string;
+}
+
 export type Iso4217Currency =
   | 'AUD' | 'BRL' | 'CAD' | 'CNY' | 'EUR' | 'GBP' | 'HKD' | 'INR' | 'JPY' | 'KRW'
   | 'MXN' | 'MYR' | 'NGN' | 'PHP' | 'RUB' | 'SAR' | 'SGD' | 'THB' | 'TRY' | 'TWD'
@@ -268,6 +290,7 @@ export interface GeneratedBundle {
   generatedAt: string;
   residential: boolean;
   profile: GeneratedProfile;
+  profilePresentations?: Record<Locale, GeneratedProfilePresentation>;
   extensions: GeneratedExtensions;
   address: VerifiedAddress;
   addressFormats: Record<AddressLanguage, AddressPresentation>;

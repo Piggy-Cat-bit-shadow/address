@@ -1,7 +1,8 @@
 import type { Locale } from './types';
+import { generatedMessages } from './i18n.generated';
 
-const en = {
-  brand: 'Real Address Generator',
+export const englishMessages = {
+  brand: 'Real Residential Address Generator',
   apiDocs: 'API docs',
   language: '简体中文',
   title: 'Generate a real address',
@@ -112,8 +113,6 @@ const en = {
   unknown: 'Address confirmed',
   sandbox: 'Sandbox only',
   cardNotice: 'Randomly generated Luhn-valid number · for form/testing use only, not a real card',
-  liveApiLabel: 'Use live API lookup ',
-  liveApiHint: '(query external providers in real time instead of the local database; slower)',
   cardProvider: 'Provider',
   cardNetwork: 'Card network',
   expiry: 'EXP',
@@ -126,6 +125,12 @@ const en = {
   openAmap: 'Open in AMap',
   mapHint: 'The map points to the verified source coordinates. Each renderer is controlled independently by the administrator.',
   mapLoadFailed: 'The map renderer did not load. Check its domain permission and provider capability.',
+  availableData: 'Available address data',
+  globalResidentialAddresses: 'Global residential addresses',
+  currentCountryAddresses: 'Current country',
+  coveredRegions: 'Regions with data',
+  coveredCities: 'Cities with data',
+  noAddressOption: 'No address data',
   noCountriesAvailable: 'No verified residential dataset is currently available.',
   copy: 'Copy',
   copied: 'Copied',
@@ -142,8 +147,10 @@ const en = {
   attribution: 'Address data © OpenStreetMap contributors and listed public sources · Maps by Google'
 } as const;
 
+const en = englishMessages;
+
 const zh: Record<keyof typeof en, string> = {
-  brand: '真实地址生成器',
+  brand: '真实住宅地址生成器',
   apiDocs: 'API文档',
   language: 'English',
   title: '生成真实地址',
@@ -254,8 +261,6 @@ const zh: Record<keyof typeof en, string> = {
   unknown: '真实地址',
   sandbox: '仅限沙箱测试',
   cardNotice: '随机生成的 Luhn 合规卡号 · 仅供表单/测试使用,非真实银行卡',
-  liveApiLabel: '启用实时 API 查询 ',
-  liveApiHint: '(实时调用外部数据源而非本地数据库,速度较慢)',
   cardProvider: '测试平台',
   cardNetwork: '卡组织',
   expiry: '有效期',
@@ -268,6 +273,12 @@ const zh: Record<keyof typeof en, string> = {
   openAmap: '高德地图打开',
   mapHint: '地图指向已验证的数据源坐标，每个地图渲染器均由管理员独立控制。',
   mapLoadFailed: '地图加载失败，请检查域名权限和平台能力。',
+  availableData: '可用地址数据',
+  globalResidentialAddresses: '全球住宅地址',
+  currentCountryAddresses: '当前国家',
+  coveredRegions: '有数据的州/省',
+  coveredCities: '有数据的城市',
+  noAddressOption: '暂无地址',
   noCountriesAvailable: '当前没有通过真实性门禁的住宅地址数据。',
   copy: '复制',
   copied: '已复制',
@@ -285,4 +296,4 @@ const zh: Record<keyof typeof en, string> = {
 };
 
 export type MessageKey = keyof typeof en;
-export const messages: Record<Locale, Record<MessageKey, string>> = { en, 'zh-CN': zh };
+export const messages: Record<Locale, Record<MessageKey, string>> = { en, 'zh-CN': zh, ...generatedMessages };

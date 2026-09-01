@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
-. /root/address/app/ops/env.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/compose-root.sh"
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-target="$ROOT/backups/address-$timestamp.sqlite"
-test -f "$ADDRESS_DATABASE_PATH"
-"$NODE" -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1]);db.exec('PRAGMA wal_checkpoint(TRUNCATE)');db.exec(\"VACUUM INTO '\"+process.argv[2].replaceAll(\"'\",\"''\")+\"'\");db.close()" "$ADDRESS_DATABASE_PATH" "$target"
+target="$ROOT/backups/address-$timestamp.dump"
+temporary="$target.tmp"
+mkdir -p "$ROOT/backups"
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+docker compose -f "$COMPOSE_FILE" exec -T postgres \
+  sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --compress=6' >"$temporary"
+docker compose -f "$COMPOSE_FILE" exec -T postgres pg_restore --list <"$temporary" >/dev/null
+mv "$temporary" "$target"
+chmod 600 "$target"
+trap - EXIT HUP INT TERM
 echo "$target"

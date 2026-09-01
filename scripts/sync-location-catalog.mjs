@@ -1,17 +1,22 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { strFromU8, unzipSync } from 'fflate';
+import { hongKongDistricts, hongKongRegions } from '../src/domain/hk-administrative-divisions.mjs';
 
 const countryCodes = new Set([
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU', 'JP', 'HK', 'SG', 'TW', 'KR', 'MY',
   'CN', 'TH', 'PH', 'VN', 'TR', 'SA', 'IN', 'AU', 'BR', 'NG', 'ZA'
 ]);
 const usStateCodes = new Set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split(' '));
-const cacheDir = new URL('../.data-cache/', import.meta.url);
-const outputUrl = new URL('../.data-cache/catalog-seed.sql', import.meta.url);
-const manifestUrl = new URL('../src/domain/location-catalog.meta.json', import.meta.url);
+const runtimeCacheDir = String(process.env.LOCATION_CATALOG_CACHE_DIR || '').trim();
+const cacheDir = resolve(runtimeCacheDir || '.data-cache');
+const outputUrl = resolve(cacheDir, 'catalog-seed.sql');
+const manifestUrl = runtimeCacheDir
+  ? resolve(cacheDir, 'location-catalog.meta.json')
+  : new URL('../src/domain/location-catalog.meta.json', import.meta.url);
 const residentialCoverageUrl = new URL('../src/domain/residential-coverage.json', import.meta.url);
 const refresh = process.argv.includes('--refresh');
 
@@ -24,7 +29,7 @@ const sources = {
 await mkdir(cacheDir, { recursive: true });
 
 const download = async (name, url) => {
-  const target = new URL(name, cacheDir);
+  const target = resolve(cacheDir, name);
   if (!refresh) {
     try {
       if ((await stat(target)).size > 0) return target;
@@ -54,9 +59,20 @@ const cities = JSON.parse(gunzipSync(await readFile(citiesFile)).toString('utf8'
 const postcodes = JSON.parse(gunzipSync(await readFile(postcodesFile)).toString('utf8'));
 const residentialCoverage = JSON.parse(await readFile(residentialCoverageUrl, 'utf8'));
 const includedState = (state) => countryCodes.has(state.country_code) && (state.country_code !== 'US' || usStateCodes.has(state.iso2));
-const selectedStates = states.filter(includedState);
+const selectedStates = states.filter((state) => includedState(state) && state.country_code !== 'HK');
+selectedStates.push(...hongKongRegions.map((region) => ({
+  id: region.id, country_code: 'HK', iso2: region.code, name: region.name, native: region.native,
+  translations: { 'zh-CN': region.zh }, type: 'region', parent_id: null, latitude: null, longitude: null
+})));
 const stateIds = new Set(selectedStates.map((state) => state.id));
-const selectedCities = cities.filter((city) => countryCodes.has(city.country_code) && (!city.state_id || stateIds.has(city.state_id)));
+const selectedCities = cities.filter((city) => city.country_code !== 'HK' && countryCodes.has(city.country_code)
+  && (!city.state_id || stateIds.has(city.state_id)));
+const hongKongRegionIds = new Map(hongKongRegions.map((region) => [region.code, region.id]));
+selectedCities.push(...hongKongDistricts.map((district) => ({
+  id: district.id, country_code: 'HK', state_id: hongKongRegionIds.get(district.regionCode),
+  name: district.name, native: district.native, translations: { 'zh-CN': district.zh },
+  type: 'district', population: null, latitude: null, longitude: null
+})));
 const cityIds = new Set(selectedCities.map((city) => city.id));
 let selectedPostcodes = postcodes.filter((postcode) => countryCodes.has(postcode.country_code)
   && (!postcode.state_id || stateIds.has(postcode.state_id))
@@ -129,14 +145,14 @@ const writeBatch = (stream, table, columns, records, values) => {
 };
 
 const stream = createWriteStream(outputUrl, { encoding: 'utf8' });
-stream.write(`PRAGMA foreign_keys = OFF;
-BEGIN TRANSACTION;
+stream.write(`BEGIN;
+SET CONSTRAINTS ALL DEFERRED;
 DROP TABLE IF EXISTS catalog_regions_staging;
 DROP TABLE IF EXISTS catalog_cities_staging;
 DROP TABLE IF EXISTS catalog_postcodes_staging;
-CREATE TABLE catalog_regions_staging AS SELECT * FROM catalog_regions WHERE 0;
-CREATE TABLE catalog_cities_staging AS SELECT * FROM catalog_cities WHERE 0;
-CREATE TABLE catalog_postcodes_staging AS SELECT * FROM catalog_postcodes WHERE 0;
+CREATE TABLE catalog_regions_staging AS SELECT * FROM catalog_regions WHERE FALSE;
+CREATE TABLE catalog_cities_staging AS SELECT * FROM catalog_cities WHERE FALSE;
+CREATE TABLE catalog_postcodes_staging AS SELECT * FROM catalog_postcodes WHERE FALSE;
 `);
 writeBatch(stream, 'catalog_regions_staging', ['id', 'country_code', 'code', 'name', 'native_name', 'zh_name', 'type', 'parent_id', 'path', 'latitude', 'longitude'], selectedStates, (state) => [
   state.id, state.country_code, state.iso2 || '', state.name, state.native || state.name,
@@ -151,18 +167,24 @@ writeBatch(stream, 'catalog_postcodes_staging', ['id', 'country_code', 'region_i
   postcode.id, postcode.country_code, postcode.state_id || null, postcode.city_id || null, postcode.code,
   postcode.locality_name || '', number(postcode.latitude), number(postcode.longitude)
 ]);
-stream.write(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude)
-SELECT id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude FROM catalog_regions_staging WHERE 1
+stream.write(`CREATE UNIQUE INDEX catalog_regions_staging_id_idx ON catalog_regions_staging(id);
+CREATE UNIQUE INDEX catalog_cities_staging_id_idx ON catalog_cities_staging(id);
+CREATE UNIQUE INDEX catalog_postcodes_staging_id_idx ON catalog_postcodes_staging(id);
+ANALYZE catalog_regions_staging;
+ANALYZE catalog_cities_staging;
+ANALYZE catalog_postcodes_staging;
+INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude)
+SELECT id,country_code,code,name,native_name,zh_name,type,parent_id,path,latitude,longitude FROM catalog_regions_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,code=excluded.code,name=excluded.name,native_name=excluded.native_name,zh_name=excluded.zh_name,type=excluded.type,parent_id=excluded.parent_id,path=excluded.path,latitude=excluded.latitude,longitude=excluded.longitude;
 INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude)
-SELECT id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude FROM catalog_cities_staging WHERE 1
+SELECT id,country_code,region_id,name,native_name,zh_name,type,population,latitude,longitude FROM catalog_cities_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=excluded.region_id,name=excluded.name,native_name=excluded.native_name,zh_name=excluded.zh_name,type=excluded.type,population=excluded.population,latitude=excluded.latitude,longitude=excluded.longitude;
 INSERT INTO catalog_postcodes(id,country_code,region_id,city_id,code,locality_name,latitude,longitude)
-SELECT id,country_code,region_id,city_id,code,locality_name,latitude,longitude FROM catalog_postcodes_staging WHERE 1
+SELECT id,country_code,region_id,city_id,code,locality_name,latitude,longitude FROM catalog_postcodes_staging
 ON CONFLICT(id) DO UPDATE SET country_code=excluded.country_code,region_id=excluded.region_id,city_id=excluded.city_id,code=excluded.code,locality_name=excluded.locality_name,latitude=excluded.latitude,longitude=excluded.longitude;
-DELETE FROM catalog_postcodes WHERE id NOT IN (SELECT id FROM catalog_postcodes_staging);
-DELETE FROM catalog_cities WHERE id NOT IN (SELECT id FROM catalog_cities_staging);
-DELETE FROM catalog_regions WHERE id NOT IN (SELECT id FROM catalog_regions_staging);
+DELETE FROM catalog_postcodes AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_postcodes_staging AS staging WHERE staging.id = target.id);
+DELETE FROM catalog_cities AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_cities_staging AS staging WHERE staging.id = target.id);
+DELETE FROM catalog_regions AS target WHERE NOT EXISTS (SELECT 1 FROM catalog_regions_staging AS staging WHERE staging.id = target.id);
 DROP TABLE catalog_postcodes_staging;
 DROP TABLE catalog_cities_staging;
 DROP TABLE catalog_regions_staging;
@@ -174,22 +196,25 @@ for (const [name, file] of Object.entries({ states: statesFile, cities: citiesFi
 }
 const now = new Date().toISOString();
 stream.write(`DELETE FROM catalog_metadata WHERE source = 'countries-states-cities-database';\n`);
-stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('countries-states-cities-database')}, ${sql(now.slice(0, 10))}, ${sql('https://github.com/dr5hn/countries-states-cities-database')}, ${sql(checksums.cities)}, ${sql(now)}, ${selectedStates.length}, ${selectedCities.length}, ${dr5hnPostcodeCount});\n`);
+stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('countries-states-cities-database')}, ${sql(now.slice(0, 10))}, ${sql('https://github.com/dr5hn/countries-states-cities-database')}, ${sql(checksums.cities)}, ${sql(now)}, ${selectedStates.filter((state) => state.country_code !== 'HK').length}, ${selectedCities.filter((city) => city.country_code !== 'HK').length}, ${dr5hnPostcodeCount});\n`);
+stream.write(`DELETE FROM catalog_metadata WHERE source = 'hong-kong-official-administrative-catalog';\n`);
+stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('hong-kong-official-administrative-catalog')}, ${sql('2026-08-18')}, ${sql('https://www.had.gov.hk/en/18_districts/my_map.htm')}, ${sql(createHash('sha256').update(JSON.stringify([hongKongRegions, hongKongDistricts])).digest('hex'))}, ${sql(now)}, ${hongKongRegions.length}, ${hongKongDistricts.length}, 0);\n`);
 stream.write(`DELETE FROM catalog_metadata WHERE source = 'geonames-postal-codes';\n`);
 stream.write(`INSERT INTO catalog_metadata(source, source_version, source_url, source_checksum, synced_at, region_count, city_count, postcode_count) VALUES (${sql('geonames-postal-codes')}, ${sql(now.slice(0, 10))}, ${sql('https://download.geonames.org/export/zip/')}, ${sql(createHash('sha256').update(JSON.stringify(geoNamesChecksums)).digest('hex'))}, ${sql(now)}, 0, 0, ${geoNamesAdded});\n`);
 for (let index = 0; index < residentialCoverage.length; index += 250) {
   const batch = residentialCoverage.slice(index, index + 250);
   stream.write(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id) VALUES\n${tuples(batch, (record) => [
     record.countryCode, record.region || '', record.city || '', record.addressCount || 1, record.verifiedAt || now, record.regionId || null, record.cityId || null
-  ])}\nON CONFLICT(country_code,region_name,city_name) DO UPDATE SET address_count = MAX(address_count, excluded.address_count), last_verified_at = MAX(last_verified_at, excluded.last_verified_at), region_id = COALESCE(excluded.region_id, residential_coverage.region_id), city_id = COALESCE(excluded.city_id, residential_coverage.city_id);\n`);
+  ])}\nON CONFLICT(country_code,region_name,city_name) DO UPDATE SET address_count = GREATEST(residential_coverage.address_count, excluded.address_count), last_verified_at = GREATEST(residential_coverage.last_verified_at, excluded.last_verified_at), region_id = COALESCE(excluded.region_id, residential_coverage.region_id), city_id = COALESCE(excluded.city_id, residential_coverage.city_id);\n`);
 }
-stream.write('COMMIT;\nPRAGMA foreign_keys = ON;\n');
+stream.write('COMMIT;\n');
 await new Promise((resolve, reject) => { stream.end(resolve); stream.on('error', reject); });
 
 const countByCountry = (records) => Object.fromEntries([...countryCodes].map((country) => [country, records.filter((record) => record.country_code === country).length]));
 const manifest = {
   sources: [
     { name: 'Countries States Cities Database', url: 'https://github.com/dr5hn/countries-states-cities-database', license: 'ODbL-1.0' },
+    { name: 'Hong Kong official administrative catalog', url: 'https://www.had.gov.hk/en/18_districts/my_map.htm', license: 'See source terms' },
     { name: 'GeoNames Postal Codes', url: 'https://download.geonames.org/export/zip/', license: 'CC-BY-4.0', added: geoNamesAdded }
   ],
   syncedAt: now,
@@ -203,4 +228,4 @@ const manifest = {
 };
 await writeFile(manifestUrl, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 console.log(JSON.stringify(manifest.totals));
-console.log(outputUrl.pathname);
+console.log(outputUrl);

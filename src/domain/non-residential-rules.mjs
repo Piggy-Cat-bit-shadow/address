@@ -81,7 +81,7 @@ export const nonResidentialRules = Object.freeze({
       it: ['ospedale', 'centro medico', 'centro sanitario', 'clinica', 'casa di riposo', 'ospizio', 'farmacia'],
       nl: ['ziekenhuis', 'medisch centrum', 'gezondheidscentrum', 'kliniek', 'verpleeghuis', 'verzorgingshuis', 'hospice', 'apotheek'],
       ru: ['больница', 'медицинский центр', 'поликлиника', 'клиника', 'дом престарелых', 'хоспис', 'аптека'],
-      ja: ['病院', '医療センター', '診療所', 'クリニック', '介護施設', '老人ホーム', 'ホスピス', '薬局'],
+      ja: ['病院', '医療センター', '福祉センター', '地域福祉センター', '診療所', 'クリニック', '介護施設', '老人ホーム', 'ホスピス', '薬局'],
       zh: ['医院', '醫院', '医疗中心', '醫療中心', '诊所', '診所', '医务所', '醫務所', '健康院', '卫生院', '衛生院', '卫生中心', '衛生中心', '衞生中心', '疾控中心', '急救中心', '血站', '疗养院', '療養院', '护理院', '護理院', '护养院', '護養院', '护老院', '護老院', '养老院', '養老院', '安老院', '福利院', '药房', '藥房'],
       ko: ['병원', '의료원', '의료센터', '의원', '요양원', '호스피스', '약국'],
       ms: ['hospital', 'pusat perubatan', 'pusat kesihatan', 'klinik', 'rumah jagaan', 'rumah warga emas', 'hospis', 'farmasi'],
@@ -175,7 +175,7 @@ export const nonResidentialRules = Object.freeze({
       ms: ['gereja', 'masjid', 'kuil', 'sinagog', 'biara', 'tanah perkuburan', 'krematorium', 'rumah pengebumian', 'pusat komuniti', 'perpustakaan', 'muzium', 'teater', 'stadium', 'pusat konvensyen'],
       th: ['โบสถ์', 'มัสยิด', 'วัด', 'สุเหร่ายิว', 'อาราม', 'สุสาน', 'เมรุ', 'สถานฌาปนกิจ', 'ห้องสมุด', 'พิพิธภัณฑ์', 'โรงละคร', 'สนามกีฬา', 'ศูนย์ชุมชน', 'ศูนย์ประชุม'],
       fil: ['simbahan', 'moske', 'templo', 'sinagoga', 'monasteryo', 'sementeryo', 'krematoryo', 'punerarya', 'sentro ng komunidad', 'aklatan', 'museo', 'teatro', 'stadium', 'convention center'],
-      vi: ['nhà thờ', 'nhà thờ hồi giáo', 'chùa', 'giáo đường do thái', 'tu viện', 'nghĩa trang', 'đài hóa thân', 'nhà tang lễ', 'thư viện', 'bảo tàng', 'nhà hát', 'sân vận động', 'trung tâm cộng đồng', 'trung tâm hội nghị'],
+      vi: ['nhà thờ', 'nhà thờ hồi giáo', 'chùa', 'giáo đường do thái', 'tu viện', 'nghĩa trang', 'đài hóa thân', 'nhà tang lễ', 'thư viện', 'bảo tàng', 'nhà hát', 'sân vận động', 'sân cầu lông', 'nhà thi đấu', 'trung tâm cộng đồng', 'trung tâm hội nghị'],
       tr: ['kilise', 'cami', 'tapınak', 'sinagog', 'manastır', 'mezarlık', 'krematoryum', 'cenaze evi', 'toplum merkezi', 'kütüphane', 'müze', 'tiyatro', 'stadyum', 'kongre merkezi'],
       ar: ['كنيسة', 'مسجد', 'معبد', 'كنيس', 'دير', 'مقبرة', 'محرقة', 'دار جنازة', 'مكتبة', 'متحف', 'مسرح', 'ملعب', 'مركز مجتمعي', 'مركز مؤتمرات'],
       pt: ['igreja', 'mesquita', 'templo', 'sinagoga', 'mosteiro', 'cemitério', 'crematório', 'funerária', 'centro comunitário', 'biblioteca', 'museu', 'teatro', 'estádio', 'centro de convenções']
@@ -197,7 +197,7 @@ export const nonResidentialRules = Object.freeze({
       ms: ['hotel', 'asrama', 'motel', 'resort', 'pusat membeli-belah', 'bangunan pejabat', 'menara pejabat', 'pusat perniagaan', 'kilang', 'taman perindustrian', 'asrama pelajar', 'asrama pekerja'],
       th: ['โรงแรม', 'โฮสเทล', 'โมเทล', 'รีสอร์ท', 'ศูนย์การค้า', 'อาคารสำนักงาน', 'อาคารธุรกิจ', 'โรงงาน', 'นิคมอุตสาหกรรม', 'หอพักนักศึกษา', 'หอพักพนักงาน'],
       fil: ['hotel', 'hostel', 'motel', 'resort', 'shopping center', 'mall', 'gusaling opisina', 'sentro ng negosyo', 'pabrika', 'industrial park', 'dormitoryo ng mag-aaral', 'dormitoryo ng empleyado'],
-      vi: ['khách sạn', 'nhà nghỉ', 'nhà trọ tập thể', 'khu nghỉ dưỡng', 'trung tâm mua sắm', 'tòa nhà văn phòng', 'trung tâm kinh doanh', 'nhà máy', 'khu công nghiệp', 'ký túc xá sinh viên', 'ký túc xá nhân viên'],
+      vi: ['khách sạn', 'nhà khách', 'nhà nghỉ', 'nhà trọ tập thể', 'khu nghỉ dưỡng', 'trung tâm mua sắm', 'tòa nhà văn phòng', 'trung tâm kinh doanh', 'nhà máy', 'khu công nghiệp', 'ký túc xá sinh viên', 'ký túc xá nhân viên'],
       tr: ['otel', 'hostel', 'motel', 'tatil köyü', 'alışveriş merkezi', 'ofis binası', 'iş merkezi', 'fabrika', 'sanayi sitesi', 'öğrenci yurdu', 'personel yurdu'],
       ar: ['فندق', 'نزل', 'موتيل', 'منتجع', 'مركز تسوق', 'مبنى مكاتب', 'برج مكاتب', 'مركز أعمال', 'مصنع', 'منطقة صناعية', 'سكن طلاب', 'سكن موظفين'],
       pt: ['hotel', 'pousada', 'hostel', 'motel', 'resort', 'shopping center', 'centro comercial', 'prédio de escritórios', 'centro empresarial', 'fábrica', 'parque industrial', 'alojamento estudantil', 'dormitório estudantil']
@@ -213,7 +213,7 @@ export const nonResidentialRules = Object.freeze({
       it: ['parrucchiere', 'salone di bellezza', 'supermercato', 'ristorante', 'mensa', 'stazione di servizio', 'autolavaggio', 'officina meccanica', 'ufficio vendite', 'lavanderia', 'negozio di animali', 'clinica veterinaria', 'mercato all\'ingrosso'],
       nl: ['kapsalon', 'schoonheidssalon', 'supermarkt', 'restaurant', 'kantine', 'tankstation', 'autowasstraat', 'autogarage', 'verkoopkantoor', 'wasserette', 'dierenwinkel', 'dierenkliniek', 'groothandelsmarkt'],
       ru: ['парикмахерская', 'салон красоты', 'супермаркет', 'ресторан', 'столовая', 'автозаправка', 'автомойка', 'автосервис', 'офис продаж', 'прачечная', 'зоомагазин', 'ветеринарная клиника', 'оптовый рынок'],
-      ja: ['理髪店', '美容室', 'コンビニ', 'スーパーマーケット', 'レストラン', '食堂', 'ガソリンスタンド', '洗車場', '自動車整備', '販売事務所', 'コインランドリー', 'ペットショップ', '動物病院', '卸売市場'],
+      ja: ['店', '理髪店', '美容室', 'コンビニ', 'スーパーマーケット', '商店', '店舗', 'レストラン', '飲食店', '食堂', 'ラーメン', '居酒屋', 'カフェ', '喫茶店', '寿司店', '焼肉店', '料理店', 'ガソリンスタンド', '洗車場', '自動車整備', '販売事務所', 'コインランドリー', 'ペットショップ', '動物病院', '卸売市場'],
       zh: [
         '有限公司', '股份公司', '有限责任公司', '有限責任公司', '集团公司', '集團公司', '公司',
         '超市', '便利店', '商店', '商铺', '商鋪', '商行', '专卖店', '專賣店', '旗舰店', '旗艦店', '门市部', '門市部',
@@ -234,7 +234,7 @@ export const nonResidentialRules = Object.freeze({
       ms: ['kedai gunting rambut', 'salun kecantikan', 'kedai runcit', 'pasar raya', 'restoran', 'kantin', 'stesen minyak', 'cuci kereta', 'bengkel kereta', 'pejabat jualan', 'kedai dobi', 'kedai haiwan', 'klinik veterinar', 'pasar borong'],
       th: ['ร้านตัดผม', 'ร้านเสริมสวย', 'ร้านสะดวกซื้อ', 'ซูเปอร์มาร์เก็ต', 'ร้านอาหาร', 'โรงอาหาร', 'ปั๊มน้ำมัน', 'คาร์แคร์', 'อู่ซ่อมรถ', 'สำนักงานขาย', 'ร้านซักรีด', 'ร้านสัตว์เลี้ยง', 'คลินิกสัตวแพทย์', 'ตลาดค้าส่ง'],
       fil: ['barberya', 'beauty salon', 'convenience store', 'supermarket', 'restawran', 'kantina', 'gasolinahan', 'car wash', 'talyer ng sasakyan', 'sales office', 'labahan', 'pet shop', 'beterinaryo', 'pamilihang bagsakan'],
-      vi: ['tiệm cắt tóc', 'thẩm mỹ viện', 'cửa hàng tiện lợi', 'siêu thị', 'nhà hàng', 'căng tin', 'trạm xăng', 'rửa xe', 'gara ô tô', 'văn phòng bán hàng', 'tiệm giặt ủi', 'cửa hàng thú cưng', 'phòng khám thú y', 'chợ đầu mối'],
+      vi: ['công ty', 'tiệm cắt tóc', 'thẩm mỹ viện', 'cửa hàng tiện lợi', 'siêu thị', 'nhà hàng', 'căng tin', 'trạm xăng', 'rửa xe', 'gara ô tô', 'văn phòng bán hàng', 'tiệm giặt ủi', 'cửa hàng thú cưng', 'phòng khám thú y', 'chợ đầu mối'],
       tr: ['berber', 'kuaför', 'güzellik salonu', 'bakkal', 'süpermarket', 'restoran', 'yemekhane', 'benzin istasyonu', 'oto yıkama', 'oto tamirhanesi', 'satış ofisi', 'çamaşırhane', 'pet shop', 'veteriner kliniği', 'toptancı hali'],
       ar: ['صالون حلاقة', 'صالون تجميل', 'متجر صغير', 'سوبر ماركت', 'مطعم', 'مقصف', 'محطة وقود', 'مغسلة سيارات', 'ورشة سيارات', 'مكتب مبيعات', 'مغسلة ملابس', 'متجر حيوانات', 'عيادة بيطرية', 'سوق الجملة'],
       pt: ['barbearia', 'salão de beleza', 'loja de conveniência', 'supermercado', 'restaurante', 'cantina', 'posto de gasolina', 'lava-rápido', 'oficina mecânica', 'escritório de vendas', 'lavanderia', 'pet shop', 'clínica veterinária', 'mercado atacadista']

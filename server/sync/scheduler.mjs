@@ -195,7 +195,9 @@ export const startInitialScheduler = ({
   };
 };
 
-export const startDailyScheduler = ({ coordinator, stateFile, utcHour = 3, now = () => new Date(), setTimer = setTimeout }) => {
+export const startDailyScheduler = ({
+  coordinator, stateFile, utcHour = 3, now = () => new Date(), setTimer = setTimeout, wakePlanner = null
+}) => {
   let timer;
   let stopped = false;
   const schedule = () => {
@@ -203,7 +205,8 @@ export const startDailyScheduler = ({ coordinator, stateFile, utcHour = 3, now =
     const delay = Math.max(1, nextRunAt(now(), utcHour).getTime() - now().getTime());
     timer = setTimer(async () => {
       try {
-        await triggerDailySync({ coordinator, stateFile, trigger: 'scheduled', now, utcHour });
+        if (wakePlanner) await wakePlanner();
+        else await triggerDailySync({ coordinator, stateFile, trigger: 'scheduled', now, utcHour });
       } catch (error) {
         console.error('Scheduled address synchronization failed', error);
       } finally {

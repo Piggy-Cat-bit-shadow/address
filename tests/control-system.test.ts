@@ -1,24 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { openDatabase, initializeSqliteDatabase, type SqliteDatabase } from '../server/database/sqlite.mjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openTestDatabase, initializeTestDatabase, type PostgresDatabase } from './helpers/postgres-test-database.mjs';
 import {
-  AMAP_PERSONAL_MONTHLY_LIMIT, ControlStore, credentialsFromEnvironment,
-  credentialProviderDefaults, DEFAULT_MAP_DISPLAY_CONFIG, mapDisplayConfigFromEnvironment
+  AMAP_PERSONAL_MONTHLY_LIMIT, ControlStore, createServiceCredentialResolver, credentialsFromEnvironment,
+  GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT, GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET,
+  credentialProviderDefaults, DEFAULT_MAP_DISPLAY_CONFIG, mapDisplayConfigFromEnvironment, parseYoudaoSecret
 } from '../server/control/store';
 import { decryptSecret, encryptSecret, hashPassword, masterKeyFrom, verifyPassword } from '../server/control/security';
 import {
   authorizeWebRequest, createAccessApi, createAdminApi, createAmapProxyRateLimiter,
-  proxyAmapServiceRequest, requestClientAddress, testOneMapCredential
+  proxyAmapServiceRequest, requestClientAddress, testOneMapCredential, testServiceCredential
 } from '../server/control/admin-api';
+import { refreshAddressCoverage } from '../server/control/coverage';
 
 describe('control database security', () => {
-  let database: SqliteDatabase;
+  let database: PostgresDatabase;
   let store: ControlStore;
   const masterKey = Buffer.alloc(32, 7);
 
   beforeEach(async () => {
-    database = openDatabase(':memory:', { migrate: false });
-    await initializeSqliteDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
+    database = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(database, new URL('../server/control/schema.sql', import.meta.url));
     store = new ControlStore(database, masterKey);
     await store.initialize('correct horse battery staple');
   });
@@ -32,6 +33,90 @@ describe('control database security', () => {
     expect(encrypted.ciphertext).not.toContain('provider-secret-value');
     expect(decryptSecret(encrypted, masterKey)).toBe('provider-secret-value');
     expect(masterKeyFrom(masterKey.toString('base64'))).toEqual(masterKey);
+  });
+
+  it('bootstraps the default administrator and optional frontend password only once', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('admin', { FRONTEND_BOOTSTRAP_PASSWORD: '' });
+      expect(await freshStore.verifyIdentity('admin', 'admin')).toBe(true);
+      expect(await freshStore.status()).toMatchObject({
+        initialized: true,
+        frontendPasswordEnabled: false,
+        passwordChangeRequired: true
+      });
+      await freshStore.initialize('replacement administrator password', {
+        FRONTEND_BOOTSTRAP_PASSWORD: 'replacement frontend password'
+      });
+      expect(await freshStore.verifyIdentity('admin', 'admin')).toBe(true);
+      expect(await freshStore.verifyIdentity('admin', 'replacement administrator password')).toBe(false);
+      expect(await freshStore.verifyIdentity('frontend', 'replacement frontend password')).toBe(false);
+      expect(await freshStore.status()).toMatchObject({ frontendPasswordEnabled: false });
+      const session = await freshStore.createSession('admin');
+      await freshStore.updateAccessSettings({
+        adminPassword: 'new administrator password',
+        adminPasswordConfirmation: 'new administrator password'
+      }, session.token);
+      expect(await freshStore.status()).toMatchObject({ passwordChangeRequired: false });
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
+  it('requires the default administrator password to be changed before other admin operations', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('admin');
+      const admin = createAdminApi({ control: freshStore, china: {} as never, addressDb: freshDatabase });
+      const login = await admin.request('/admin/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'admin' })
+      });
+      expect(login.status).toBe(200);
+      expect(await login.json()).toEqual({ data: expect.objectContaining({ passwordChangeRequired: true }) });
+
+      const session = await freshStore.createSession('admin');
+      const cookie = `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`;
+      const blocked = await admin.request('/admin/api/tokens', { headers: { Cookie: cookie } });
+      expect(blocked.status).toBe(403);
+      expect(await blocked.json()).toEqual({ error: 'ADMIN_PASSWORD_CHANGE_REQUIRED' });
+      expect((await admin.request('/admin/api/settings/access', { headers: { Cookie: cookie } })).status).toBe(200);
+
+      const changed = await admin.request('/admin/api/settings/access', {
+        method: 'PUT',
+        headers: { Cookie: cookie, 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminPassword: 'new administrator password',
+          adminPasswordConfirmation: 'new administrator password'
+        })
+      });
+      expect(changed.status).toBe(200);
+      expect(await changed.json()).toEqual({ data: expect.objectContaining({ passwordChangeRequired: false }) });
+      expect((await admin.request('/admin/api/tokens', { headers: { Cookie: cookie } })).status).toBe(200);
+    } finally {
+      await freshDatabase.close();
+    }
+  });
+
+  it('enables a configured frontend password during the first initialization', async () => {
+    const freshDatabase = openTestDatabase(':memory:', { migrate: false });
+    await initializeTestDatabase(freshDatabase, new URL('../server/control/schema.sql', import.meta.url));
+    const freshStore = new ControlStore(freshDatabase, masterKey);
+    try {
+      await freshStore.initialize('custom administrator password', {
+        FRONTEND_BOOTSTRAP_PASSWORD: 'custom frontend password'
+      });
+      expect(await freshStore.verifyIdentity('frontend', 'custom frontend password')).toBe(true);
+      expect(await freshStore.status()).toMatchObject({
+        frontendPasswordEnabled: true,
+        passwordChangeRequired: false
+      });
+    } finally {
+      await freshDatabase.close();
+    }
   });
 
   it('tests OneMap with a bearer token without returning it', async () => {
@@ -65,6 +150,48 @@ describe('control database security', () => {
     expect(await store.listApiTokens()).toEqual([]);
   });
 
+  it('does not project a parent run error onto a child that has no source error', async () => {
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,error_code,error_message,created_at,completed_at,updated_at
+    ) VALUES ('history-parent-error','address-pool','{}','failed','{}','PARENT_FAILED','parent failed',
+      '2026-08-05T00:00:00Z','2026-08-05T01:00:00Z','2026-08-05T01:00:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,error_code,error_message,created_at,completed_at,updated_at
+    ) VALUES ('history-parent-error','US','oa-us','queue','cancelled',NULL,NULL,
+      '2026-08-05T00:00:00Z','2026-08-05T01:00:00Z','2026-08-05T01:00:00Z')`).run();
+    const history = await store.syncHistory();
+    expect(history.items).toContainEqual(expect.objectContaining({
+      id: 'history-parent-error', countryCode: 'US', sourceId: 'oa-us', errorCode: null, errorMessage: null
+    }));
+  });
+
+  it('does not expose an unfinished goal snapshot as an empty completed snapshot', async () => {
+    const beforeGoals = {
+      total: { current: 19_533, target: 20_000, met: false },
+      administrativeCoverage: { actual: 72, target: 90, met: false, covered: 146, total: 203 },
+      regionalMinimums: {
+        actual: 64, target: 100, met: false,
+        lowest: { qualified: 64, total: 203, minimum: 5, met: false },
+        level1: null, level2: null, overrides: { satisfied: 0, total: 0, met: true }
+      }
+    };
+    await database.prepare(`INSERT INTO sync_runs(
+      id,kind,target_json,status,progress_json,created_at,started_at,updated_at
+    ) VALUES ('history-running-goals','address-pool','{}','running','{}',
+      '2026-08-07T00:00:00Z','2026-08-07T00:00:00Z','2026-08-07T00:01:00Z')`).run();
+    await database.prepare(`INSERT INTO sync_run_countries(
+      run_id,country_code,source_id,trigger_name,status,before_goals_json,after_goals_json,
+      created_at,started_at,updated_at
+    ) VALUES ('history-running-goals','JP','japan-abr-residential','queue','running',?,'{}',
+      '2026-08-07T00:00:00Z','2026-08-07T00:00:00Z','2026-08-07T00:01:00Z')`)
+      .bind(JSON.stringify(beforeGoals)).run();
+
+    const history = await store.syncHistory();
+    expect(history.items).toContainEqual(expect.objectContaining({
+      id: 'history-running-goals', countryCode: 'JP', beforeGoals, afterGoals: null
+    }));
+  });
+
   it('supports custom token values and editable scope, rate and expiry settings', async () => {
     const customToken = 'addr_custom_fixture_token_1234567890';
     const expiresAt = new Date(Date.now() + 86400000).toISOString();
@@ -81,26 +208,6 @@ describe('control database security', () => {
     expect((await store.authorizeApiTokenDetailed(customToken, 'generate')).status).toBe('unauthorized');
     await expect(store.createApiToken({ name: 'duplicate', token: customToken, scopes: ['*'], rateLimit: 1 })).rejects.toThrow('TOKEN_ALREADY_EXISTS');
     await expect(store.createApiToken({ name: 'invalid', token: 'contains whitespace', scopes: ['*'], rateLimit: 1 })).rejects.toThrow('INVALID_TOKEN_VALUE');
-  });
-
-  it('migrates legacy API token tables without changing existing authentication hashes', async () => {
-    const legacy = openDatabase(':memory:', { migrate: false });
-    try {
-      const legacySchema = readFileSync(new URL('../server/control/schema.sql', import.meta.url), 'utf8')
-        .replace(/^\s*token_(?:ciphertext|iv|tag) TEXT,\r?\n/gmu, '')
-        .replace(/^INSERT OR IGNORE INTO control_migrations\(version,applied_at\) VALUES \(4,datetime\('now'\)\);\r?\n/gmu, '');
-      await legacy.exec(legacySchema);
-      const legacyToken = 'addr_legacy_fixture_token_123456789';
-      await legacy.prepare(`INSERT INTO api_tokens(id,name,token_prefix,token_hash,scopes_json,rate_limit_per_minute,created_at)
-        VALUES (?,?,?,?,?,?,?)`).bind('legacy-id', 'legacy', legacyToken.slice(0, 12), (await import('../server/control/security')).tokenHash(legacyToken), '["*"]', 60, new Date().toISOString()).run();
-      const legacyStore = new ControlStore(legacy, masterKey);
-      await legacyStore.initialize('legacy administrator password');
-      const columns = (await legacy.prepare('PRAGMA table_info(api_tokens)').all<{ name: string }>()).results.map((column) => column.name);
-      expect(columns).toEqual(expect.arrayContaining(['token_ciphertext', 'token_iv', 'token_tag']));
-      expect((await legacyStore.authorizeApiTokenDetailed(legacyToken, 'read')).status).toBe('authorized');
-      expect(await legacyStore.listApiTokens()).toEqual([expect.objectContaining({ id: 'legacy-id', token_revealable: false })]);
-      await expect(legacyStore.revealApiToken('legacy-id')).rejects.toThrow('API_TOKEN_SECRET_UNAVAILABLE');
-    } finally { legacy.close(); }
   });
 
   it('keeps the current admin session when changing the password', async () => {
@@ -127,11 +234,10 @@ describe('control database security', () => {
       frontendPasswordEnabled: true,
       frontendPassword: 'new frontend password',
       frontendPasswordConfirmation: 'new frontend password',
-      apiAuthEnabled: false,
       adminPassword: 'new administrator password',
       adminPasswordConfirmation: 'new administrator password'
     }, current.token);
-    expect(await store.status()).toMatchObject({ frontendPasswordEnabled: true, apiAuthEnabled: false });
+    expect(await store.status()).toMatchObject({ frontendPasswordEnabled: true, apiAuthEnabled: true });
     expect(await store.verifyIdentity('frontend', 'new frontend password')).toBe(true);
     expect(await store.verifyIdentity('admin', 'new administrator password')).toBe(true);
     expect(await store.session(current.token, 'admin', current.csrf)).toBe(true);
@@ -186,9 +292,9 @@ describe('control database security', () => {
   });
 
   it('imports browser-map environment values only into an empty control database', async () => {
-    const fresh = openDatabase(':memory:', { migrate: false });
+    const fresh = openTestDatabase(':memory:', { migrate: false });
     try {
-      await initializeSqliteDatabase(fresh, new URL('../server/control/schema.sql', import.meta.url));
+      await initializeTestDatabase(fresh, new URL('../server/control/schema.sql', import.meta.url));
       const freshStore = new ControlStore(fresh, masterKey);
       await freshStore.initialize('fresh administrator password', {
         AMAP_JS_API_KEY: 'environment-js-key', AMAP_JS_SECURITY_CODE: 'environment-security-code',
@@ -237,6 +343,84 @@ describe('control database security', () => {
     });
     expect(protectedResponse.status).toBe(200);
     expect(JSON.stringify(await protectedResponse.json())).not.toContain('private-security-code');
+  });
+
+  it('serves, updates, audits, and resets country shortcut configuration', async () => {
+    const access = createAccessApi(store);
+    const defaults = await (await access.request('/web-api/v1/config/country-shortcuts')).json() as {
+      data: Record<string, { popularCities: unknown[]; adminShortcuts: unknown[]; specialAreas: unknown[] }>;
+    };
+    expect(defaults.data.US.specialAreas).toHaveLength(5);
+    expect(defaults.data.CN.popularCities.length).toBeGreaterThanOrEqual(10);
+
+    const session = await store.createSession('admin');
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json'
+    };
+    expect((await admin.request('/admin/api/settings/country-shortcuts')).status).toBe(401);
+    await database.batch([
+      database.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+        VALUES (5001,'US','CA','California','California','加利福尼亚州','state',NULL,'/5001')`),
+      database.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+        VALUES (5002,'US',5001,'Los Angeles','Los Angeles','洛杉矶','city',3898747)`),
+      database.prepare(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id)
+        VALUES ('US','California','Los Angeles',7,?,5001,5002)`).bind(new Date().toISOString())
+    ]);
+    const optionResponse = await admin.request('/admin/api/settings/country-shortcuts/US/options?field=region', { headers });
+    expect(optionResponse.status).toBe(200);
+    expect(await optionResponse.json()).toEqual({ data: expect.objectContaining({
+      total: 1,
+      options: [expect.objectContaining({ value: 'California', regionCode: 'CA', availableCount: 7, disabled: false })]
+    }) });
+    expect((await admin.request('/admin/api/settings/country-shortcuts/ZZ/options?field=region', { headers })).status).toBe(400);
+    expect((await admin.request('/admin/api/settings/country-shortcuts/US/options?field=district', { headers })).status).toBe(400);
+    const original = (await store.countryShortcuts()).CN;
+    const update = { ...original, popularCities: [{ label: { en: 'Beijing', 'zh-CN': '北京' }, value: '北京市', type: 'city' }] };
+    expect((await admin.request('/admin/api/settings/country-shortcuts/CN', {
+      method: 'PUT', headers, body: JSON.stringify(update)
+    })).status).toBe(200);
+    expect((await store.countryShortcuts()).CN.popularCities).toHaveLength(1);
+    expect(JSON.stringify(await store.audits())).toContain('settings.country_shortcuts.update');
+
+    const invalid = { ...original, popularCities: [{ label: { en: 'Beijing', 'zh-CN': '北京' }, value: '北京市', type: 'region' }] };
+    expect((await admin.request('/admin/api/settings/country-shortcuts/CN', {
+      method: 'PUT', headers, body: JSON.stringify(invalid)
+    })).status).toBe(400);
+    expect((await admin.request('/admin/api/settings/country-shortcuts/CN', { method: 'DELETE', headers })).status).toBe(200);
+    expect((await store.countryShortcuts()).CN.popularCities.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('serves only public residential coverage fields behind the frontend access policy', async () => {
+    const addressDb = openTestDatabase(':memory:');
+    try {
+      const now = new Date().toISOString();
+      await addressDb.batch([
+        addressDb.prepare(`INSERT INTO catalog_regions(id,country_code,code,name,native_name,zh_name,type,parent_id,path)
+          VALUES (1,'US','NY','New York','New York','纽约州','state',NULL,'/1')`),
+        addressDb.prepare(`INSERT INTO catalog_cities(id,country_code,region_id,name,native_name,zh_name,type,population)
+          VALUES (11,'US',1,'New York City','New York City','纽约市','city',8000000)`),
+        addressDb.prepare(`INSERT INTO residential_coverage(country_code,region_name,city_name,address_count,last_verified_at,region_id,city_id)
+          VALUES ('US','New York','New York City',5,?,1,11)`).bind(now)
+      ]);
+      await refreshAddressCoverage(addressDb);
+      const app = createAccessApi(store, { addressDb });
+      const response = await app.request('/web-api/v1/public-monitor');
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=60');
+      const payload = await response.json() as { data: Record<string, unknown> };
+      expect(payload.data).toMatchObject({ metrics: expect.objectContaining({ residentialTotal: 0, coverageRate: 1 }) });
+      expect(JSON.stringify(payload)).not.toMatch(/database|credential|provider|quota|secret|token/iu);
+      await store.setPassword('frontend', 'frontend monitor password');
+      await store.setSetting('frontend_password_enabled', true);
+      expect((await app.request('/web-api/v1/public-monitor')).status).toBe(401);
+      const session = await store.createSession('frontend');
+      expect((await app.request('/web-api/v1/public-monitor', {
+        headers: { Cookie: `address_front_session=${session.token}` }
+      })).status).toBe(200);
+    } finally { addressDb.close(); }
   });
 
   it('supports Google-only, AMap-only, dual and disabled map configurations for China and overseas', async () => {
@@ -322,6 +506,12 @@ describe('control database security', () => {
       'https://address.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://other.example' } }
     ))).status).toBe(403);
     expect((await proxyAmapServiceRequest(store, new Request(
+      'https://address2.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://address2.example' } }
+    ), async () => Response.json({ status: '1' }), 'https://address.example,https://address2.example')).status).toBe(200);
+    expect((await proxyAmapServiceRequest(store, new Request(
+      'https://address.example/_AMapService/v3/place/text?key=browser-js-key', { headers: { Origin: 'https://address2.example' } }
+    ), async () => Response.json({ status: '1' }), 'https://address.example,https://address2.example')).status).toBe(403);
+    expect((await proxyAmapServiceRequest(store, new Request(
       'https://address.example/_AMapService/private?key=browser-js-key', { headers: { Referer: 'https://address.example/' } }
     ))).status).toBe(404);
     await store.updateMapDisplayConfig({ google: { china: true, international: true }, amap: { china: false, international: false } });
@@ -332,12 +522,11 @@ describe('control database security', () => {
 
   it('keeps map administrator responses masked and audit details secret-free', async () => {
     const session = await store.createSession('admin');
+    const wake = vi.fn(async () => undefined);
     const admin = createAdminApi({
       control: store,
-      china: {} as never,
-      addressDb: database,
-      addressDatabasePath: '',
-      controlDatabasePath: ''
+      china: { wake } as never,
+      addressDb: database
     });
     const headers = {
       Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
@@ -367,6 +556,7 @@ describe('control database security', () => {
     expect((await admin.request('/admin/api/providers', {
       method: 'POST', headers, body: JSON.stringify({ provider: 'amap', label: providerLabel, secret: providerSecret })
     })).status).toBe(201);
+    expect(wake).toHaveBeenCalledOnce();
     const audits = JSON.stringify(await store.audits());
     for (const secret of ['admin-browser-key', 'admin-security-code', browserLabel, providerLabel, providerSecret]) {
       expect(audits).not.toContain(secret);
@@ -375,7 +565,7 @@ describe('control database security', () => {
 
   it('reveals encrypted credentials only through the authenticated CSRF-protected admin routes', async () => {
     const session = await store.createSession('admin');
-    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database, addressDatabasePath: '', controlDatabasePath: '' });
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
     const headers = {
       Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
       'X-CSRF-Token': session.csrf,
@@ -469,6 +659,14 @@ describe('control database security', () => {
     expect(await store.acquireCredential('amap')).toBeNull();
   });
 
+  it('excludes credentials already attempted in the current rotation for every provider type', async () => {
+    const first = await store.addCredential({ provider: 'geoapify', label: 'A', secret: 'geo-key-a', qpsLimit: 100 });
+    const second = await store.addCredential({ provider: 'geoapify', label: 'B', secret: 'geo-key-b', qpsLimit: 100 });
+    expect((await store.acquireCredential('geoapify'))?.id).toBe(first);
+    expect((await store.acquireCredential('geoapify', { excludeIds: [first] }))?.id).toBe(second);
+    expect(await store.acquireCredential('geoapify', { excludeIds: new Set([first, second]) })).toBeNull();
+  });
+
   it('uses provider-reported quota when the platform exposes it', async () => {
     const id = await store.addCredential({ provider: 'tencent', label: 'Reported', secret: 'reported-key' });
     await store.reportCredential(id, 'success', { used: 199, limit: 200 });
@@ -478,6 +676,72 @@ describe('control database security', () => {
     await store.reportCredential(id, 'success', { used: 200, limit: 200 });
     expect(await store.listCredentials()).toMatchObject([{ id, status: 'quota_exhausted', quotaRemaining: 0 }]);
     expect(await store.acquireCredentialById(id)).toBeNull();
+  });
+
+  it('blocks a key when any independent quota window is exhausted', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Multi-window', secret: 'multi-window-key', quotaLimit: 10 });
+    const row = await database.prepare('SELECT quota_scope_id,quota_service FROM provider_credentials WHERE id=?')
+      .bind(id).first<{ quota_scope_id: string; quota_service: string }>();
+    const now = new Date().toISOString();
+    await database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) VALUES (?,?,?,?,?,480,'provider',1,?,?)`).bind(
+      id, row!.quota_service, row!.quota_scope_id, 'day', 1, now, now
+    ).run();
+    await store.reportCredential(id, 'success');
+    expect(await store.acquireCredentialById(id)).toBeNull();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted',
+      quotaWindows: expect.arrayContaining([
+        expect.objectContaining({ period: 'day', used: 1, limit: 1, exhausted: true }),
+        expect.objectContaining({ period: 'month', used: 1, limit: 10, exhausted: false })
+      ])
+    })]);
+  });
+
+  it('creates and enforces a provider-reported daily window for a monthly AMap key', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'AMap daily error', secret: 'amap-daily-key' });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await store.reportCredential(id, 'quota', { period: 'day', service: 'place-search-v5', retryAt: resetAt });
+    expect(await store.acquireCredentialById(id)).toBeNull();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted',
+      quotaWindows: expect.arrayContaining([
+        expect.objectContaining({ period: 'day', exhausted: true, resetAt }),
+        expect.objectContaining({ period: 'month', exhausted: false })
+      ])
+    })]);
+  });
+
+  it('projects legacy quota blocks into the primary quota window', async () => {
+    const id = await store.addCredential({ provider: 'tencent', label: 'Legacy quota', secret: 'legacy-quota-key', quotaLimit: 10_000 });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await database.prepare(`UPDATE provider_credentials SET status='quota_exhausted',cooldown_until=? WHERE id=?`)
+      .bind(resetAt, id).run();
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({
+      status: 'quota_exhausted', quotaUsed: 10_000, quotaRemaining: 0,
+      quotaWindows: [expect.objectContaining({ used: 10_000, remaining: 0, exhausted: true })]
+    })]);
+  });
+
+  it('prefers a provider-reported quota reset over the shorter QPS pacing interval', async () => {
+    const id = await store.addCredential({ provider: 'tencent', label: 'Reported reset', secret: 'reported-reset-key', qpsLimit: 1 });
+    const resetAt = new Date(Date.now() + 60_000).toISOString();
+    await store.reportCredential(id, 'success', { used: 200, limit: 200, resetAt });
+    expect(await store.credentialAvailability(['tencent'])).toMatchObject({
+      eligible: false, configured: true, reason: 'quota', nextAvailableAt: resetAt
+    });
+  });
+
+  it('edits credential metadata and securely replaces its secret and usage state', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'Old name', secret: 'old-secret', quotaLimit: 5 });
+    await store.reportCredential(id, 'quota');
+    expect(await store.listCredentials()).toMatchObject([{ status: 'quota_exhausted', quotaRemaining: 0 }]);
+    await store.updateCredential(id, { label: 'New name', secret: 'new-secret', quotaLimit: 5_000, quotaPeriod: 'month', enabled: true });
+    expect(await store.listCredentials()).toMatchObject([{
+      id, label: 'New name', status: 'healthy', quotaLimit: 5_000, quotaUsed: 0, quotaRemaining: 5_000
+    }]);
+    expect((await store.acquireCredentialById(id))?.secret).toBe('new-secret');
   });
 
   it('imports the same environment credential only once per provider', async () => {
@@ -491,8 +755,9 @@ describe('control database security', () => {
   });
 
   it('uses conservative free-tier defaults for every credential provider', async () => {
-    for (const provider of ['amap', 'baidu', 'tencent', 'onemap'] as const) {
-      const id = await store.addCredential({ provider, label: provider, secret: `${provider}-fixture` });
+    for (const provider of ['amap', 'baidu', 'tencent', 'onemap', 'youdao', 'geoapify', 'google-geocoding', 'mappls'] as const) {
+      const secret = provider === 'youdao' ? JSON.stringify({ appKey: 'fixture-key', appSecret: 'fixture-secret' }) : `${provider}-fixture`;
+      const id = await store.addCredential({ provider, label: provider, secret });
       const row = await database.prepare(`SELECT qps_limit,quota_service,quota_period,quota_limit,quota_timezone_offset
         FROM provider_credentials WHERE id=?`).bind(id).first();
       expect(row).toEqual({
@@ -506,6 +771,27 @@ describe('control database security', () => {
     expect(credentialProviderDefaults.amap).toMatchObject({ period: 'month', limit: AMAP_PERSONAL_MONTHLY_LIMIT });
     expect(credentialProviderDefaults.baidu).toMatchObject({ period: 'day', limit: 100 });
     expect(credentialProviderDefaults.tencent).toMatchObject({ period: 'day', limit: 10_000 });
+    expect(credentialProviderDefaults['google-geocoding']).toMatchObject({
+      qps: 5, period: 'month', limit: GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, timezoneOffset: -480
+    });
+    expect(GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT).toBe(10_000);
+  });
+
+  it('adds pre-existing Google usage to shared local usage without granting extra quota per key', async () => {
+    const first = await store.addCredential({
+      provider: 'google-geocoding', label: 'Google A', secret: 'google-a', quotaLimit: 10, quotaUsedBaseline: 7
+    });
+    await store.addCredential({
+      provider: 'google-geocoding', label: 'Google B', secret: 'google-b', quotaLimit: 10, quotaUsedBaseline: 7
+    });
+    await store.reportCredential(first, 'success');
+    const listed = await store.listCredentials();
+    expect(listed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ quotaBaseline: 7, quotaUsed: 8, quotaRemaining: 2, officialQuotaLimit: 10_000 })
+    ]));
+    await store.reportCredential(first, 'success');
+    await store.reportCredential(first, 'success');
+    expect(await store.acquireCredential('google-geocoding')).toBeNull();
   });
 
   it('extracts only non-empty provider credentials from environment variables', () => {
@@ -519,6 +805,30 @@ describe('control database security', () => {
       { provider: 'amap', label: 'AMAP_API_KEY_10', secret: 'amap-key-10' },
       { provider: 'onemap', label: 'ONEMAP_ACCESS_TOKEN', secret: 'onemap-token' }
     ]);
+  });
+
+  it('restores credentials after a transient cooldown and preserves the provider retry time', async () => {
+    const id = await store.addCredential({ provider: 'amap', label: 'cooldown', secret: 'cooldown-secret' });
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+    await store.reportCredential(id, 'qps', { retryAt });
+    expect(await store.credentialAvailability(['amap'])).toMatchObject({
+      eligible: false, configured: true, reason: 'cooldown', nextAvailableAt: retryAt
+    });
+    await database.prepare('UPDATE provider_credentials SET cooldown_until=? WHERE id=?')
+      .bind(new Date(Date.now() - 1_000).toISOString(), id).run();
+    expect(await store.credentialAvailability(['amap'])).toMatchObject({ eligible: true, reason: 'ready' });
+    expect(await store.listCredentials()).toEqual([expect.objectContaining({ id, status: 'healthy' })]);
+  });
+
+  it('uses the earliest independent credential recovery time', async () => {
+    const later = await store.addCredential({ provider: 'baidu', label: 'Later', secret: 'later-key' });
+    const earlier = await store.addCredential({ provider: 'baidu', label: 'Earlier', secret: 'earlier-key' });
+    const earlierAt = new Date(Date.now() + 20_000).toISOString();
+    await store.reportCredential(later, 'qps', { retryAt: new Date(Date.now() + 60_000).toISOString() });
+    await store.reportCredential(earlier, 'qps', { retryAt: earlierAt });
+    expect(await store.credentialAvailability(['baidu'])).toMatchObject({
+      eligible: false, configured: true, reason: 'cooldown', nextAvailableAt: earlierAt
+    });
   });
 
   it('tracks OneMap JWT expiry without returning the token', async () => {
@@ -553,71 +863,6 @@ describe('control database security', () => {
     expect(await store.acquireCredential('onemap')).toBeNull();
   });
 
-  it('migrates legacy provider tables and preserves credentials and usage', async () => {
-    const legacy = openDatabase(':memory:', { migrate: false });
-    try {
-      await initializeSqliteDatabase(legacy, new URL('../server/control/schema.sql', import.meta.url));
-      const original = new ControlStore(legacy, masterKey);
-      const amapId = await original.addCredential({ provider: 'amap', label: 'Existing', secret: 'existing-amap-key' });
-      await original.reportCredential(amapId, 'success');
-      await legacy.exec(`PRAGMA foreign_keys=OFF;
-        BEGIN IMMEDIATE;
-        DROP TABLE provider_usage_periods;
-        ALTER TABLE provider_usage_daily RENAME TO provider_usage_daily_current;
-        ALTER TABLE provider_credentials RENAME TO provider_credentials_current;
-        CREATE TABLE provider_credentials (
-          id TEXT PRIMARY KEY,
-          provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent')),
-          label TEXT NOT NULL,
-          secret_ciphertext TEXT NOT NULL,
-          secret_iv TEXT NOT NULL,
-          secret_tag TEXT NOT NULL,
-          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
-          status TEXT NOT NULL DEFAULT 'healthy' CHECK (status IN ('healthy','cooldown','quota_exhausted','needs_review','disabled')),
-          weight INTEGER NOT NULL DEFAULT 100 CHECK (weight BETWEEN 1 AND 10000),
-          qps_limit INTEGER NOT NULL DEFAULT 1 CHECK (qps_limit BETWEEN 1 AND 10000),
-          daily_limit INTEGER NOT NULL DEFAULT 1000 CHECK (daily_limit BETWEEN 1 AND 100000000),
-          quota_scope_id TEXT NOT NULL,
-          cooldown_until TEXT,
-          failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
-          last_used_at TEXT,
-          last_success_at TEXT,
-          last_failure_at TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE provider_usage_daily (
-          credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
-          usage_date TEXT NOT NULL,
-          accepted_count INTEGER NOT NULL DEFAULT 0,
-          rejected_count INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (credential_id,usage_date)
-        );
-        INSERT INTO provider_credentials(id,provider,label,secret_ciphertext,secret_iv,secret_tag,enabled,status,weight,qps_limit,
-          daily_limit,quota_scope_id,cooldown_until,failure_count,last_used_at,last_success_at,last_failure_at,created_at,updated_at)
-        SELECT id,provider,label,secret_ciphertext,secret_iv,secret_tag,enabled,status,weight,qps_limit,
-          daily_limit,quota_scope_id,cooldown_until,failure_count,last_used_at,last_success_at,last_failure_at,created_at,updated_at
-        FROM provider_credentials_current;
-        INSERT INTO provider_usage_daily SELECT * FROM provider_usage_daily_current;
-        DROP TABLE provider_usage_daily_current;
-        DROP TABLE provider_credentials_current;
-        CREATE INDEX idx_provider_credentials_pick ON provider_credentials(provider,enabled,status,cooldown_until,last_used_at);
-        COMMIT;
-        PRAGMA foreign_keys=ON;`);
-
-      const migrated = new ControlStore(legacy, masterKey);
-      await migrated.initialize('legacy administrator password');
-      expect(await migrated.listCredentials()).toMatchObject([{ id: amapId, provider: 'amap', quotaUsed: 1, quotaPeriod: 'month' }]);
-      const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString('base64url');
-      const token = `${encode({ alg: 'none' })}.${encode({ exp: Math.floor(Date.now() / 1000) + 3600 })}.signature`;
-      const onemapId = await migrated.addCredential({ provider: 'onemap', label: 'OneMap', secret: token });
-      expect((await migrated.acquireCredential('onemap'))?.id).toBe(onemapId);
-      expect((await legacy.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
-    } finally {
-      legacy.close();
-    }
-  });
-
   it('applies a shared quota scope across multiple keys', async () => {
     const first = await store.addCredential({ provider: 'tencent', label: 'A', secret: 'scope-a', dailyLimit: 1, quotaScopeId: 'shared-account' });
     await store.addCredential({ provider: 'tencent', label: 'B', secret: 'scope-b', dailyLimit: 1, quotaScopeId: 'shared-account' });
@@ -643,5 +888,187 @@ describe('control database security', () => {
     expect((await store.authorizeApiTokenDetailed(created.token, 'generate')).status).toBe('authorized');
     expect((await store.authorizeApiTokenDetailed(created.token, 'generate')).status).toBe('rate_limited');
     expect((await store.authorizeApiTokenDetailed('invalid', 'generate')).status).toBe('unauthorized');
+  });
+
+  it('imports translation and geocoding service credentials from the environment', () => {
+    expect(credentialsFromEnvironment({
+      GEOAPIFY_API_KEY: ' geo-key ', GOOGLE_GEOCODING_API_KEY: 'google-geo-key',
+      YOUDAO_APP_KEY: ' youdao-key ', YOUDAO_APP_SECRET: ' youdao-secret '
+    })).toEqual([
+      { provider: 'geoapify', label: 'GEOAPIFY_API_KEY', secret: 'geo-key' },
+      { provider: 'google-geocoding', label: 'GOOGLE_GEOCODING_API_KEY', secret: 'google-geo-key' },
+      { provider: 'youdao', label: 'YOUDAO_APP_KEY', secret: JSON.stringify({ appKey: 'youdao-key', appSecret: 'youdao-secret' }) }
+    ]);
+    expect(credentialsFromEnvironment({ YOUDAO_APP_KEY: 'only-half-of-the-pair' })).toEqual([]);
+  });
+
+  it('stores the Youdao pair as a single validated JSON credential', async () => {
+    await expect(store.addCredential({ provider: 'youdao', label: 'Bad', secret: 'not-json' })).rejects.toThrow('INVALID_PROVIDER_CREDENTIAL');
+    const secret = JSON.stringify({ appKey: 'app-key', appSecret: 'app-secret' });
+    const first = await store.ensureCredential({ provider: 'youdao', label: 'YOUDAO_APP_KEY', secret });
+    const second = await store.ensureCredential({ provider: 'youdao', label: 'Renamed', secret });
+    expect(first.created).toBe(true);
+    expect(second).toEqual({ id: first.id, created: false });
+    expect(parseYoudaoSecret((await store.acquireCredential('youdao'))?.secret)).toEqual({ appKey: 'app-key', appSecret: 'app-secret' });
+    await expect(store.updateCredential(first.id, { secret: '{"appKey":"only"}' })).rejects.toThrow('INVALID_PROVIDER_CREDENTIAL');
+  });
+
+  it('resolves service credentials from the store with caching and environment fallback', async () => {
+    const environment = { GEOAPIFY_API_KEY: 'environment-geo-key' };
+    const cached = createServiceCredentialResolver(store, environment);
+    expect(await cached('geoapify')).toBe('environment-geo-key');
+    await store.addCredential({ provider: 'geoapify', label: 'Stored', secret: 'stored-geo-key' });
+    expect(await cached('geoapify')).toBe('environment-geo-key');
+    const fresh = createServiceCredentialResolver(store, environment, 0);
+    expect(await fresh('geoapify')).toBe('stored-geo-key');
+    expect(await fresh('google-geocoding')).toBeUndefined();
+    const youdao = createServiceCredentialResolver(store, { YOUDAO_APP_KEY: 'env-app-key', YOUDAO_APP_SECRET: 'env-app-secret' }, 0);
+    expect(parseYoudaoSecret(await youdao('youdao'))).toEqual({ appKey: 'env-app-key', appSecret: 'env-app-secret' });
+  });
+
+  it('tests service credentials with tiny requests that never leak the secret', async () => {
+    const youdao = await testServiceCredential('youdao', JSON.stringify({ appKey: 'app-key', appSecret: 'app-secret' }), (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body as URLSearchParams;
+      expect(body.getAll('q')).toEqual(['地址']);
+      expect(body.get('appKey')).toBe('app-key');
+      return Response.json({ errorCode: '0', translateResults: [{ translation: 'address' }] });
+    }) as typeof fetch);
+    expect(youdao).toEqual({ success: true, resultCount: 1 });
+    expect(JSON.stringify(youdao)).not.toContain('app-secret');
+    const geoapify = await testServiceCredential('geoapify', 'geo-secret', (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe('https://api.geoapify.com');
+      expect(url.searchParams.get('apiKey')).toBe('geo-secret');
+      expect(url.searchParams.get('limit')).toBe('1');
+      return Response.json({ results: [{}] });
+    }) as typeof fetch);
+    expect(geoapify).toEqual({ success: true, resultCount: 1 });
+    await expect(testServiceCredential('youdao', 'not-json'))
+      .rejects.toMatchObject({ outcome: 'invalid' });
+    const google = await testServiceCredential('google-geocoding', 'google-secret', (async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe('https://geocode.googleapis.com');
+      expect(url.pathname).toBe('/v4/geocode/location');
+      expect(url.searchParams.get('regionCode')).toBe('US');
+      expect(url.searchParams.getAll('types')).toEqual(['street_address', 'premise', 'subpremise']);
+      expect(new Headers(init?.headers).get('X-Goog-Api-Key')).toBe('google-secret');
+      return Response.json({ results: [{ placeId: 'fixture' }] });
+    }) as typeof fetch);
+    expect(google).toEqual({ success: true, resultCount: 1 });
+    await expect(testServiceCredential('google-geocoding', 'google-secret', (async () => new Response('{}', { status: 403 })) as typeof fetch))
+      .rejects.toMatchObject({ outcome: 'auth' });
+    await expect(testServiceCredential('geoapify', 'geo-secret', (async () => { throw new Error('offline geo-secret'); }) as unknown as typeof fetch))
+      .rejects.toMatchObject({ outcome: 'network', message: 'NETWORK_ERROR' });
+  });
+
+  it('manages service credentials and the translation toggle through the admin API', async () => {
+    const session = await store.createSession('admin');
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json'
+    };
+    const created = await admin.request('/admin/api/providers', {
+      method: 'POST', headers, body: JSON.stringify({ provider: 'geoapify', label: 'Geoapify', secret: 'geoapify-secret-sentinel' })
+    });
+    expect(created.status).toBe(201);
+    const listing = await (await admin.request('/admin/api/providers', { headers: { Cookie: headers.Cookie } })).json() as { data: unknown[] };
+    expect(listing.data).toEqual([expect.objectContaining({ provider: 'geoapify', quotaPeriod: 'day', quotaLimit: 3_000 })]);
+    expect(JSON.stringify(listing)).not.toContain('geoapify-secret-sentinel');
+    expect(await (await admin.request('/admin/api/settings/translation', { headers: { Cookie: headers.Cookie } })).json())
+      .toEqual({ data: { googleTranslationEnabled: true } });
+    const updated = await admin.request('/admin/api/settings/translation', {
+      method: 'PUT', headers, body: JSON.stringify({ googleTranslationEnabled: false })
+    });
+    expect(updated.status).toBe(200);
+    expect(await store.setting('google_translation_enabled', true)).toBe(false);
+    expect((await admin.request('/admin/api/settings/translation', {
+      method: 'PUT', headers, body: JSON.stringify({ googleTranslationEnabled: 'yes' })
+    })).status).toBe(400);
+  });
+
+  it('seeds the Google translation toggle from the environment only once', async () => {
+    const fresh = openTestDatabase(':memory:', { migrate: false });
+    try {
+      await initializeTestDatabase(fresh, new URL('../server/control/schema.sql', import.meta.url));
+      const freshStore = new ControlStore(fresh, masterKey);
+      await freshStore.initialize('fresh administrator password', { GOOGLE_TRANSLATION_ENABLED: 'false' });
+      expect(await freshStore.setting('google_translation_enabled', true)).toBe(false);
+      await freshStore.setSetting('google_translation_enabled', true);
+      await freshStore.initialize(undefined, { GOOGLE_TRANSLATION_ENABLED: 'false' });
+      expect(await freshStore.setting('google_translation_enabled', false)).toBe(true);
+    } finally { fresh.close(); }
+  });
+
+  it('manages the Youdao credential through the dedicated settings endpoints', async () => {
+    const session = await store.createSession('admin');
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json'
+    };
+    expect(await (await admin.request('/admin/api/settings/youdao', { headers: { Cookie: headers.Cookie } })).json())
+      .toEqual({ data: { configured: false, appKeyMask: '' } });
+    expect((await admin.request('/admin/api/settings/youdao', {
+      method: 'PUT', headers, body: JSON.stringify({ appKey: 'only-half-of-the-pair' })
+    })).status).toBe(400);
+    const saved = await admin.request('/admin/api/settings/youdao', {
+      method: 'PUT', headers, body: JSON.stringify({ appKey: ' youdao-app-key ', appSecret: ' youdao-app-secret ' })
+    });
+    expect(await saved.json()).toEqual({ data: { configured: true, appKeyMask: 'youd****' } });
+    expect(parseYoudaoSecret((await store.acquireCredential('youdao'))?.secret))
+      .toEqual({ appKey: 'youdao-app-key', appSecret: 'youdao-app-secret' });
+    const replaced = await admin.request('/admin/api/settings/youdao', {
+      method: 'PUT', headers, body: JSON.stringify({ appKey: 'next-app-key', appSecret: 'next-app-secret' })
+    });
+    expect(await replaced.json()).toEqual({ data: { configured: true, appKeyMask: 'next****' } });
+    expect((await store.listCredentials()).filter((credential) => credential.provider === 'youdao')).toHaveLength(1);
+    const status = await (await admin.request('/admin/api/settings/youdao', { headers: { Cookie: headers.Cookie } })).json();
+    expect(JSON.stringify(status)).not.toContain('app-secret');
+  });
+
+  it('manages multiple Youdao credentials independently through provider endpoints', async () => {
+    const session = await store.createSession('admin');
+    const admin = createAdminApi({ control: store, china: {} as never, addressDb: database });
+    const headers = {
+      Cookie: `address_admin_session=${session.token}; address_admin_csrf=${session.csrf}`,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json'
+    };
+    const create = async (label: string, appKey: string, appSecret: string) => {
+      const response = await admin.request('/admin/api/providers', {
+        method: 'POST', headers, body: JSON.stringify({
+          provider: 'youdao', label, secret: JSON.stringify({ appKey, appSecret })
+        })
+      });
+      expect(response.status).toBe(201);
+      return (await response.json() as { data: { id: string } }).data.id;
+    };
+    const first = await create('Translation primary', 'first-app-key', 'first-app-secret');
+    const second = await create('Translation backup', 'second-app-key', 'second-app-secret');
+    const listed = await (await admin.request('/admin/api/providers', { headers: { Cookie: headers.Cookie } })).json() as {
+      data: Array<{ id: string; provider: string; fieldMasks?: { appKey: string; appSecret: string } }>;
+    };
+    expect(listed.data.filter(({ provider }) => provider === 'youdao')).toHaveLength(2);
+    expect(listed.data.find(({ id }) => id === first)?.fieldMasks).toEqual({ appKey: 'firs••••••••', appSecret: '••••••••cret' });
+    expect(JSON.stringify(listed)).not.toContain('first-app-secret');
+    expect(JSON.stringify(listed)).not.toContain('second-app-secret');
+
+    const revealed = await (await admin.request(`/admin/api/providers/${second}/reveal-fields`, {
+      method: 'POST', headers
+    })).json();
+    expect(revealed).toEqual({ data: { id: second, appKey: 'second-app-key', appSecret: 'second-app-secret' } });
+    expect(JSON.stringify(revealed)).not.toContain('"secret":"{');
+    expect(await (await admin.request(`/admin/api/providers/${second}/reveal`, { method: 'POST', headers })).json())
+      .toEqual({ data: { id: second, secret: JSON.stringify({ appKey: 'second-app-key', appSecret: 'second-app-secret' }) } });
+
+    expect((await admin.request(`/admin/api/providers/${first}`, {
+      method: 'PUT', headers, body: JSON.stringify({ enabled: false })
+    })).status).toBe(200);
+    expect((await store.acquireCredential('youdao'))?.id).toBe(second);
+    expect((await admin.request(`/admin/api/providers/${first}`, { method: 'DELETE', headers })).status).toBe(200);
+    expect((await store.listCredentials()).filter(({ provider }) => provider === 'youdao').map(({ id }) => id)).toEqual([second]);
   });
 });

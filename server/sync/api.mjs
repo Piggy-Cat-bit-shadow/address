@@ -27,7 +27,7 @@ const json = (data, status, origin, allowedOrigin, extraHeaders = {}) => new Res
   headers: { ...responseHeaders(origin, allowedOrigin), ...extraHeaders }
 });
 
-export const createSyncApi = ({ coordinator, token, allowedOrigin = '', hotPool, hotPoolToken = '' }) => {
+export const createSyncApi = ({ coordinator, token, allowedOrigin = '', hotPool, hotPoolToken = '', queue }) => {
   if (!String(token || '').trim()) throw new Error('SYNC_ADMIN_TOKEN is required');
 
   return async (request) => {
@@ -74,12 +74,17 @@ export const createSyncApi = ({ coordinator, token, allowedOrigin = '', hotPool,
         return json({ error: 'INVALID_SHARDS' }, 400, origin, allowedOrigin);
       }
       const mode = input.mode === undefined ? 'manual' : String(input.mode);
-      if (!['initial', 'manual'].includes(mode)) return json({ error: 'INVALID_MODE' }, 400, origin, allowedOrigin);
+      if (!['initial', 'manual', 'force'].includes(mode)) return json({ error: 'INVALID_MODE' }, 400, origin, allowedOrigin);
+      if (mode === 'force') await queue?.force?.(shards);
       const result = await coordinator.trigger(mode, { shards });
       const status = result.accepted ? 202 : 409;
       return json({ accepted: result.accepted, job: result.job }, status, origin, allowedOrigin, result.job?.id
         ? { Location: `/api/v1/sync/jobs/${result.job.id}` }
         : {});
+    }
+    if (url.pathname === '/api/v1/sync/queue' && request.method === 'GET') {
+      if (!queue) return json({ error: 'QUEUE_UNAVAILABLE' }, 503, origin, allowedOrigin);
+      return json({ data: await queue.snapshot() }, 200, origin, allowedOrigin);
     }
     if (url.pathname === '/api/v1/sync/jobs/latest' && request.method === 'GET') {
       const job = await coordinator.latestJob();

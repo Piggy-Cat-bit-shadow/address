@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=/root/address
+ROOT=${ADDRESS_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 RUNTIME="$ROOT/runtime"
 NODE_VERSION=v24.14.1
 case "$(uname -m)" in

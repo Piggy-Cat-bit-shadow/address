@@ -1,11 +1,12 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { openDatabase } from '../database/sqlite.mjs';
+import { createPostgresPool, PostgresDatabase } from '../database/postgres.mjs';
 import { refreshAddressCoverage } from './coverage';
 
-const database = openDatabase(String(workerData.databasePath), { timeout: 30_000 });
+const pool = createPostgresPool({ connectionString: String(workerData.postgresUrl), max: 4, min: 1 });
+const database = new PostgresDatabase(pool);
 try {
   await refreshAddressCoverage(database);
   parentPort?.postMessage({ success: true });
 } finally {
-  database.close();
+  await pool.end();
 }

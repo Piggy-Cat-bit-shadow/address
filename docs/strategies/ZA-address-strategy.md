@@ -2,15 +2,37 @@
 
 | 项目 | 核心内容 |
 |---|---|
-| 主源 | Geofabrik `south-africa` |
-| 格式 / 邮编 | `<unit> <house> <street>, <suburb>, <city> <postcode>, ZA`；unit 缺失不补；源记录；格式门禁 4 位数字。只清洗格式，不创造或按邻近地址补齐 |
-| 行政区 | 源字段与 catalog；Stats SA 行政区作为候选核验。行政层级必须与坐标反查一致；冲突时保留源值在隔离区并拒绝发布 |
-| 住宅证据 | OSM 住宅建筑标签；邮编与 suburb 冲突时拒绝。住宅证据必须来自明确建筑/用途字段，不能由地址存在推断 |
+| 主源 | eThekwini Municipality `Street_Address` + `Zoning`；City of Cape Town `Land Parcels`（同一地块含门牌与 zoning）；Geofabrik `south-africa` 补充 |
+| 格式 / 邮编 | `<unit> <house> <street>, <suburb>, <city> <postcode>, ZA`；unit 缺失不补；4 位邮编仅接受 South African Post Office 官方表中 `PlaceName=suburb`、`Town=city` 且唯一的 `StrCode` |
+| 行政区 | eThekwini 使用 `DISTRICT/SUBURB` + KwaZulu-Natal；Cape Town 使用 SAPO 唯一 postal town + 官方 `OFC_SBRB_NAME` + Western Cape；冲突记录拒绝发布 |
+| 住宅证据 | eThekwini 地址点必须精确落入唯一住宅 zoning；Cape Town 仅接受同一官方地块的纯 `Residential 1/2` 或 `General Residential 1-6`，逗号拼接的混合 zoning 全部拒绝；Geofabrik 仍要求 OSM 明确住宅建筑 |
+| 真实字段 / 生成字段 | 官方/OSM 门牌、道路、suburb、城市、省、坐标及 SAPO 唯一匹配邮编均为真实字段；生成字段：无，不补单元号 |
+| 坐标 / 去重 | 官方地块代表点和 OSM 坐标统一为 WGS84；按官方地块/地址 ID、OSM ID 和规范化地址去重 |
 | 发布门禁 | 质量高于数量。仅发布 E3：地址存在与独立住宅用途证据同时成立；本国格式规定的必填组件缺一即淘汰，字段冲突拒绝合并；只允许可逆、可验证的格式规范化。 |
-| 同步频率 | 每日检查上游分片；新快照通过门禁后原子切换，失败保留上一 active 快照。 |
-| 验证 / 排除 | 南非地址常有 suburb，不能用 city 替代 suburb。 暂不采用：国家地址数据库/物业数据许可未完成验证，不接入。 |
-| 策略版本 / 状态 / 更新 | 1.1 / 严格质量门禁 / 2026-07-28 |
+| 同步方式 | 自动初始化一次；显式来源探测发现 eThekwini、Cape Town、SAPO 或 Geofabrik 版本变化时才构建新快照 |
+| 验证 / 排除 | 仅保留完整门牌字段与纯住宅 zoning，重复门牌按规范化键去重；数值道路、非标准门牌、多个邮编、混合/非住宅 zoning 和缺坐标记录全部拒绝。 |
+| 策略版本 / 状态 / 更新 | 1.9 / 官方双源 + 多规则完成下限 / 2026-08-24 |
 
-- 默认 active 地址目标 15,000；省、市镇、地区单节点上限 1,500/250/60，后台可覆盖；只裁剪地址记录，行政区划与邮编目录保持完整。
+- 原文与英文变体保留来源语言；简体中文语义字段未完成自动翻译回填时不进入随机索引。英语原生记录也进入后台回填，地址同步繁忙时仍按有界批次推进，成功后自动刷新索引。
+- 默认 active 地址上限 8,000；省、市镇、地区单节点上限 4,000/3,800/60，后台可覆盖；只裁剪地址记录，行政区划与邮编目录保持完整。
+- eThekwini 只覆盖 KwaZulu-Natal；Cape Town 只覆盖 Western Cape，并使用官方 parcel centroid，不通过附近地块推断住宅用途。
+- Cape Town 来源依据：[Land Parcels 官方 item](https://www.arcgis.com/home/item.html?id=7c59bb7a1b724d11a70d3db591233df1)、[Street Address Numbers 官方 item](https://www.arcgis.com/home/item.html?id=c2101858187f424298f85e60f9706533)、[开放数据条款](https://www.capetown.gov.za/General/Terms-of-use-open-data) 与 [SAPO 邮编下载页](https://www.postoffice.co.za/questions/postalcode.html)。
+
+- OSM 独立地址点仅在精确落入明确住宅建筑面时获得住宅用途证据；不使用附近建筑、同街道或邻近坐标推断。
+
+
+默认同步生命周期为自动初始化一次；未完成的额度或 checkpoint 任务自动续跑，完整扫描或来源耗尽后停止，不按日/月重复执行。只有来源、上游版本、严格提取能力变化或管理员明确刷新才重新运行；周期元数据探测仅在显式启用时执行。
 
 统一证据等级、许可、配额与 VPS 边界见 [数据源与自动同步方案](../data-sources.md)。策略变化时同步更新本文件、实现与测试。
+## 覆盖与保留
+
+- 官方行政区目录定义覆盖分母；只有关联到官方节点的严格住宅地址计入分子。
+- 每个有合格数据的最低行政区先满足每节点、省市和单节点目标，再轮询分配额外记录；国家总量是完成下限，节点规则可推动总量继续增长，来源或分片容量仍是技术硬限制。
+- 每次国家快照发布后自动重建住宅覆盖；生成器只展示至少有 1 条可发布住宅地址的官方区域。
+
+
+## 运行时随机生成
+
+- 公开普通生成直接在 PostgreSQL 完整合格范围选择：支持连续生成序号的未筛选国家池按序号等概率选择，筛选范围使用有界循环索引窗口；不使用固定子集或固定顺序。
+- 每次按 seed 在有界候选窗口内执行独立偏移，再按主键读取完整地址与证据；API 不把完整地址池加载到进程内存，也不执行全表随机排序。
+- 未传入 seed 时由服务器为每个请求生成新 UUID；相同显式 seed 在同一数据库快照中可复现。数据库提交后，新 worker 快照全部就绪才原子替换旧快照。

@@ -1,0 +1,16 @@
+{
+	admin localhost:2019
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+		trusted_proxies_strict
+	}
+}
+
+:8080 {
+	reverse_proxy __API_UPSTREAM__
+}
+
+:8792 {
+	reverse_proxy __BROKER_UPSTREAM__
+}

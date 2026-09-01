@@ -1,6 +1,6 @@
 # 数据源、准确性与自动同步
 
-更新：2026-07-28。这里只保留当前实现、已完成的本地可用性探测和发布门禁；各国细节见 `docs/strategies/`。
+更新：2026-08-24。本文汇总各国家和地区当前实现的数据源、发布规则与自动同步流程。字段、坐标系、去重和验证细节见 [`strategies/`](strategies/)。
 
 ## 1. 发布原则
 
@@ -11,97 +11,64 @@
 - **严格地区匹配**：城市/区县筛选无覆盖时返回空结果，不替换为附近、州省或全国地址。
 - **来源冲突即隔离**：行政区、门牌、邮编或坐标冲突的记录不进入 active 池。
 
-中国额外要求：AreaCity 行政区有效；同一小区至少两个独立地图平台在名称、行政区、地址和坐标上匹配；小区及来源证据均在 180 天有效窗口内。
+中国额外要求：AreaCity 行政区有效；高德候选必须是住宅小区分类、行政区一致、具有数字门牌且不命中机构黑名单。百度/腾讯可增加验证等级，但不作为发布必需条件。已发布记录只在来源新版本替换、证据失效或质量门禁变化时显式退休，不按固定天数自动过期。
 
 ## 2. 当前主源
 
 | 国家/地区 | 地址主源 | 邮编/行政区核验 | 住宅证据 | 策略 |
 |---|---|---|---|---|
-| 美国 US | Overture | 源字段 + catalog；ZIP/ZIP+4 | OSM/Overture 住宅建筑 | [US](strategies/US-address-strategy.md) |
-| 加拿大 CA | Overture | 源字段 + catalog；加拿大邮编格式 | 明确住宅建筑/用途 | [CA](strategies/CA-address-strategy.md) |
-| 墨西哥 MX | Overture | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [MX](strategies/MX-address-strategy.md) |
+| 美国 US | Overture + Geofabrik 州级分片 | 源字段 + catalog；ZIP/ZIP+4 | OSM/Overture 住宅建筑 | [US](strategies/US-address-strategy.md) |
+| 加拿大 CA | Statistics Canada NAR 2026-06 + Overture + Geofabrik Canada | NAR `ADDR_GUID/LOC_GUID`、CSD 和加拿大邮编；成员级 Range 断点读取 | NAR `BU_USE=1/2` 并通过 `LOC_GUID` 关联 WGS84 坐标；其他源仍需明确住宅建筑/用途 | [CA](strategies/CA-address-strategy.md) |
+| 墨西哥 MX | INEGI 原始地址框架 + 同源标准化包 | INEGI 原始字段；5 位非零邮编 | `TIPODOM=VIVIENDA` | [MX](strategies/MX-address-strategy.md) |
 | 英国 GB | Geofabrik OSM | 源值 + Postcodes.io | OSM 住宅建筑 | [GB](strategies/GB-address-strategy.md) |
-| 德国 DE | Overture | 源字段 + catalog；OpenPLZ 仅辅助 | 明确住宅建筑/用途 | [DE](strategies/DE-address-strategy.md) |
-| 法国 FR | Overture | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [FR](strategies/FR-address-strategy.md) |
-| 意大利 IT | Overture | 源字段 + catalog；5 位 CAP | 明确住宅建筑/用途 | [IT](strategies/IT-address-strategy.md) |
-| 西班牙 ES | Overture | 源字段 + catalog；5 位邮编 | 明确住宅建筑/用途 | [ES](strategies/ES-address-strategy.md) |
-| 荷兰 NL | Overture | 源字段 + catalog；`1234 AB` | 明确住宅建筑/用途 | [NL](strategies/NL-address-strategy.md) |
+| 德国 DE | Overture + Geofabrik 16 州分片 | 源字段 + catalog；OpenPLZ 仅辅助 | 明确住宅建筑/用途 | [DE](strategies/DE-address-strategy.md) |
+| 法国 FR | CSTB BDNB 23/33/69/75 + BAN + Overture + Geofabrik 区域分片 | BDNB/BAN `cle_interop_adr`、INSEE commune、5 位邮编、EPSG:2154→WGS84；其他源字段 + catalog | BDNB `usage_principal_bdnb_open` 住宅类别且 BAN 关联 `fiabilite>=17`；其他源明确住宅建筑/用途 | [FR](strategies/FR-address-strategy.md) |
+| 意大利 IT | Overture + Geofabrik OSM | 源字段 + catalog；5 位 CAP | 明确住宅建筑/用途 | [IT](strategies/IT-address-strategy.md) |
+| 西班牙 ES | Catastro INSPIRE municipality AD+BU + Overture | Catastro `esp` 道路/门牌/municipality、5 位邮编、EPSG:25830→WGS84；其他源字段 + catalog | Catastro `currentUse=1_residential`、`numberOfDwellings>0`，14 位 referencia catastral 稳定关联地址；其他源明确住宅建筑/用途 | [ES](strategies/ES-address-strategy.md) |
+| 荷兰 NL | Kadaster BAG（PDOK OGC Features）+ Overture | BAG 源字段 + catalog；`1234 AB` | BAG 严格在用 `woonfunctie`；Overture 明确住宅建筑/用途 | [NL](strategies/NL-address-strategy.md) |
 | 俄罗斯 RU | Geofabrik OSM | 源字段 + catalog；6 位邮编 | OSM 住宅建筑 | [RU](strategies/RU-address-strategy.md) |
-| 中国 CN | AreaCity + 高德/百度/腾讯；旧 OSM 中国池退出发布 | AreaCity + 民政部版本对照；6 位源邮编 | 至少两平台一致 | [CN](strategies/CN-China-address-generation.md) |
-| 中国香港 HK | Geofabrik OSM | 源字段 + catalog；无通用邮编 | OSM 住宅建筑 | [HK](strategies/HK-address-strategy.md) |
-| 中国台湾 TW | Overture | 源字段 + catalog；TGOS 暂停 | 明确住宅建筑/用途 | [TW](strategies/TW-address-strategy.md) |
-| 日本 JP | Overture；ABR/Geolonia 为候选 | 源字段 + catalog；7 位邮编 | 明确住宅建筑/用途 | [JP](strategies/JP-address-strategy.md) |
-| 韩国 KR | Geofabrik OSM | 源字段 + catalog；Juso 暂停 | OSM 住宅建筑 | [KR](strategies/KR-address-strategy.md) |
-| 新加坡 SG | Geofabrik OSM；OneMap 辅助 | OneMap/源 6 位邮编 | OSM 住宅建筑 | [SG](strategies/SG-address-strategy.md) |
+| 中国 CN | AreaCity 行政区 + 高德住宅小区；百度/腾讯只作可选增强验证 | AreaCity + 民政部版本对照；6 位源邮编 | 高德住宅分类、行政区一致、数字门牌和机构黑名单门禁 | [CN](strategies/CN-China-address-generation.md) |
+| 中国香港 HK | 屋宇署住宅/综合用途 Tower；房委会单位 + ALS；OSM 补充 | 官方 18 区双语映射与香港坐标；无通用邮编 | 屋宇署住宅用途或房委会公屋库存 | [HK](strategies/HK-address-strategy.md) |
+| 中国台湾 TW | 内政部实价登录多季度住宅成交门牌 + OA 官方门牌点 | 县市/区一致 + 中华邮政 3+3 完整门牌精确匹配 | 实价登录住宅主要用途与住宅建筑型态 | [TW](strategies/TW-address-strategy.md) |
+| 日本 JP | 数字厅 ABR/Geolonia + PLATEAU；OSM 住宅轮廓补充 | ABR 行政层级 + 日本邮便 7 位邮编唯一匹配 | ABR 点精确落入 PLATEAU/OSM 明确住宅建筑面 | [JP](strategies/JP-address-strategy.md) |
+| 韩国 KR | K-apt 官方共同住宅目录 + Juso/OpenAddresses 归档 + Geofabrik OSM | Juso 5 位邮编与行政层级；K-apt 地番地址 | K-apt 官方共同住宅标识；Juso 地址点须与明确住宅建筑相交 | [KR](strategies/KR-address-strategy.md) |
+| 新加坡 SG | HDB Property Information + Existing Building；Geofabrik OSM | HDB/OneMap 6 位邮编 | HDB 明确住宅字段与住宅单元数；OSM 住宅建筑 | [SG](strategies/SG-address-strategy.md) |
 | 马来西亚 MY | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [MY](strategies/MY-address-strategy.md) |
-| 泰国 TH | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [TH](strategies/TH-address-strategy.md) |
+| 泰国 TH | DPT 官方建筑图层 + Geofabrik OSM | DPT Tambon/Amphoe/Province + catalog；5 位邮编；polygon 转 WGS84 点 | DPT 明确住宅/公寓/集合住宅/宿舍分类；OSM 住宅建筑 | [TH](strategies/TH-address-strategy.md) |
 | 菲律宾 PH | Geofabrik OSM | 源字段 + catalog；4 位邮编 | OSM 住宅建筑 | [PH](strategies/PH-address-strategy.md) |
-| 越南 VN | Geofabrik OSM | 源字段 + catalog；5–6 位源值 | OSM 住宅建筑 | [VN](strategies/VN-address-strategy.md) |
+| 越南 VN | Geofabrik OSM；Google Geocoding 补全 | 源字段 + catalog；五位邮编 | OSM 住宅建筑 | [VN](strategies/VN-address-strategy.md) |
 | 土耳其 TR | Geofabrik OSM | 源字段 + catalog；5 位邮编 | OSM 住宅建筑 | [TR](strategies/TR-address-strategy.md) |
-| 沙特阿拉伯 SA | Geofabrik OSM | 源字段 + catalog；源邮编 | OSM 住宅建筑 | [SA](strategies/SA-address-strategy.md) |
-| 印度 IN | Geofabrik OSM | 源字段 + catalog；6 位 PIN | OSM 住宅建筑 | [IN](strategies/IN-address-strategy.md) |
+| 沙特阿拉伯 SA | 全国地址点保全包 + Overture + Geofabrik OSM | 源字段 + catalog；5 位或 `5-4` 邮编 | 地址点精确落入明确住宅建筑面 | [SA](strategies/SA-address-strategy.md) |
+| 印度 IN | Geofabrik OSM；Mappls Reverse Geocoding；Google Geocoding 补全 | OSM 门牌/道路 + 地理编码行政字段与 6 位 PIN | OSM 明确住宅建筑 | [IN](strategies/IN-address-strategy.md) |
 | 澳大利亚 AU | Overture | 源字段 + catalog；4 位邮编 | 明确住宅建筑/用途 | [AU](strategies/AU-address-strategy.md) |
 | 巴西 BR | Geofabrik OSM | 源字段 + catalog；CEP | OSM 住宅建筑 | [BR](strategies/BR-address-strategy.md) |
-| 尼日利亚 NG | Geofabrik OSM | 源字段 + catalog；6 位源值 | OSM 住宅建筑 | [NG](strategies/NG-address-strategy.md) |
-| 南非 ZA | Geofabrik OSM | 源字段 + catalog；4 位邮编 | OSM 住宅建筑 | [ZA](strategies/ZA-address-strategy.md) |
+| 尼日利亚 NG | Geofabrik OSM；Google Geocoding 补全 | 来源字段；6 位邮编 | OSM 明确住宅建筑 | [NG](strategies/NG-address-strategy.md) |
+| 南非 ZA | eThekwini 官方地址点 + Cape Town 官方地块 + Geofabrik OSM | SAPO 官方 4 位邮编精确唯一匹配 | 官方住宅分区精确点/地块关联；OSM 明确住宅建筑 | [ZA](strategies/ZA-address-strategy.md) |
 
-OpenAddresses 只用于发现可用上游；每个上游需单独核验许可和质量。libpostal 只用于解析/规范化，不证明地址真实或属于住宅。
+OpenAddresses 只用于发现可用上游；每个实际来源仍需通过项目的许可、字段和质量门禁。libpostal 只用于解析和规范化，不证明地址真实或属于住宅。
 
-## 3. 本地探测结论
+### API 补全
 
-| 来源/API | 2026-07-28 结果 | 决策 |
-|---|---|---|
-| Overture STAC | HTTP 200，Catalog 和 `latest` 可解析 | 批量主源；每国仍执行 E3 |
-| Geofabrik index | HTTP 200，分片索引可解析 | 批量主源；每个 PBF 独立校验 |
-| AreaCity / 民政部版本页 | 均可访问 | 中国行政区主源/版本对照，不提供住宅 |
-| Geolonia Japanese Addresses v2 | HTTP 200，行政字段和坐标可解析 | 日本升级候选；尚缺住宅关联 |
-| Postcodes.io | 示例 HTTP 200，邮编/坐标/行政字段完整 | 英国邮编核验，不是物业地址源 |
-| OpenPLZ | GitHub 数据可访问；公开 API 探测 404 | 仅离线辅助，不作运行时主源 |
-| 高德 WebService | 本地 Key 调用成功，POI 字段可解析 | 中国小区候选 |
-| 百度 Place API | 本地 AK 调用成功，地点字段可解析 | 中国小区候选 |
-| 腾讯 Place API | HTTP 200，`status=121` | 当日额度耗尽，暂停至下一周期 |
-| OneMap Search | 3 个脱敏邮编均 HTTP 200 且一致 | 新加坡地址/邮编/坐标辅助，不赋予住宅证据 |
-| Geoapify | HTTP 2xx，schema 可解析 | 地址/邮编辅助，不赋予住宅证据 |
-| 韩国 Juso/data.go.kr | 申请依赖当前缺少的账户条件 | 暂停；使用 OSM 严格门禁 |
-| 台湾 TGOS | 本地访问不稳定 | 暂停；使用 Overture 严格门禁 |
+Google Geocoding 与 Mappls Reverse Geocoding 只处理具有 OSM 明确住宅建筑、稳定建筑 ID、来源门牌、来源道路和建筑几何的种子。它们补全缺失的行政区、邮编与坐标字段，不单独构成住宅证据，也不通过网格遍历或附近结果创造门牌。Mappls 当前只用于印度；Google 当前用于各国家策略中明确列出的低数量国家。
 
-探测成功只表示接口和 schema 可用；生产同步仍须抽样、边界、邮编、去重和住宅证据门禁。
+## 3. 自动同步
 
-## 4. API 与免费额度
+国家完成条件为“总量目标 + 完整官方行政目录最低层覆盖率（零地址节点也计入分母）+ 最低层/一级/二级节点最低数 + 自定义节点目标”全部启用规则同时达标；任一规则未达标都保持未完成。
 
-| 平台 | 申请入口 | 免费/初始额度基线 | 项目配置 |
-|---|---|---|---|
-| 高德 WebService | <https://console.amap.com/dev/index> | 个人 5,000/月；以控制台为准 | `AMAP_API_KEY` 或后台多个 Key |
-| 高德 JS API | <https://console.amap.com/dev/index> | 以控制台为准 | 独立 `AMAP_JS_API_KEY` + `AMAP_JS_SECURITY_CODE` |
-| 百度 Place API | <https://lbsyun.baidu.com/apiconsole/key> | 个人常见 100/日、3 QPS；以认证档位为准 | `BAIDU_API_KEY` 或后台多个 AK |
-| 腾讯 WebService | <https://lbs.qq.com/dev/console/application/mine> | 初始档 10,000/日、5 QPS | `TENCENT_API_KEY` 或后台多个 Key |
-| OneMap | <https://www.onemap.gov.sg/apidocs/> | 未找到统一公开日额度；Token 通常短期有效 | `ONEMAP_ACCESS_TOKEN` |
-| Geoapify | <https://www.geoapify.com/pricing> | 免费计划 3,000 credits/日、最多 5 req/s | `GEOAPIFY_API_KEY` |
-
-系统按每个 Key 的官方周期计数：日额度按自然日、月额度按自然月，每个 Key 默认独立；仅在管理员明确配置同一额度组时共享。腾讯返回 `X-Limit` 时使用平台实时值，高德和百度使用本地统计并由超限错误校正。后台显示已用、上限、剩余、来源和重置时间；出现 429、QPS、日/月额度错误或 Token 过期时自动冷却或暂停，并在周期边界恢复。
-
-## 5. 密钥安全
-
-- 真实值只保存在被 Git 忽略的本地 `.env`、VPS 权限 `600` 的运行配置或 `control.sqlite` AES-256-GCM 密文中。
-- WebService Key、Security Code、Token、主密钥不进入前端 bundle、公开 API、日志、审计详情、文档或 Git。
-- 高德 JS API Key 按浏览器机制会出现在网络请求中，因此必须使用**独立 Key**并设置正式域名白名单；它不得复用同步 Key。
-- `AMAP_JS_SECURITY_CODE` 仅由同源 `/_AMapService` 固定上游代理使用；代理有会话检查、Origin/Referer 校验、路径白名单、无缓存、响应过滤和每 IP 限速。
-
-## 6. 自动同步
-
-1. 最多 10 个国家并行发现、下载和准备；重型解析默认 3 路（可设 1–4），SQLite 固定单写入发布。
+1. 最多 10 个国家并行发现、下载和准备；重型解析默认 4 路（可设 1–4），PostgreSQL 使用按国家隔离的事务发布。
 2. 下载/调用上游到服务器 staging；相同 URL 与版本的原始包只下载一次，本地只做小型脱敏测试。
 3. 解析并分离 `buildingName` 与 `unit`，执行全半角、大小写、空白和标准邮编分隔符等确定性规范化。
-4. 按国家策略检查所有必填项、邮编格式、国家边界、行政层级、住宅用途和来源许可；任一失败即记录拒绝原因并淘汰。
-5. 候选按住宅证据、质量分和稳定哈希排序，再应用国家及行政层级目标；节点可覆盖继承上限。
-6. 在影子表完成质量统计；全部门禁通过后原子切换 active 快照，再删除 retired 证据、数据集和孤立地址。
+4. 按国家策略检查所有必填项、邮编格式、国家边界、行政层级、住宅用途和来源许可；OSM 独立地址点必须精确落入明确住宅建筑面，附近建筑不算证据；任一失败即记录拒绝原因并淘汰。
+5. 候选按住宅证据、质量分和稳定哈希排序；每个最低行政节点先满足每节点、省市和单节点目标，再轮询分配额外记录；国家总量是完成下限，节点规则可以推动结果远超该数量，分片来源容量仍是技术硬限制。
+6. 在影子表完成质量统计；全部门禁通过后仅切换同来源的旧快照。同一国家的多个来源保持 active，合并去重后重建覆盖统计。
 7. 只比较最新候选与当前 active 快照；候选不足显示缺口，不放宽门禁。行政区划和邮编目录不受地址数量限制。
-8. 读取层再次执行同一规则，旧库脏记录立即停止返回；同步失败保留上一份已通过相同门禁的快照。
-9. 按月检查批量源；中国行政区跟随 AreaCity 版本，小区按免费额度增量同步。高德只按 `types=120302` 查询，原始结果非空但全部被过滤时标记 `adapter_rejected_all`，不写成地区已耗尽。
+8. 发布后以官方行政区 ID 重建住宅覆盖和前端筛选；读取层再次执行同一规则，旧库脏记录立即停止返回；同步失败保留上一份已通过相同门禁的快照。
+9. 默认执行一次自动初始化。未完成的 API/额度任务跨额度窗口从 checkpoint 继续；完整扫描或来源耗尽后停止，不按日/月重复同步。`ADDRESS_SYNC_ENABLE_SOURCE_PROBES=true` 仅供明确需要周期检查上游版本的部署启用，默认关闭。
+10. 数据源确认耗尽的国家保持未完成但不进入执行队列，只有相同输入成功运行且所有未达规则均无进展时才锁定；总量不变但覆盖或节点达标数增加仍算进展。仅上游版本、新来源、确实改变严格候选集合的来源能力版本或管理员明确刷新可以解除对应来源；国家目标、覆盖目标和节点目标变化只重新计算完成状态。日/月额度和 QPS 冷却保留真实恢复时间并自动续跑，不伪造官方未公布的重置时刻。中国未完成时拥有最高调度优先级；后台同步队列使用独立页面。
 
-VPS 生产数据只保存在 `/root/address/data/`，代码部署必须排除数据库、WAL/SHM、日志、缓存、原始响应和所有密钥。旧数据只在新快照达到覆盖门槛后退役；清理生产旧数据的临时脚本不提交仓库。
+API Key 的申请、配置、轮换与冷却规则见 [API Key 配置文档](API_KEYS.zh-CN.md)。
 
-## 7. 主要参考
+## 4. 主要参考
 
 - Overture: <https://docs.overturemaps.org/guides/addresses/>
 - Geofabrik: <https://download.geofabrik.de/>
@@ -110,5 +77,10 @@ VPS 生产数据只保存在 `/root/address/data/`，代码部署必须排除数
 - 高德 JS 安全密钥: <https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode>
 - Postcodes.io: <https://postcodes.io/>
 - Geolonia Japanese Addresses v2: <https://github.com/geolonia/japanese-addresses-v2>
+- Statistics Canada National Address Register: <https://www150.statcan.gc.ca/n1/en/catalogue/46260002>
+- CSTB BDNB: <https://bdnb.io/download/>
+- Spanish Catastro INSPIRE: <https://www.catastro.hacienda.gob.es/webinspire/index.html>
+- Thailand DPT building layer: <https://bcbgis.dpt.go.th/arcgis/rest/services/DPTC_BCB_UAT/dptc_bldg/MapServer/2>
+- Mappls Reverse Geocoding: <https://developer.mappls.com/documentation/sdk/rest-apis/mappls-maps-reverse-geocoding-rest-api-example/Readme/>
 - OpenAddresses: <https://github.com/openaddresses/openaddresses>
 - libpostal: <https://github.com/openvenues/libpostal>

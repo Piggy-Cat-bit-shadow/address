@@ -4,6 +4,7 @@ import App, {
   createRequestId,
   fetchWithTimeout,
   generationErrorMessageKey,
+  generatorTitle,
   IP_GENERATION_REQUEST_TIMEOUT_MS,
   LOCATION_OPTION_RENDER_LIMIT,
   selectAvailableCountry
@@ -11,22 +12,80 @@ import App, {
 import { resolveAmapServiceHost } from '../src/components/AmapPreview';
 import { countries } from '../src/domain/countries';
 import { messages } from '../src/domain/i18n';
-import { formatLiteAddressLines } from '../src/components/LiteApp';
 
 const appSource = App.toString();
 const amapSource = readFileSync('src/components/AmapPreview.tsx', 'utf8');
 const adminPageSource = readFileSync('src/pages/admin.astro', 'utf8');
-const liteAppSource = readFileSync('src/components/LiteApp.tsx', 'utf8');
-const liteCssSource = readFileSync('src/components/LiteApp.css', 'utf8');
-const globalCssSource = readFileSync('src/styles/global.css', 'utf8');
-const layoutSource = readFileSync('src/layouts/Layout.astro', 'utf8');
-const manifest = JSON.parse(readFileSync('public/manifest.webmanifest', 'utf8'));
+const adminSource = readFileSync('src/components/SyncAdmin.tsx', 'utf8');
+const adminStyles = readFileSync('src/styles/admin.css', 'utf8');
+const worldMapSource = readFileSync('src/components/WorldCoverageMap.tsx', 'utf8');
+const monitorSource = readFileSync('src/components/PublicMonitor.tsx', 'utf8');
 
 describe('strict residential generator page structure', () => {
-  it('redirects the retired runtime admin page to the static Lite site', () => {
-    expect(adminPageSource).toContain("const target = '/'");
-    expect(adminPageSource).toContain('http-equiv="refresh"');
-    expect(adminPageSource).toContain('Address Lite');
+  it('keeps the standalone admin page branded and exposes blacklist management', () => {
+    expect(adminPageSource).toContain('href="/favicon.svg"');
+    expect(adminSource).toContain("blacklist: '地址黑名单'");
+    expect(adminSource).toContain("blacklistTitle: '地址黑名单'");
+    expect(adminSource).toContain("'/settings/blacklist'");
+    expect(adminSource).not.toContain('admin-topbar-copy');
+    expect(adminSource).toContain('合格住宅小区');
+    expect(adminSource).toContain("onemap: 'OneMap'");
+    expect(adminSource).toContain("amap: '高德地图'");
+    expect(adminSource).toContain("baidu: '百度地图'");
+    expect(adminSource).toContain("tencent: '腾讯地图'");
+    expect(adminSource).toContain("provider: 'API 名称'");
+    expect(adminSource).toContain("amapBrowserTitle: '高德前端地图凭据'");
+    expect(adminSource).not.toContain("request('/settings/youdao'");
+    expect(adminSource).toContain('YoudaoCredentialDialog');
+    expect(adminSource).toContain('provider-key-secrets');
+    expect(adminStyles).toContain('grid-template-columns: minmax(135px, .8fr) minmax(210px, 1.15fr) minmax(105px, .65fr) minmax(190px, 1.1fr) 146px');
+    expect(adminSource).toContain('dashboard-kpis');
+    expect(worldMapSource).toContain('world-distribution-map');
+    expect(worldMapSource).toContain('map-zoom-controls');
+    expect(adminSource).toContain('CountryCoverageTable');
+    expect(adminSource).toContain('https://flagcdn.com/24x18/');
+    expect(adminSource).toContain('country-flag');
+    expect(adminSource).toContain('map-dialog-backdrop');
+    expect(worldMapSource).toContain('cooperativeGestures: true');
+    expect(worldMapSource).toContain('renderWorldCopies: false');
+    expect(worldMapSource).toContain('setMaxBounds(worldBounds)');
+    expect(worldMapSource).toContain('[[-179.999999, -85], [179.999999, 85]]');
+    expect(worldMapSource).toContain("sourceUrl = '/maps/world-map-units.geojson'");
+    expect(worldMapSource).toContain("admin1Url = (code: string) => `/maps/admin-1/${code}.geojson`");
+    expect(worldMapSource).toContain("id: `admin-1-border-${normalized}`");
+    expect(worldMapSource).toContain("id: `admin-1-fill-${normalized}`");
+    expect(worldMapSource).toContain("id: `admin-1-label-${normalized}`");
+    expect(worldMapSource).toContain("promoteId: 'region_code'");
+    expect(worldMapSource).toContain("import('maplibre-gl')");
+    expect(worldMapSource).not.toContain("import maplibregl from 'maplibre-gl'");
+    expect(worldMapSource).toContain('onBack');
+    expect(worldMapSource).toContain("map.getZoom() < 2.8");
+    expect(worldMapSource).toContain("id: 'country-labels'");
+    expect(worldMapSource).not.toContain('<svg');
+    expect(adminSource).toContain('continentFilter');
+    expect(adminSource).toContain('sortResidentialDesc');
+    expect(adminSource).toContain('item.countryCode.toUpperCase()');
+    expect(adminSource).not.toContain('map-country-flag');
+    expect(adminSource).toContain('const visible = root ? filtered');
+    expect(adminSource).not.toContain('dashboard-ranking');
+    expect(adminSource).not.toContain('const exportRows');
+    expect(adminSource).not.toContain('dashboardSearch');
+    expect(adminSource).toContain('country-data-table');
+    expect(adminSource).toContain('admin-sidebar-status');
+    expect(adminSource).toContain('node.level === 0 ? [node] : [...trail, node]');
+    expect(adminSource).toContain('loadControllers.current[selected]?.abort()');
+    expect(adminSource).toContain("!authenticated || view !== 'addressData' || !addressDataRunning");
+    expect(adminStyles).toContain('.nav-icon');
+    expect(adminStyles).toContain('.dashboard-loading');
+    expect(adminStyles).toContain('.dashboard-map-row');
+    expect(adminStyles).toContain('.country-coverage-table');
+    expect(adminStyles).toContain('.map-zoom-controls');
+    expect(adminStyles).toContain('.coverage-map-popup');
+    expect(adminStyles).toContain('.map-dialog');
+    expect(adminSource).not.toContain("policies: '同步策略'");
+    expect(adminSource).not.toContain("runs: '任务中心'");
+    expect(adminSource).not.toContain("ordinary: '普通地址'");
+    expect(adminSource).toContain('/china/areas?');
   });
   it('resolves the AMap proxy to an absolute same-origin service host', () => {
     expect(resolveAmapServiceHost('/_AMapService', 'https://address.example')).toBe('https://address.example/_AMapService');
@@ -50,13 +109,31 @@ describe('strict residential generator page structure', () => {
     expect(selectAvailableCountry('CN', new Set(['JP']))).toBe('JP');
   });
 
-  it('uses strict residential mode with three address languages', () => {
+  it('uses the lightweight availability endpoint without rendering a public statistics strip', () => {
+    expect(appSource).toContain('/v1/availability');
+    expect(appSource).not.toContain('/v1/countries');
+    expect(appSource).not.toContain('availability-monitor');
+    expect(appSource.indexOf('resetFor(requestedCountry')).toBeLessThan(appSource.indexOf('loadResidentialCountries()'));
+  });
+
+  it('uses a concise residential heading and a safe address-language menu', () => {
     expect(messages['zh-CN'].residentialMode).toBe('真实住宅地址');
+    expect(generatorTitle('英国', 'zh-CN', messages['zh-CN'].residentialMode)).toBe('英国真实住宅地址');
+    expect(generatorTitle('United Kingdom', 'en', messages.en.residentialMode)).toBe('United Kingdom Residential address');
     expect(appSource).not.toContain('mode-tabs');
     expect(appSource).toContain('useState)("residential")');
     expect(appSource).not.toContain('residential-toggle');
-    expect(appSource).toContain('language-tabs');
+    expect(appSource).toContain('AddressLanguageControl');
+    expect(appSource).not.toContain('selectedCountryName} · {t.title');
     expect(appSource).toContain('googleMaps.embedUrl');
+  });
+
+  it('keeps profile labels in the interface locale while localizing profile values', () => {
+    expect(appSource).toMatch(/label:\s*t\.fullName/u);
+    expect(appSource).toMatch(/value:\s*displayedFullName/u);
+    expect(appSource).toMatch(/value:\s*profileValueText\[result\.profile\.gender\]/u);
+    expect(appSource).toMatch(/copyLabel:\s*t\.copy/u);
+    expect(appSource).not.toMatch(/label:\s*profileText\.fullName/u);
   });
 
   it('links the top navigation GitHub icon to the public repository', () => {
@@ -65,6 +142,17 @@ describe('strict residential generator page structure', () => {
     expect(appSource).toMatch(/"aria-label"\s*:\s*"GitHub"/);
     expect(appSource).toContain('noopener noreferrer');
     expect(appSource).toContain('_blank');
+  });
+
+  it('links the generator to the localized public data monitor', () => {
+    expect(appSource).toContain('monitor-link');
+    expect(appSource).toContain('/monitor/');
+    expect(monitorSource).toContain('/web-api/v1/public-monitor');
+    expect(monitorSource).toContain('WorldCoverageMap');
+    expect(monitorSource.match(/<WorldCoverageMap/gu)).toHaveLength(1);
+    expect(monitorSource).toContain('createPortal');
+    expect(monitorSource).toContain('MapSlot');
+    expect(monitorSource).toContain('onBack={() => backTo(-1)}');
   });
 
   it('renders structured address, profile, simple card and map groups', () => {
@@ -99,12 +187,37 @@ describe('strict residential generator page structure', () => {
     expect(appSource).toContain('params.set("cityId"');
     expect(appSource).toContain('params.set("postcodeId"');
     expect(appSource).toContain('option.regionValue');
+    expect(appSource).toContain('/v1/config/country-shortcuts');
+    expect(appSource).toContain('selectedShortcuts.specialAreas');
+    expect(appSource.indexOf('selectedShortcuts.specialAreas')).toBeLessThan(appSource.indexOf('selectedShortcuts.adminShortcuts'));
+    expect(appSource.indexOf('selectedShortcuts.adminShortcuts')).toBeLessThan(appSource.indexOf('selectedShortcuts.popularCities'));
+    expect(appSource).not.toContain('selectedCountry.popularCities.filter');
+    expect(appSource).not.toContain('items.slice(0, 10)');
   });
 
-  it('loads complete city parent sets and filters cities without server-side search', () => {
-    expect(appSource).toContain('field === "postcode" ? "100" : "20000"');
-    expect(appSource).toContain('field !== "city" && query.trim()');
-    expect(appSource).toContain('clientFilter: true');
+  it('uses the custom admin locale menu and a compact administrator identity', () => {
+    expect(adminSource).toContain('function LocaleMenu');
+    expect(adminSource).toContain('role="listbox"');
+    expect(adminSource).not.toContain('const LocaleSelect');
+    expect(adminSource).not.toContain('<small>{t.administratorRole}</small>');
+    expect(adminSource).toContain('<strong>{t.administrator}</strong>');
+    expect(adminSource).toContain("shortcuts: '/settings/country-shortcuts'");
+  });
+
+  it('edits localized country shortcuts through counted catalog dropdowns', () => {
+    expect(adminSource).toContain("value.countryCode === 'US'");
+    expect(adminSource).toContain('/settings/country-shortcuts/${countryCode}/options?${params}');
+    expect(adminSource).toContain('option.availableCount.toLocaleString(locale)');
+    expect(adminSource).toContain("label: { en: option.en || option.value, 'zh-CN': option.zhCN");
+    expect(adminSource).toContain("await mutate(`/settings/country-shortcuts/${value.countryCode}`, 'PUT', draft");
+    expect(adminSource).toContain('shortcutLabel(item, locale)');
+    expect(adminSource).not.toContain('item.label.en}</strong><small>{item.label');
+  });
+
+  it('paginates and searches large city catalogs on the server', () => {
+    expect(appSource).toContain('field === "postcode" ? "100" : "200"');
+    expect(appSource).toContain('if (query.trim())');
+    expect(appSource).toContain('onLoadMore: () => loadOptions("city"');
     expect(LOCATION_OPTION_RENDER_LIMIT).toBe(200);
   });
 
@@ -169,11 +282,22 @@ describe('strict residential generator page structure', () => {
     expect(appSource).not.toContain('setManualIp("");void generate({ipRegion:true,ip:"",strategy:"instant"})');
   });
 
-  it('prefetches only results confirmed by address-pool-v2', () => {
+  it('prefetches database-backed results for every country and retains scoped queues', () => {
     expect(appSource).toContain('prefetchedResults');
     expect(appSource).toContain('paramsFor(spec, requestId, "instant")');
-    expect(appSource).toContain('!payload.data.sourcesTried?.includes("address-pool-v2")');
-    expect(appSource).toContain('if (!spec.live && payload.data.sourcesTried?.includes("address-pool-v2"))');
+    expect(appSource).toContain('prefetchCountry(country.code)');
+    expect(appSource).toContain('onMouseEnter');
+    expect(appSource).toContain('onFocus');
+    expect(appSource).toContain('prefetchedResults.current.set(key');
+    expect(appSource).not.toContain('prefetchedResults.current.clear()');
+    expect(appSource).not.toContain('sourcesTried?.includes("address-pool-v2")');
+  });
+
+  it('keeps residential mode implicit and exposes no live-provider control', () => {
+    expect(appSource).toContain('url.searchParams.delete("mode")');
+    expect(appSource).not.toContain('url.searchParams.set("mode", nextMode)');
+    expect(appSource).not.toContain('live-api-toggle');
+    expect(appSource).not.toContain('live: String(spec.live)');
   });
 
   it('renders coherent profile, network and sandbox-card fields', () => {
@@ -205,6 +329,14 @@ describe('strict residential generator page structure', () => {
     expect(appSource).toContain('filterFields.includes("region")');
     expect(appSource).toContain('filterFields.includes("city")');
     expect(appSource).toContain('filterFields.includes("postcode")');
+    const unitedStates = countries.find(({ code }) => code === 'US')!;
+    expect(unitedStates.addressSchema.filters).toEqual(['region', 'city']);
+    expect(unitedStates.addressSchema.resultFields.map(({ field }) => field)).toContain('postcode');
+    const china = countries.find(({ code }) => code === 'CN')!;
+    expect(china.addressSchema.filters).toEqual(['region', 'city', 'district']);
+    expect(china.searchLabels.district?.['zh-CN']).toBe('区县');
+    const hongKong = countries.find(({ code }) => code === 'HK')!;
+    expect(hongKong.addressSchema.filters).toEqual(['region', 'city']);
   });
 
   it('provides visible and accessible copy feedback with a DOM fallback', () => {
@@ -217,66 +349,5 @@ describe('strict residential generator page structure', () => {
     expect(messages.en.copyFailed).toBeTruthy();
     expect(messages['zh-CN'].copySuccess).toBeTruthy();
     expect(messages['zh-CN'].copyFailed).toBeTruthy();
-  });
-});
-
-describe('Address Lite mobile and PWA presentation', () => {
-  it('formats visible and copied addresses from structured fields', () => {
-    const formatted = formatLiteAddressLines({
-      houseNumber: '103',
-      street: 'EDGEWOOD STREET',
-      city: 'BRIDGEVILLE',
-      locality: '',
-      postalLocality: '',
-      region: 'Delaware',
-      regionCode: 'DE',
-      postcode: '19933'
-    }, 'United States');
-
-    expect(formatted.lines).toEqual([
-      '103 EDGEWOOD STREET',
-      'BRIDGEVILLE, DE 19933',
-      'United States'
-    ]);
-    expect(formatted.copyText).toBe('103 EDGEWOOD STREET\nBRIDGEVILLE, DE 19933\nUnited States');
-    expect(formatLiteAddressLines({
-      houseNumber: '', street: '', city: '', locality: '', postalLocality: '', region: '', regionCode: '', postcode: ''
-    }, 'Canada').lines).toEqual(['Canada']);
-  });
-
-  it('keeps mobile statistics data-driven and avoids formatted-address display strings', () => {
-    expect(liteAppSource).toContain('index.totalAddresses.toLocaleString(locale)');
-    expect(liteAppSource).toContain('index.countries.length.toLocaleString(locale)');
-    expect(liteAppSource).toContain("resultAddress?.copyText || ''");
-    expect(liteAppSource).toContain('resultAddress?.lines.slice(1)');
-    expect(liteAppSource).not.toMatch(/copyText\(result\.formattedAddress/);
-  });
-
-  it('uses a compact, safe-area-aware mobile layout with coherent theme tokens', () => {
-    expect(liteCssSource).toContain('@media (max-width: 700px)');
-    expect(liteCssSource).toContain('env(safe-area-inset-left)');
-    expect(liteCssSource).toContain('.lite-mobile-stats');
-    expect(liteCssSource).toContain('overflow-wrap: anywhere');
-    expect(liteCssSource).not.toContain('backdrop-filter');
-    expect(globalCssSource).toContain('@media (prefers-color-scheme: dark)');
-    expect(globalCssSource).toContain('--surface: #151b26');
-    expect(globalCssSource).toContain('overflow-x: hidden');
-  });
-
-  it('publishes installable PWA and Apple home-screen metadata', () => {
-    expect(layoutSource).toContain('name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)"');
-    expect(layoutSource).toContain('name="theme-color" content="#0c111b" media="(prefers-color-scheme: dark)"');
-    expect(layoutSource).toContain('name="apple-mobile-web-app-title" content="Address Lite"');
-    expect(layoutSource).toContain('rel="apple-touch-icon"');
-    expect(layoutSource).toContain('rel="manifest"');
-    expect(manifest.name).toBe('Address Lite');
-    expect(manifest.short_name).toBe('Address Lite');
-    expect(manifest.start_url).toBe('/');
-    expect(manifest.display).toBe('standalone');
-    expect(manifest.icons).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sizes: '192x192', purpose: 'any' }),
-      expect.objectContaining({ sizes: '512x512', purpose: 'any' }),
-      expect.objectContaining({ sizes: '512x512', purpose: 'maskable' })
-    ]));
   });
 });

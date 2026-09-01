@@ -1,171 +1,117 @@
-# Address 部署文檔
+# Address 部署文件
 
-[English](DEPLOYMENT.md) · [簡體中文](DEPLOYMENT.zh-CN.md) · [繁體中文](DEPLOYMENT.zh-TW.md)
+[English](DEPLOYMENT.md) · [简体中文](DEPLOYMENT.zh-CN.md) · [繁體中文](DEPLOYMENT.zh-TW.md)
 
-本文說明私密配置、首次數據同步、VPS 部署、反向代理、升級與備份。生產腳本面向 Linux AMD64 和 ARM64，全部運行狀態位於 `/root/address`。
+專案只維護一種生產部署方式：Docker Compose。根目錄的 `docker-compose.yml` 統一管理應用、PostgreSQL、遷移與自動同步。
 
-## 運行要求
-
-- Linux AMD64 或 ARM64 VPS
-- 最低 4 GB 內存；完整首次導入建議 8 GB
-- 應用卷至少預留 60 GiB
-- `git`、`curl`、`ca-certificates`、`xz-utils`、Python 3 和 `venv`
-- 已解析到 VPS 的域名，以及支持 HTTPS 的反向代理
-
-安裝腳本會下載項目固定的 Node.js 版本，無需在系統中預裝 Node.js。
-
-## 容量估算
-
-以下數據於 2026-07-23、提交 `084805e`、27 國同步完成後實測：
-
-| 內容 | 實測值 |
-|---|---:|
-| `address.sqlite` | 6.90 GiB |
-| 活躍 SQLite WAL | 0.68 GiB |
-| 完整 `data/` 目錄 | 7.89 GiB |
-| 當前有效地址 | 722,950 條 |
-| 舊版中國住宅子集 | 174,327 條（歷史實測，不是新版 POI 小區池） |
-
-新版中國 POI 小區池會在高德、百度或騰訊同步後增長，最終數量和容量取決於啟用城市、頁數及平台返回結果。首次導入會臨時保留源文件和中間結果，舊版歷史實測峰值約 11.2 GiB。上游版本、WAL 活躍度和可選保留設置會改變實際大小。建議 60 GiB 是為了給同步、備份和恢復留出餘量：影子擴容在 40 GiB 停止，寫入會在達到 45 GiB 前中止，項目絕對上限為 50 GiB。
-
-## API Key 與密鑰
-
-日常生成只查詢 active SQLite 中通過證據門禁的真實住宅記錄。中國小區同步需要一個或多個高德、百度或騰訊服務端 Key，部署後在 `/admin/` 中配置；發佈仍要求多平台一致。
-
-| 變量 | 是否必需 | 功能 | 獲取方式 |
-|---|---|---|---|
-| `CONFIG_MASTER_KEY` | 必需 | 加密 `control.sqlite` 中的地圖憑據 | 使用 `openssl rand -base64 32` 生成，只保留在伺服器。 |
-| `ADMIN_BOOTSTRAP_PASSWORD` | 首次必需 | 初始化管理員身份 | 設置強密碼；初始化完成後不再讀取其明文。 |
-| `AMAP_API_KEY` / 其他高德 WebService Key | 中國同步，僅伺服端 | 小區 POI 導入 | 創建“Web 服務”Key 後，透過被忽略的執行配置導入首個值，或在 `/admin/` 添加；不要復用瀏覽器 JS Key。 |
-| `AMAP_JS_API_KEY` | 可選首次導入 | 瀏覽器高德地圖渲染 | 創建專用“Web 端（JS API）”Key，在控制台限制生產域名和本地測試來源，再通過被忽略的運行配置或 `/admin/` 導入。 |
-| `AMAP_JS_SECURITY_CODE` | 與 JS Key 配套 | 鑑權高德 JS 服務請求 | 隨 JS API Key 獲取，只保留在伺服器；應用加密保存並通過 `/_AMapService` 使用。 |
-| 百度 Key | 中國同步 | 小區 POI 導入和交叉驗證 | 創建服務端 Place API Key 後在 `/admin/` 添加。 |
-| 騰訊 Key | 中國同步 | 小區 POI 導入和交叉驗證 | 創建 WebService API Key 後在 `/admin/` 添加。 |
-| `GEOAPIFY_API_KEY` | 可選 | 中國以外實時地理編碼及部分反向本地化 | 按 [Geoapify 官方指南](https://www.geoapify.com/get-started-with-maps-api/)創建項目和 Key。 |
-| `YOUDAO_APP_KEY`、`YOUDAO_APP_SECRET` | 成對可選 | 在線翻譯備用通道 | 在[有道智雲](https://ai.youdao.com/)創建自然語言翻譯應用。 |
-| `ONEMAP_ACCESS_TOKEN` | 可選 | 新加坡地址存在性、郵編和座標核驗 | 按 [OneMap 認證文檔](https://www.onemap.gov.sg/apidocs/authentication)獲取；Token 有效期為 3 天並需要續期，OneMap 單獨結果不構成住宅用途證據。 |
-| `SYNC_ADMIN_TOKEN` | VPS 必需 | 保護同步控制寫操作 | 在本機隨機生成，不屬於第三方憑據。 |
-
-保留 `LIVE_API_MODES=ip-region` 可把實時服務限制在 IP 座標或城市匹配。公開生成只查詢 active SQLite 住宅池，實時候選也必須通過地址存在性和住宅證據門禁；IP 模式無覆蓋時返回 `IP_REGION_NO_RESULT`，不替換成州省或全國地址。除非明確需要在線翻譯，否則保留 `GOOGLE_TRANSLATION_ENABLED=false`。
-
-## 密鑰保護
-
-倉庫只提供佔位模板：
-
-| 模板 | 用途 |
-|---|---|
-| `.env.example` | 本地 WebUI 與 API 開發 |
-| `server/sync/.env.example` | 同步參數參考 |
-| `ops/address.env.example` | VPS 組合運行配置 |
-| `ops/deploy.env.example` | 私密 SSH 部署配置 |
-
-`.env`、`.deploy.env`、數據庫、日誌、運行狀態、緩存、私鑰和 `plan.md` 均被 Git 忽略。真實值只寫入被忽略的私密文件，不要放入瀏覽器變量、源碼、截圖、Issue、命令輸出或 CI 日誌。
-
-高德 JS API Key 按平台機制屬於瀏覽器加載參數，會出現在瀏覽器請求中，因此必須使用專用 Key 並設置域名限制，不能把它當作伺服器端通用憑據。配套安全密鑰、全部 WebService Key 和 `CONFIG_MASTER_KEY` 始終留在伺服器。生產環境按[高德官方安全密鑰方案](https://lbs.amap.com/api/javascript-api-v2/guide/abc/jscode)設置 `serviceHost=/_AMapService`，由 Node 服務讀取密文安全密鑰並只轉發到固定高德上游。
-
-VPS 使用權限為 `600` 的運行配置：
+## Docker Compose 快速部署
 
 ```bash
-mkdir -p /root/address/runtime
-cp /root/address/app/ops/address.env.example /root/address/runtime/address.env
-chmod 600 /root/address/runtime/address.env
+mkdir address && cd address
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/daimon3332/address/main/docker-compose.yml
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:8787/api/v1/ready
 ```
 
-生成主密鑰和同步 Token，過程中不輸出具體值：
+Compose 的 bootstrap 服務會自動建立相對目錄與持久化內部密鑰。管理員初始密碼為 `admin`，前端密碼預設關閉。首次啟動前可直接在 `docker-compose.yml` 修改 `ADMIN_INITIAL_PASSWORD` 或 `FRONTEND_INITIAL_PASSWORD`；使用預設管理員密碼登入後，必須先修改密碼。
 
 ```bash
-token="$(openssl rand -hex 32)"
-master_key="$(openssl rand -base64 32)"
-sed -i "s/GENERATE_A_RANDOM_VALUE/$token/" /root/address/runtime/address.env
-sed -i "s/GENERATE_32_BYTE_BASE64_VALUE/$master_key/" /root/address/runtime/address.env
-unset token master_key
-chmod 600 /root/address/runtime/address.env
+cat data/secrets/admin_bootstrap_password
 ```
 
-至少需要替換 `YOUR_DOMAIN.example`、生成 `CONFIG_MASTER_KEY` 和 `SYNC_ADMIN_TOKEN`、設置一次性管理員密碼並檢查 `TRUST_PROXY`。地圖 Key 統一在 `/admin/` 添加，不寫入 Git 跟蹤文件。
+登入 `/admin/` 後可修改前端密碼、管理員密碼、API 呼叫權杖、地圖平台 Key、額度與其他業務設定。
 
-## 運行配置
+## 執行要求
 
-| 變量 | 生產默認值 | 作用 |
-|---|---|---|
-| `PUBLIC_API_BASE_URL` | `/web-api` | 瀏覽器使用的會話鑑權 API 前綴 |
-| `API_HOST` | `127.0.0.1` | Hono 監聽地址 |
-| `API_PORT` | `8787` | Hono 監聽端口 |
-| `STATIC_ROOT` | `/root/address/app/dist` | Astro 構建結果 |
-| `ADDRESS_DATABASE_PATH` | `/root/address/data/address.sqlite` | SQLite 數據庫 |
-| `CONTROL_DATABASE_PATH` | `/root/address/data/control.sqlite` | 認證、加密憑據、配額、任務和審計數據庫 |
-| `CONFIG_MASTER_KEY` | 僅伺服器保存的隨機值 | 地圖憑據和高德 JS 安全配置的 AES-256-GCM 主密鑰 |
-| `AMAP_JS_API_KEY` | 空 | 專用瀏覽器 JS API Key 的可選首次導入值 |
-| `AMAP_JS_SECURITY_CODE` | 空 | 僅伺服器使用的 JS 安全密鑰可選首次導入值 |
-| `ADMIN_BOOTSTRAP_PASSWORD` | 一次性強密碼 | 創建初始管理員身份 |
-| `COOKIE_SECURE` | `true` | 僅通過 HTTPS 發送認證 Cookie |
-| `ALLOWED_ORIGIN` | 公開 HTTPS 來源 | CORS 白名單 |
-| `TRUST_PROXY` | 代理後為 `true` | 是否信任轉發的客戶端 IP 請求頭 |
-| `SYNC_HOST` | `127.0.0.1` | 同步管理監聽地址 |
-| `SYNC_PORT` | `8791` | 同步管理端口 |
-| `SYNC_CONTROL_PUBLIC` | `false` | 禁止主 API 公開同步管理入口 |
-| `SYNC_UTC_HOUR` | `3` | 每日調度檢查時間，UTC 小時 |
+- Linux AMD64 或 ARM64
+- Docker Engine 與 Docker Compose v2
+- 4 GB 記憶體；執行大型國家首次同步建議 8 GB 或更多
+- 足以容納 PostgreSQL、地址資料、同步暫存與備份的磁碟空間
+- HTTPS 反向代理
 
-只有受控反向代理會覆蓋轉發 IP 請求頭時才啟用 `TRUST_PROXY`。端口 `8791` 始終保持私有。
+開發電腦不需要安裝 Docker。正式映像由 GitHub Actions 建置並發佈到 Docker Hub：`daimon23/address`。
 
-地圖顯示開關保存在控制數據庫並通過 `/admin/` 管理。Google 與高德分別具有中國和國外開關，默認均為 Google 開啟、高德關閉。啟用高德國外地圖前需要申請[世界地圖](https://lbs.amap.com/api/javascript-api-v2/guide/map/world-map)權限；未開通時保持國外高德關閉。
+## 目錄結構
 
-AreaCity 數據需先下載並解壓 `ok_data_level4.csv` 到 `/root/address/data/imports/`，再在 `/admin/` 的「中國同步 → 導入 AreaCity」中填寫 `imports/ok_data_level4.csv` 和發佈版本。也可填寫 HTTPS JSON/CSV 地址；本地路徑僅允許位於數據目錄內。
+```text
+address/
+├── docker-compose.yml    # 唯一必要的部署文件
+├── config/secrets/       # 可選的舊版密鑰匯入位置
+├── data/secrets/         # 自動產生的持久化密鑰
+├── data/address/         # 地址池與同步暫存
+├── data/postgres/        # PostgreSQL 資料
+├── runtime/              # 同步執行狀態
+├── backups/              # pg_dump 備份
+└── logs/
+```
 
-## 首次部署
+所有掛載均為 Compose 檔案所在目錄的相對路徑，不依賴 `/root/address` 或其他固定安裝位置。不要讓兩個 PostgreSQL 容器同時掛載同一個 `data/postgres`。
 
-### 1. 準備 VPS
+## 選用部署設定
+
+預設設定可直接啟動。可直接編輯 Compose 中的 `environment`；只有需要統一覆寫映像、連接埠或反向代理設定時才建立 `.env`：
 
 ```bash
-apt-get update
-apt-get install -y git curl ca-certificates xz-utils python3 python3-venv nginx
-mkdir -p /root/address
-git clone https://github.com/daimon3332/address.git /root/address/app
-cd /root/address/app
-./ops/install-runtime.sh
+cp ops/compose.env.example .env
 ```
 
-`install-runtime.sh` 會把固定 Node.js、Python 虛擬環境、Python 依賴和 npm 依賴安裝到 `/root/address` 內。
+```dotenv
+ADDRESS_IMAGE=daimon23/address:latest
+API_BIND_ADDRESS=127.0.0.1
+API_PORT=8787
+ALLOWED_ORIGINS=*
+TRUST_PROXY=false
+COOKIE_SECURE=false
+```
 
-### 2. 創建私密配置
+HTTPS 反向代理生產環境應將 `ALLOWED_ORIGINS` 設定為一個或多個以逗號分隔的 HTTPS 來源，並將 `TRUST_PROXY`、`COOKIE_SECURE` 改為 `true`。第三方 API Key 與一般業務參數統一在管理員後台管理。
+
+## 服務與網路
+
+- `postgres`：PostgreSQL 16，只連接內部網路
+- `bootstrap`：建立或校驗持久化內部密鑰，完成後退出
+- `migrate`：每次啟動前執行一次資料庫遷移，成功後退出
+- `api`：WebUI 與 API，預設只監聽 `127.0.0.1:8787`
+- `sync`：自動同步服務，只連接 Compose 私有網路
+- `credential-broker`：憑據加密輪換與額度協調服務，只連接 Compose 私有網路
+
+自動同步預設啟用，佇列發現、逾時、有限重試、冷卻、來源耗盡與暫存檔清理由服務自動處理。
+
+## 常用命令
 
 ```bash
-mkdir -p /root/address/runtime
-cp ops/address.env.example /root/address/runtime/address.env
-chmod 600 /root/address/runtime/address.env
-editor /root/address/runtime/address.env
+docker compose ps
+docker compose logs -f api sync
+docker compose restart api sync
+docker compose down
+docker compose up -d
 ```
 
-填寫 `ALLOWED_ORIGIN=https://YOUR_DOMAIN.example`，生成 `SYNC_ADMIN_TOKEN`，然後只添加需要的可選服務憑據。
-
-### 3. 構建 WebUI
+升級映像：
 
 ```bash
-export PATH=/root/address/runtime/node/bin:$PATH
-cd /root/address/app
-npm run build
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
+docker compose pull
+docker compose up -d
+docker compose ps
 ```
 
-### 4. 初始化全部國家
+## 備份與還原
 
 ```bash
-/root/address/app/ops/initial-sync.sh
-tail -f /root/address/logs/initial-sync.log
+mkdir -p backups
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' > "backups/address-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+docker compose stop api sync credential-broker
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' < ./backups/address-YYYYMMDDTHHMMSSZ.dump
+docker compose up -d
 ```
 
-任務在後臺執行，每個國家獨立驗證和發佈，重啟後可複用已完成緩存。耗時取決於 VPS CPU、磁盤、網絡和上游狀態。全部成功後自動啟動 API 與調度服務。
+備份包含地址表、控制表、加密後的憑據、同步狀態與稽核資料。`data/secrets/config_master_key` 必須與資料庫備份一起安全保存，否則無法解密後台保存的憑據。跨 PostgreSQL 主版本必須使用 `pg_dump` 與 `pg_restore`，不能直接重用資料目錄。
 
-### 5. 驗證服務
-
-```bash
-/root/address/app/ops/status.sh
-curl -fsS http://127.0.0.1:8787/api/v1/health
-curl -fsS http://127.0.0.1:8787/api/v1/data-health
-```
-
-## Nginx 與 HTTPS
-
-沿用現有證書流程，把公開域名代理到 API 進程：
+## Nginx 範例
 
 ```nginx
 server {
@@ -183,54 +129,10 @@ server {
 }
 ```
 
-防火牆只公開 HTTP/HTTPS，API 和同步管理均監聽迴環地址。TLS 生效後，`ALLOWED_ORIGIN` 使用完全一致的 HTTPS 來源。
+只公開 HTTP/HTTPS，禁止公開 PostgreSQL 與同步服務連接埠。
 
-## 同步與運維
+## Docker Hub 發佈
 
-- 首次任務處理 27 國，支持斷點續跑。
-- 穩態調度在每天 03:00 UTC 檢查，每天最多更新一個到期國家。
-- 國家同步成功後，下一週期為 30 天。
-- 新快照失敗時繼續保留舊 active 數據。
-- 發佈成功後默認刪除原始源文件，除非明確開啟保留。
+`.github/workflows/docker-publish.yml` 在 `main` 更新、版本標籤或手動觸發時建置 AMD64/ARM64 映像。GitHub 儲存庫只需設定 `DOCKERHUB_TOKEN`，內容為具有讀寫權限的 Docker Hub Access Token；公開使用者名稱 `daimon23` 已固定在工作流程中。
 
-```bash
-# 服務啟停與狀態
-/root/address/app/ops/start.sh
-/root/address/app/ops/stop.sh
-/root/address/app/ops/status.sh
-
-# 創建 SQLite 一致性備份
-/root/address/app/ops/backup.sh
-
-# 恢復 /root/address/backups 下的備份
-/root/address/app/ops/restore.sh /root/address/backups/ADDRESS_BACKUP.sqlite
-```
-
-項目使用進程 supervisor，不安裝 systemd 服務或 cron。需要 VPS 重啟後自動啟動時，把 `ops/start.sh` 接入主機已有的啟動機制。
-
-## 部署後續提交
-
-在開發機執行：
-
-```bash
-cp ops/deploy.env.example .deploy.env
-chmod 600 .deploy.env
-editor .deploy.env
-bash ops/deploy.sh --dist
-```
-
-部署腳本會歸檔當前 `HEAD`，通過 SSH 上傳，保留 VPS 數據庫、私密運行配置和服務器黑名單，重啟 supervisor 並執行健康檢查。純文檔變更可使用 `--no-restart`。
-
-## 生產檢查清單
-
-- DNS 與 HTTPS 已生效。
-- `ALLOWED_ORIGIN` 是完全一致的公開 HTTPS 來源。
-- `TRUST_PROXY=true` 只用於受控代理後方。
-- `SYNC_ADMIN_TOKEN` 隨機且私密，Git 歷史中沒有具體值。
-- `SYNC_CONTROL_PUBLIC=false`，端口 `8791` 未公開。
-- 可選服務 Key 已在服務商側設置限制和用量告警。
-- 高德 JS Key 為專用且已限制域名；安全密鑰未出現在瀏覽器響應、日誌或 Git 中。
-- 僅在確認世界地圖權限後啟用國外高德，並已測試四個地圖開關。
-- 數據庫初始化後，`npm run check:production` 通過。
-- 已生成當前備份並驗證恢復流程。
-- 應用卷至少 60 GiB，並啟用剩餘空間監控。
+Token 只保存在 GitHub Actions Secrets，禁止寫入儲存庫、Compose、截圖或日誌。

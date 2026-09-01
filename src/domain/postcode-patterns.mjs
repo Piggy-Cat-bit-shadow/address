@@ -19,7 +19,7 @@ export const postcodePatterns = {
   MY: /^\d{5}$/,
   TH: /^\d{5}$/,
   PH: /^\d{4}$/,
-  VN: /^\d{5,6}$/,
+  VN: /^\d{5}$/,
   TR: /^\d{5}$/,
   SA: /^\d{5}(?:\s*-\s*\d{4})?$/,
   IN: /^[1-9]\d{5}$/,

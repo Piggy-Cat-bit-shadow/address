@@ -39,6 +39,30 @@ describe('non-residential rule coverage', () => {
   });
 
   it.each([
+    '市立有馬地域福祉センター',
+    'ラーメン二郎',
+    '祇園囃子 千林店'
+  ])('rejects a Japanese commercial or welfare name that conflicts with a residential building tag: %s', (buildingName) => {
+    expect(findNonResidentialMatch({
+      countryCode: 'JP',
+      buildingName,
+      propertyType: 'residential'
+    }).excluded).toBe(true);
+  });
+
+  it.each([
+    'Nhà Khách Trung Tâm',
+    'Công ty TNHH Minh Anh',
+    'Sân Cầu Lông Thành Phố'
+  ])('rejects a Vietnamese hospitality, company or sports venue: %s', (buildingName) => {
+    expect(findNonResidentialMatch({
+      countryCode: 'VN',
+      buildingName,
+      propertyType: 'residential'
+    }).excluded).toBe(true);
+  });
+
+  it.each([
     ['government', 'US', 'City Hall'],
     ['military_law_justice', 'US', 'Central Police Station'],
     ['education_research', 'US', 'State University'],

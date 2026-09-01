@@ -8,17 +8,15 @@
 Browser
   -> Astro static pages + React WebUI
   -> Hono Node.js API
-       -> SQLite WAL address pool
-       -> SQLite RTree coordinate index
+       -> PostgreSQL transactional address pool
+       -> PostgreSQL coordinate coordinate index
        -> local formatting and localization
-       -> optional live providers
+       -> synchronized residential pool only
   -> synchronization supervisor
        -> DuckDB reads Overture GeoParquet
        -> pyosmium reads Geofabrik/OSM PBF
        -> validation and atomic country snapshot publication
 ```
-
-Public generation reads only verified residential records from the active SQLite pool. Live providers are opt-in through `LIVE_API_MODES` or `live=true`, and their candidates must pass the same address-existence and residential-evidence gates.
 
 Map rendering is isolated from address verification. Google uses a coordinate preview; AMap uses a dedicated JS API key plus the same-origin `/_AMapService` proxy. The AMap JS security code remains encrypted in the control database and never enters the browser bundle or map-configuration response.
 
@@ -30,7 +28,7 @@ Map rendering is isolated from address verification. Google uses a coordinate pr
 | `src/domain/` | Country metadata, generation, formatting, localization, profile, and export rules |
 | `src/pages/` | Astro routes for localized WebUI and API documentation |
 | `server/api/` | Hono application, repositories, and external-provider adapters |
-| `server/database/` | SQLite schema and migration entry point |
+| `server/database/` | PostgreSQL schema and migration entry point |
 | `server/sync/` | Source adapters, ETL, scheduler, snapshot publication, and sync-control API |
 | `scripts/` | Catalog generation, validation, live probes, and release audits |
 | `ops/` | Linux VPS installation, process, backup, restore, and deployment scripts |
@@ -38,7 +36,7 @@ Map rendering is isolated from address verification. Google uses a coordinate pr
 
 ## Local setup
 
-Node.js 24 or newer is required. Python 3 and `venv` are required only for source synchronization.
+Node.js 24 or newer is required. Python 3.10 or newer (3.12 tested) and `venv` are required only for source synchronization; install its dependencies with `pip install -r server/sync/requirements.txt` and point `PYTHON_BIN` at that interpreter.
 
 ```bash
 git clone https://github.com/daimon3332/address.git
@@ -49,18 +47,22 @@ npm run db:migrate
 npm run dev
 ```
 
-The Astro development server proxies `/api` to Hono on `127.0.0.1:8787` and `/sync-control` to the local synchronization service on `127.0.0.1:8791`. A freshly migrated database has schema only and does not contain an address pool.
+`npm run dev` builds the WebUI once and serves it through the Hono API on `127.0.0.1:8787`. For live UI editing, run `npm run dev:api` plus `npm run dev:web`: the Astro development server on `127.0.0.1:4321` proxies `/api` to Hono and `/sync-control` to the local synchronization service on `127.0.0.1:8791`.
+
+A freshly migrated database has schema only and does not contain an address pool. Local development and the test suite run against this empty schema plus the small fixtures in `scripts/fixtures/` and `tests/fixtures/`; the production PostgreSQL data never leaves the server (`data/` is gitignored and deployments preserve the server database). To exercise real data locally, seed the catalog (`npm run data:catalog` then `npm run data:catalog:import`) and import one small country, for example `npm run data:address-pool:etl -- --manual --shard SG`.
 
 Useful commands:
 
 | Command | Purpose |
 |---|---|
-| `npm run dev` | Run Astro and Hono in watch mode |
-| `npm run dev:web` | Run only Astro |
+| `npm run dev` | Build the WebUI once, then run the Hono API in watch mode |
+| `npm run dev:web` | Run only Astro (port 4321, proxies `/api`) |
 | `npm run dev:api` | Run only Hono |
-| `npm run db:migrate` | Create or migrate the local SQLite schema |
+| `npm test` | Run the Vitest suite |
+| `npm run db:migrate` | Create or migrate the local PostgreSQL schema |
 | `npm run data:regions` | Refresh bundled region metadata |
-| `npm run data:catalog` | Synchronize the location catalog |
+| `npm run data:catalog` | Download and build the location-catalog seed |
+| `npm run data:catalog:import` | Import the catalog seed into the local database (required before any address import) |
 | `npm run data:address-pool:estimate` | Estimate a synchronization plan |
 | `npm run data:address-pool:sync:dry-run` | Validate ETL planning without publication |
 | `npm run data:address-pool:bootstrap` | Run the resumable all-country initial import |
@@ -70,11 +72,11 @@ Useful commands:
 
 Copy `.env.example` to the ignored `.env` file. Keep secrets server-side. Only variables explicitly prefixed for Astro's public environment are eligible for browser bundling; third-party provider keys and `SYNC_ADMIN_TOKEN` must remain in the API/sync process environment. `AMAP_API_KEY` is a server-side WebService credential. `AMAP_JS_API_KEY` is a separate domain-restricted browser loading key, while `AMAP_JS_SECURITY_CODE` remains server-side and is applied only by `/_AMapService`.
 
-Regular development needs no third-party API key. Optional live integrations are documented in the [deployment guide](DEPLOYMENT.md).
+Regular development needs no third-party API key. Optional synchronization integrations are documented in the [API key guide](API_KEYS.md).
 
 ## Database and synchronization
 
-SQLite runs in WAL mode and stores address records, localization, source evidence, country state, and RTree coordinates. Country publication is transactional: a candidate snapshot is validated before it replaces the active country dataset, and a failed candidate leaves the previous snapshot available.
+PostgreSQL uses transactions and connection pooling and stores address records, localization, source evidence, country state, and indexed coordinates. Country publication is transactional: a candidate snapshot is validated before it replaces the active country dataset, and a failed candidate leaves the previous snapshot available.
 
 Synchronization sources:
 
@@ -82,15 +84,16 @@ Synchronization sources:
 - OpenStreetMap via Geofabrik: pyosmium streams prefiltered PBF nodes and ways.
 - Local region and location catalogs: constrain selectors and validate administrative consistency.
 
-The pipeline filters institutional/non-address features, deduplicates records, checks residential evidence, validates localized components, and enforces storage budgets. Do not edit `data/address.sqlite` manually while the API or synchronization job is active.
+The pipeline filters institutional/non-address features, deduplicates records, checks residential evidence, validates localized components, and enforces storage budgets. Do not edit the production database manually while the API or synchronization job is active.
 
 Manual examples:
 
 ```bash
 node server/sync/address-etl.mjs --initial --all
-node server/sync/address-etl.mjs --daily --all
 node server/sync/address-etl.mjs --manual --shard US
 ```
+
+Production uses the synchronization supervisor rather than a cron-driven full reimport. Scheduler wake-ups resume eligible checkpoints and newly available source capabilities; completed or exhausted source fingerprints are not reimported merely because time has passed.
 
 ## Extending the public API
 

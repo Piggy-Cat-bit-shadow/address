@@ -1,6 +1,7 @@
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
 import { Converter as createTraditionalizer } from 'opencc-js/cn2t';
 import type { AddressComponents, AddressEvidence, CountryConfig, VerifiedAddress } from '../../../src/domain/types';
+import { findHongKongDistrict, findHongKongRegion } from '../../../src/domain/hk-administrative-divisions.mjs';
 import { findNonResidentialMatch } from '../../../src/domain/non-residential.mjs';
 import type { AddressFilters, CatalogTarget } from '../repositories/address-repository';
 import { fetchWithTimeout } from './fetch-timeout';
@@ -81,7 +82,6 @@ const blockName = (block?: AlsBlock): string => {
     : text(block.BlockDescriptor, block.BlockNo);
 };
 
-const englishRegion = (value = ''): string => ({ HK: 'HONG KONG', KLN: 'KOWLOON', NT: 'NEW TERRITORIES' })[value.toUpperCase()] || value;
 const chineseNumber = (value: string): string => value && !/[號号]$/u.test(value) ? `${value}號` : value;
 
 const normalized = (value = ''): string => toSimplified(value)
@@ -174,12 +174,15 @@ const toCandidate = (
   if (residentialOnly && !isResidential) return undefined;
 
   const useTarget = !filters.q;
-  const engDistrict = english.EngDistrict?.DcDistrict || '';
-  const chiDistrict = chinese.ChiDistrict?.DcDistrict || '';
+  const region = findHongKongRegion(english.Region);
+  const englishDistrict = findHongKongDistrict(english.EngDistrict?.DcDistrict);
+  const chineseDistrict = findHongKongDistrict(chinese.ChiDistrict?.DcDistrict);
+  if (!region || !englishDistrict || !chineseDistrict || englishDistrict.id !== chineseDistrict.id
+    || englishDistrict.regionCode !== region.code) return undefined;
   const nativeLocality = chiStreet?.LocationName || (chiStreet as AlsVillage | undefined)?.LocationName
-    || (useTarget ? target?.cityNative && toTraditional(target.cityNative) : undefined) || chiDistrict;
+    || (useTarget ? target?.cityNative && toTraditional(target.cityNative) : undefined) || '';
   const englishLocality = engStreet?.LocationName || (engStreet as AlsVillage | undefined)?.LocationName
-    || (useTarget ? target?.city : undefined) || engDistrict;
+    || (useTarget ? target?.city : undefined) || '';
   const englishHouseNumber = range(engStreet?.BuildingNoFrom, engStreet?.BuildingNoTo);
   const chineseHouseNumber = chineseNumber(range(chiStreet?.BuildingNoFrom, chiStreet?.BuildingNoTo));
   const englishBuilding = text(blockName(english.EngBlock), english.BuildingName);
@@ -189,24 +192,24 @@ const toCandidate = (
     houseNumber: englishHouseNumber,
     street: engStreetName,
     buildingName: englishBuilding || undefined,
-    locality: englishLocality,
-    postalLocality: englishLocality,
+    locality: englishDistrict.name,
+    postalLocality: englishDistrict.name,
     dependentLocality: english.EngEstate?.EstateName,
-    district: engDistrict,
-    admin1: englishRegion(english.Region),
-    admin1Code: english.Region,
+    district: normalized(englishLocality) === normalized(englishDistrict.name) ? undefined : englishLocality || undefined,
+    admin1: region.name,
+    admin1Code: region.code,
     postcode: ''
   };
   const native: AddressComponents = {
     houseNumber: chineseHouseNumber,
     street: chiStreetName,
     buildingName: chineseBuilding || undefined,
-    locality: nativeLocality,
-    postalLocality: nativeLocality,
+    locality: chineseDistrict.native,
+    postalLocality: chineseDistrict.native,
     dependentLocality: chinese.ChiEstate?.EstateName,
-    district: chiDistrict,
-    admin1: chinese.Region || '',
-    admin1Code: english.Region,
+    district: normalized(nativeLocality) === normalized(chineseDistrict.native) ? undefined : nativeLocality || undefined,
+    admin1: region.native,
+    admin1Code: region.code,
     postcode: ''
   };
   const zhCN: AddressComponents = Object.fromEntries(Object.entries(native).map(([key, value]) => [

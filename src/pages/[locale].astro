@@ -2,13 +2,9 @@
 import LiteApp from '../components/LiteApp';
 import Layout from '../layouts/Layout.astro';
 import type { Locale } from '../domain/types';
+import { localeStaticPaths } from '../domain/locales';
 
-export function getStaticPaths() {
-  return [
-    { params: { locale: 'en' } },
-    { params: { locale: 'zh-CN' } }
-  ];
-}
+export const getStaticPaths = localeStaticPaths;
 
 const locale = Astro.params.locale as Locale;
 ---

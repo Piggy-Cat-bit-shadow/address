@@ -1,13 +1,20 @@
-import { resolve } from 'node:path';
-import { openDatabase } from './sqlite.mjs';
+import { openRuntimeDatabases } from './runtime';
+import { ensureLocationCatalog } from './bootstrap';
+import { applyAdministrativeCatalogOverrides } from './administrative-catalog-overrides';
+import { refreshResidentialCoverage } from './residential-coverage.mjs';
+import { reconcilePublishedPool } from './published-pool.mjs';
+import { refreshStaleAddressGenerationIndexes } from './generation-index.mjs';
 
-const configuredPath = process.env.ADDRESS_DATABASE_PATH || process.argv[2] || 'data/address.sqlite';
-const filename = configuredPath === ':memory:' ? configuredPath : resolve(configuredPath);
-const database = openDatabase(filename);
-
-try {
-  const version = await database.prepare('SELECT MAX(version) AS version FROM schema_migrations').first('version');
-  console.log(JSON.stringify({ database: filename, schemaVersion: version }));
-} finally {
-  database.close();
+const databases = await openRuntimeDatabases();
+await refreshStaleAddressGenerationIndexes(databases.address);
+await ensureLocationCatalog(databases.address);
+if (await applyAdministrativeCatalogOverrides(databases.address)) {
+  await refreshResidentialCoverage(databases.address, 'HK');
 }
+const reconciled = await reconcilePublishedPool(databases.address, ['HK']);
+for (const result of reconciled) {
+  if (result.before !== result.after) {
+    await refreshResidentialCoverage(databases.address, result.countryCode);
+  }
+}
+await databases.close();

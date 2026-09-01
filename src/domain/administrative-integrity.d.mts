@@ -2,6 +2,7 @@ export interface AdministrativeHierarchyInput {
   countryCode?: string;
   admin1?: string;
   admin1Code?: string;
+  locality?: string;
 }
 
 export type AdministrativeHierarchyResult =

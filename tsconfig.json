@@ -10,5 +10,5 @@
     "types": ["vitest/globals"]
   },
   "include": [".astro/types.d.ts", "**/*"],
-  "exclude": ["dist", "worker"]
+  "exclude": ["dist", "worker", "tmp"]
 }

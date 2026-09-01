@@ -1,4 +1,5 @@
 const base = process.env.API_BASE_URL || 'http://127.0.0.1:8787/api/v1';
+const authorization = process.env.API_TOKEN ? { Authorization: `Bearer ${process.env.API_TOKEN}` } : {};
 const supportedCountries = [
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU',
   'CN', 'HK', 'TW', 'JP', 'KR', 'SG', 'VN', 'TH', 'PH', 'MY',
@@ -11,13 +12,14 @@ const maxRttP95Ms = Number.parseInt(process.env.MAX_GENERATION_RTT_P95_MS || '50
 const maxServerP95Ms = Number.parseInt(process.env.MAX_GENERATION_SERVER_P95_MS || '100', 10);
 const includeResidential = process.env.INCLUDE_RESIDENTIAL !== 'false';
 const registryStarted = Date.now();
-const registryResponse = await fetch(`${base}/countries`);
+const registryResponse = await fetch(`${base}/countries`, { headers: authorization });
 const registry = await registryResponse.json();
 if (!registryResponse.ok) throw new Error(`/countries: ${registry.error?.code || registryResponse.status}`);
 const registryLatencyMs = Date.now() - registryStarted;
 const registryCountries = Array.isArray(registry.data) ? registry.data : [];
 const registryByCode = new Map(registryCountries.map((country) => [country.code, country]));
 const registryErrors = [];
+const availableCountries = new Set();
 if (registryCountries.length !== supportedCountries.length) registryErrors.push(`registry exposes ${registryCountries.length}/27 countries`);
 for (const country of supportedCountries) {
   const entry = registryByCode.get(country);
@@ -25,12 +27,18 @@ for (const country of supportedCountries) {
     registryErrors.push(`${country} is missing from the registry`);
     continue;
   }
-  if (!(Number(entry.addressCount) > 0)) registryErrors.push(`${country} has no ordinary address data`);
-  if (includeResidential && (!(Number(entry.residentialCount) > 0) || entry.residentialAvailable !== true)) registryErrors.push(`${country} has no residential address data`);
-  if (entry.generationMode !== 'synchronized-pool') registryErrors.push(`${country} is not using the synchronized pool`);
+  const ordinaryAvailable = Number(entry.addressCount) > 0;
+  const residentialAvailable = Number(entry.residentialCount) > 0 && entry.residentialAvailable === true;
+  if (ordinaryAvailable || residentialAvailable) {
+    if (!ordinaryAvailable) registryErrors.push(`${country} has no ordinary address data`);
+    if (includeResidential && !residentialAvailable) registryErrors.push(`${country} has no residential address data`);
+    if (ordinaryAvailable && (!includeResidential || residentialAvailable)) availableCountries.add(country);
+  }
+  const expectedMode = ordinaryAvailable && (!includeResidential || residentialAvailable) ? 'synchronized-pool' : 'sync-required';
+  if (entry.generationMode !== expectedMode) registryErrors.push(`${country} generation mode is ${entry.generationMode}, expected ${expectedMode}`);
 }
-const allCountries = supportedCountries;
-const residentialCountries = supportedCountries;
+const allCountries = supportedCountries.filter((country) => availableCountries.has(country));
+const residentialCountries = allCountries;
 const sampleCount = Math.max(1, Number.parseInt(process.env.SAMPLES_PER_COUNTRY || '3', 10) || 3);
 const samples = Array.from({ length: sampleCount }, (_, index) => index + 1);
 const jobs = [
@@ -51,7 +59,8 @@ const assertBundle = (job, payload, timingHeader) => {
   const result = payload.data?.result;
   if (!result) throw new Error(payload.error?.code || 'missing result');
   const sourcesTried = payload.data?.sourcesTried;
-  if (!Array.isArray(sourcesTried) || !sourcesTried.includes('address-pool-v2')) throw new Error('generation did not use address-pool-v2');
+  const expectedSource = job.country === 'CN' ? 'china-map-community' : 'address-pool-v2';
+  if (!Array.isArray(sourcesTried) || !sourcesTried.includes(expectedSource)) throw new Error(`generation did not use ${expectedSource}`);
   if (sourcesTried.includes('osm-overpass')) throw new Error('pool generation entered the online provider path');
   const address = result.address;
   const expectedStatus = !job.residential && job.country === 'CN' ? ['verified', 'synthetic'] : ['verified'];
@@ -97,7 +106,7 @@ const execute = async (job) => {
       const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
       try {
         const query = new URLSearchParams({ country: job.country, residential: String(job.residential), seed: `validation-${job.residential ? 'res' : 'normal'}-${job.country}-${job.index}-${attempt}` });
-        const response = await fetch(`${base}/generate?${query}`, { signal: controller.signal });
+        const response = await fetch(`${base}/generate?${query}`, { headers: authorization, signal: controller.signal });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error?.code || String(response.status));
         return assertBundle(job, payload, response.headers.get('Server-Timing'));

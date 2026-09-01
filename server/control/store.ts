@@ -1,17 +1,35 @@
 import { randomUUID } from 'node:crypto';
-import type { SqliteDatabase } from '../database/sqlite.mjs';
+import type { Database } from '../database/database.mjs';
 import { decryptSecret, encryptSecret, hashPassword, opaqueToken, safeEqual, tokenHash, verifyPassword } from './security';
+import {
+  countryShortcutOverrides, effectiveCountryShortcuts, strictCountryShortcutConfig,
+  type CountryShortcutMap
+} from './country-shortcuts.ts';
+import type { CountryCode, CountryShortcutConfig } from '../../src/domain/types.ts';
 
 export type SessionRole = 'admin' | 'frontend';
 export type ProviderName = 'amap' | 'baidu' | 'tencent';
-export type CredentialProviderName = ProviderName | 'onemap';
+export type ServiceProviderName = 'youdao' | 'geoapify' | 'google-geocoding' | 'mappls';
+export type CredentialProviderName = ProviderName | 'onemap' | ServiceProviderName;
+export const serviceProviderNames = ['youdao', 'geoapify', 'google-geocoding', 'mappls'] as const;
+export const credentialProviderNames = ['amap', 'baidu', 'tencent', 'onemap', ...serviceProviderNames] as const;
 export type CredentialOutcome = 'success' | 'qps' | 'quota' | 'auth' | 'network' | 'invalid';
 export type QuotaPeriod = 'day' | 'month';
-export interface ProviderQuotaObservation { used: number; limit: number; resetAt?: string | null }
+export interface ProviderQuotaObservation {
+  used?: number; limit?: number; period?: QuotaPeriod; service?: string;
+  resetAt?: string | null; retryAt?: string | null;
+}
+export interface CredentialAcquireOptions { excludeIds?: Iterable<string> }
+export interface CredentialAvailability {
+  eligible: boolean;
+  configured: boolean;
+  nextAvailableAt: string | null;
+  reason: 'ready' | 'cooldown' | 'quota' | 'blocked' | 'unconfigured';
+}
 export interface CredentialInput {
   provider: CredentialProviderName; label: string; secret: string; weight?: number; qpsLimit?: number;
   quotaService?: string; quotaPeriod?: QuotaPeriod; quotaLimit?: number; quotaTimezoneOffset?: number;
-  quotaScopeId?: string; dailyLimit?: number;
+  quotaScopeId?: string; quotaUsedBaseline?: number; dailyLimit?: number;
 }
 export interface MapDisplayConfig {
   google: { china: boolean; international: boolean };
@@ -51,21 +69,39 @@ export const browserMapCredentialFromEnvironment = (environment: Record<string, 
 };
 
 const environmentCredentialDefinitions = [
-  ['AMAP_API_KEY', 'amap'], ['BAIDU_API_KEY', 'baidu'], ['TENCENT_API_KEY', 'tencent'], ['ONEMAP_ACCESS_TOKEN', 'onemap']
+  ['AMAP_API_KEY', 'amap'], ['BAIDU_API_KEY', 'baidu'], ['TENCENT_API_KEY', 'tencent'], ['ONEMAP_ACCESS_TOKEN', 'onemap'],
+  ['GEOAPIFY_API_KEY', 'geoapify'], ['GOOGLE_GEOCODING_API_KEY', 'google-geocoding'], ['MAPPLS_API_KEY', 'mappls']
 ] as const;
-export const credentialsFromEnvironment = (environment: Record<string, string | undefined>): CredentialInput[] =>
-  environmentCredentialDefinitions.flatMap(([baseName, provider]) => {
+
+export interface YoudaoSecretParts { appKey: string; appSecret: string }
+export const parseYoudaoSecret = (secret: string | undefined): YoudaoSecretParts | undefined => {
+  if (!secret) return undefined;
+  try {
+    const parsed = JSON.parse(secret) as Partial<YoudaoSecretParts>;
+    const appKey = typeof parsed.appKey === 'string' ? parsed.appKey.trim() : '';
+    const appSecret = typeof parsed.appSecret === 'string' ? parsed.appSecret.trim() : '';
+    return appKey && appSecret ? { appKey, appSecret } : undefined;
+  } catch { return undefined; }
+};
+
+export const credentialsFromEnvironment = (environment: Record<string, string | undefined>): CredentialInput[] => {
+  const values = environmentCredentialDefinitions.flatMap(([baseName, provider]) => {
     const names = [baseName, ...Object.keys(environment)
       .filter((name) => {
         if (!name.startsWith(`${baseName}_`)) return false;
         return /^\d+$/u.test(name.slice(baseName.length + 1));
       })
       .sort((left, right) => Number(left.slice(baseName.length + 1)) - Number(right.slice(baseName.length + 1)))];
-    return names.flatMap((name) => {
+    return names.flatMap((name): CredentialInput[] => {
       const secret = environment[name]?.trim();
       return secret ? [{ provider, label: name, secret }] : [];
     });
   });
+  const appKey = environment.YOUDAO_APP_KEY?.trim();
+  const appSecret = environment.YOUDAO_APP_SECRET?.trim();
+  if (appKey && appSecret) values.push({ provider: 'youdao', label: 'YOUDAO_APP_KEY', secret: JSON.stringify({ appKey, appSecret }) });
+  return values;
+};
 
 interface IdentityRow { password_hash: string; password_salt: string }
 interface SessionRow { role: SessionRole; csrf_hash: string; expires_at: string }
@@ -81,6 +117,11 @@ interface CredentialRow {
   provider_reported_reset_at: string | null; provider_reported_at: string | null;
   cooldown_until: string | null; failure_count: number; last_used_at: string | null; last_success_at: string | null;
   last_failure_at: string | null; created_at: string; updated_at: string; used_in_period?: number;
+  quota_windows?: CredentialQuotaWindow[];
+}
+interface CredentialQuotaWindow {
+  service: string; scopeId: string; period: QuotaPeriod; limit: number; timezoneOffset: number;
+  source: string; used: number; baseline: number; resetAt: string; usageSource: 'local' | 'provider'; exhausted: boolean;
 }
 interface BrowserMapCredentialRow {
   provider: 'amap'; label: string;
@@ -93,13 +134,19 @@ export const API_TOKEN_SCOPES = ['read', 'generate'] as const;
 
 const nowIso = (): string => new Date().toISOString();
 export const AMAP_PERSONAL_MONTHLY_LIMIT = 5_000;
+export const GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT = 10_000;
+export const GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET = 9_000;
 export const credentialProviderDefaults: Record<CredentialProviderName, {
   qps: number; service: string; period: QuotaPeriod; limit: number; timezoneOffset: number;
 }> = {
   amap: { qps: 3, service: 'place-search-v5', period: 'month', limit: AMAP_PERSONAL_MONTHLY_LIMIT, timezoneOffset: 480 },
   baidu: { qps: 3, service: 'place-search-v2', period: 'day', limit: 100, timezoneOffset: 480 },
   tencent: { qps: 5, service: 'place-search-v1', period: 'day', limit: 10_000, timezoneOffset: 480 },
-  onemap: { qps: 1, service: 'search', period: 'day', limit: 100, timezoneOffset: 480 }
+  onemap: { qps: 1, service: 'search', period: 'day', limit: 100_000_000, timezoneOffset: 480 },
+  youdao: { qps: 1, service: 'text-translate', period: 'month', limit: 100_000, timezoneOffset: 0 },
+  geoapify: { qps: 5, service: 'geocode', period: 'day', limit: 3_000, timezoneOffset: 0 },
+  'google-geocoding': { qps: 5, service: 'geocode-v4', period: 'month', limit: GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, timezoneOffset: -480 },
+  mappls: { qps: 5, service: 'nearby-place-details', period: 'day', limit: 1_000, timezoneOffset: 330 }
 };
 const quotaPeriodStart = (period: QuotaPeriod, offsetMinutes: number, date = new Date()): string => {
   const shifted = new Date(date.getTime() + offsetMinutes * 60_000).toISOString();
@@ -114,6 +161,11 @@ const nextQuotaReset = (period: QuotaPeriod, offsetMinutes: number, date = new D
 };
 const json = <T>(value: string | null | undefined, fallback: T): T => {
   try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; }
+};
+const syncGoalSnapshot = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const snapshot = value as Record<string, unknown>;
+  return snapshot.total && snapshot.administrativeCoverage && snapshot.regionalMinimums ? snapshot : null;
 };
 const normalizeTokenScopes = (value: unknown, fallbackAll = true): string[] => {
   if (value === undefined || value === null) return fallbackAll ? ['*'] : [];
@@ -183,19 +235,43 @@ const inspectCredential = (row: CredentialRow, masterKey: Buffer): CredentialIns
 
 const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
   const inspection = inspectCredential(row, masterKey);
-  const localUsed = Number(row.used_in_period || 0);
-  const reportCurrent = row.provider_reported_at && (!row.provider_reported_reset_at || Date.parse(row.provider_reported_reset_at) > Date.now());
-  const quotaUsed = reportCurrent && row.provider_reported_used !== null ? Math.max(localUsed, row.provider_reported_used) : localUsed;
-  const quotaLimit = reportCurrent && row.provider_reported_limit !== null ? row.provider_reported_limit : row.quota_limit;
-  const resetAt = reportCurrent && row.provider_reported_reset_at
-    ? row.provider_reported_reset_at
-    : nextQuotaReset(row.quota_period, row.quota_timezone_offset).toISOString();
-  const exhausted = quotaUsed >= quotaLimit || (row.status === 'quota_exhausted' && Date.parse(resetAt) > Date.now());
+  const windows = row.quota_windows || [];
+  const primary = windows.find((window) => window.service === row.quota_service && window.period === row.quota_period)
+    || windows[0];
+  const windowsExhausted = windows.some((window) => window.exhausted);
+  const legacyQuotaExhausted = !windowsExhausted && row.status === 'quota_exhausted'
+    && (!row.cooldown_until || Date.parse(row.cooldown_until) > Date.now());
+  const quotaWindows = windows.map((window) => {
+    const exhausted = window.exhausted || (legacyQuotaExhausted && window === primary);
+    const used = exhausted ? Math.max(window.used, window.limit) : window.used;
+    return {
+      service: window.service, period: window.period, used, baseline: window.baseline, limit: window.limit,
+      remaining: Math.max(0, window.limit - used), resetAt: window.resetAt,
+      usageSource: window.usageSource, exhausted
+    };
+  });
+  const publicPrimary = quotaWindows.find((window) => window.service === row.quota_service && window.period === row.quota_period)
+    || quotaWindows[0];
+  const quotaUsed = publicPrimary?.used ?? Number(row.used_in_period || 0);
+  const quotaLimit = primary?.limit ?? row.quota_limit;
+  const resetAt = primary?.resetAt || nextQuotaReset(row.quota_period, row.quota_timezone_offset).toISOString();
+  const exhausted = quotaWindows.some((window) => window.exhausted) || quotaUsed >= quotaLimit;
+  let fieldMasks: { appKey: string; appSecret: string } | undefined;
+  if (row.provider === 'youdao') {
+    try {
+      const parts = parseYoudaoSecret(decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, masterKey));
+      if (parts) fieldMasks = {
+        appKey: `${parts.appKey.slice(0, 4)}${'•'.repeat(Math.max(4, Math.min(8, parts.appKey.length - 4)))}`,
+        appSecret: `${'•'.repeat(8)}${parts.appSecret.slice(-4)}`
+      };
+    } catch { /* unreadable credentials remain masked and require administrator review */ }
+  }
   return {
     id: row.id,
     provider: row.provider,
     label: row.label,
     mask: `••••${row.id.slice(-4)}`,
+    fieldMasks,
     enabled: Boolean(row.enabled),
     status: !row.enabled || row.status === 'disabled' ? 'disabled' : inspection.invalid ? 'needs_review' : inspection.expired ? 'expired' : exhausted ? 'quota_exhausted' : row.status,
     expiresAt: inspection.expiresAt,
@@ -203,10 +279,13 @@ const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
     quotaPeriod: row.quota_period,
     quotaUsed,
     quotaLimit,
+    officialQuotaLimit: row.provider === 'google-geocoding' ? GOOGLE_GEOCODING_FREE_MONTHLY_LIMIT : quotaLimit,
+    quotaBaseline: publicPrimary?.baseline || 0,
     quotaRemaining: Math.max(0, quotaLimit - quotaUsed),
     quotaResetAt: resetAt,
-    quotaUsageSource: reportCurrent && row.provider_reported_limit !== null ? 'provider' : 'local',
-    providerReportedAt: reportCurrent ? row.provider_reported_at : null,
+    quotaUsageSource: primary?.usageSource || 'local',
+    quotaWindows,
+    providerReportedAt: windows.some((window) => window.usageSource === 'provider') ? row.provider_reported_at : null,
     cooldownUntil: row.cooldown_until,
     failureCount: row.failure_count,
     lastUsedAt: row.last_used_at,
@@ -218,140 +297,50 @@ const publicCredential = (row: CredentialRow, masterKey: Buffer) => {
 };
 
 export class ControlStore {
-  constructor(private readonly database: SqliteDatabase, private readonly masterKey: Buffer) {}
+  constructor(private readonly database: Database, private readonly masterKey: Buffer) {}
 
   async initialize(bootstrapPassword?: string, environment: Record<string, string | undefined> = {}): Promise<void> {
-    await this.ensureApiTokenSchema();
-    await this.ensureCredentialProviderSchema();
-    await this.ensureCredentialQuotaSchema();
     await this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').bind(nowIso()).run();
+    await this.database.prepare(`UPDATE provider_quota_windows SET limit_count=100000000,updated_at=?
+      WHERE limit_count=100 AND credential_id IN (SELECT id FROM provider_credentials WHERE provider='onemap')`)
+      .bind(nowIso()).run();
+    await this.database.prepare(`UPDATE provider_credentials SET daily_limit=100000000,quota_limit=100000000,updated_at=?
+      WHERE provider='onemap' AND quota_limit=100`).bind(nowIso()).run();
+    await this.database.prepare(`DELETE FROM provider_quota_windows
+      WHERE credential_id IN (SELECT id FROM provider_credentials WHERE provider='google-geocoding')
+        AND service='geocode-v4' AND period='day' AND limit_count=1000`).run();
+    await this.database.prepare(`UPDATE provider_credentials SET qps_limit=5,daily_limit=?,quota_period='month',quota_limit=?,
+      quota_timezone_offset=-480,updated_at=? WHERE provider='google-geocoding' AND quota_period='day' AND quota_limit=1000`)
+      .bind(GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, GOOGLE_GEOCODING_SYNC_MONTHLY_BUDGET, nowIso()).run();
     const admin = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='admin'").first<{ id: string }>();
-    if (!admin && bootstrapPassword) await this.setPassword('admin', bootstrapPassword);
-    await this.setDefault('frontend_password_enabled', false);
+    const frontend = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='frontend'").first<{ id: string }>();
+    const frontendBootstrapPassword = environment.FRONTEND_BOOTSTRAP_PASSWORD?.trim();
+    if (!admin && bootstrapPassword) await this.setPassword('admin', bootstrapPassword, undefined, bootstrapPassword === 'admin' ? 5 : 10);
+    if (!admin && !frontend && frontendBootstrapPassword) await this.setPassword('frontend', frontendBootstrapPassword);
+    await this.setDefault('admin_password_change_required', !admin && bootstrapPassword === 'admin');
+    await this.setDefault('frontend_password_enabled', Boolean(frontendBootstrapPassword));
     await this.setDefault('api_auth_enabled', true);
+    await this.setDefault('google_translation_enabled', environmentBoolean(environment.GOOGLE_TRANSLATION_ENABLED, true));
     await this.setDefault('map_display_config', mapDisplayConfigFromEnvironment(environment));
     const browserCredential = browserMapCredentialFromEnvironment(environment);
     if (browserCredential && !await this.browserMapCredentialRow()) await this.createBrowserMapCredential(browserCredential);
+    await this.ensureQuotaWindows();
   }
 
-  private async ensureCredentialQuotaSchema(): Promise<void> {
-    const columns = (await this.database.prepare('PRAGMA table_info(provider_credentials)').all<{ name: string }>()).results;
-    const names = new Set(columns.map((column) => column.name));
-    const definitions: Record<string, string> = {
-      quota_service: "TEXT NOT NULL DEFAULT 'place-search'",
-      quota_period: "TEXT NOT NULL DEFAULT 'day'",
-      quota_limit: 'INTEGER NOT NULL DEFAULT 1000',
-      quota_timezone_offset: 'INTEGER NOT NULL DEFAULT 480',
-      provider_reported_used: 'INTEGER', provider_reported_limit: 'INTEGER',
-      provider_reported_reset_at: 'TEXT', provider_reported_at: 'TEXT'
-    };
-    await this.database.exec('BEGIN IMMEDIATE');
-    try {
-      for (const [name, definition] of Object.entries(definitions)) {
-        if (!names.has(name)) await this.database.exec(`ALTER TABLE provider_credentials ADD COLUMN ${name} ${definition}`);
-      }
-      await this.database.exec(`CREATE TABLE IF NOT EXISTS provider_usage_periods (
-        credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
-        period_start TEXT NOT NULL,accepted_count INTEGER NOT NULL DEFAULT 0,rejected_count INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (credential_id,period_start));`);
-      for (const [provider, defaults] of Object.entries(credentialProviderDefaults)) {
-        await this.database.prepare(`UPDATE provider_credentials SET quota_service=?,quota_period=?,quota_limit=?,quota_timezone_offset=?
-          WHERE provider=? AND NOT EXISTS (SELECT 1 FROM control_migrations WHERE version=5)`)
-          .bind(defaults.service, defaults.period, defaults.limit, defaults.timezoneOffset, provider).run();
-      }
-      await this.database.prepare(`INSERT OR IGNORE INTO provider_usage_periods(credential_id,period_start,accepted_count,rejected_count)
-        SELECT usage.credential_id,CASE WHEN credential.quota_period='month' THEN substr(usage.usage_date,1,7) ELSE usage.usage_date END,
-        SUM(usage.accepted_count),SUM(usage.rejected_count) FROM provider_usage_daily usage
-        JOIN provider_credentials credential ON credential.id=usage.credential_id GROUP BY usage.credential_id,2`).run();
-      await this.database.prepare('INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (5,?)').bind(nowIso()).run();
-      await this.database.exec('COMMIT');
-    } catch (error) {
-      await this.database.exec('ROLLBACK').catch(() => undefined);
-      throw error;
-    }
-  }
-
-  private async ensureApiTokenSchema(): Promise<void> {
-    const columns = (await this.database.prepare('PRAGMA table_info(api_tokens)').all<{ name: string }>()).results;
-    const names = new Set(columns.map((column) => column.name));
-    const missing = ['token_ciphertext', 'token_iv', 'token_tag'].filter((name) => !names.has(name));
-    if (missing.length) {
-      await this.database.exec('BEGIN IMMEDIATE');
-      try {
-        for (const column of missing) await this.database.exec(`ALTER TABLE api_tokens ADD COLUMN ${column} TEXT`);
-        await this.database.prepare('INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (4,?)').bind(nowIso()).run();
-        await this.database.exec('COMMIT');
-      } catch (error) {
-        await this.database.exec('ROLLBACK').catch(() => undefined);
-        throw error;
-      }
-    } else {
-      await this.database.prepare('INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (4,?)').bind(nowIso()).run();
-    }
-  }
-
-  private async ensureCredentialProviderSchema(): Promise<void> {
-    const schema = await this.database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='provider_credentials'")
-      .first<{ sql: string }>();
-    if (!schema || schema.sql.includes("'onemap'")) {
-      await this.database.prepare('INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (2,?)').bind(nowIso()).run();
-      return;
-    }
-    await this.database.exec('PRAGMA foreign_keys = OFF');
-    try {
-      await this.database.exec(`BEGIN IMMEDIATE;
-        ALTER TABLE provider_usage_daily RENAME TO provider_usage_daily_legacy;
-        ALTER TABLE provider_credentials RENAME TO provider_credentials_legacy;
-        CREATE TABLE provider_credentials (
-          id TEXT PRIMARY KEY,
-          provider TEXT NOT NULL CHECK (provider IN ('amap','baidu','tencent','onemap')),
-          label TEXT NOT NULL,
-          secret_ciphertext TEXT NOT NULL,
-          secret_iv TEXT NOT NULL,
-          secret_tag TEXT NOT NULL,
-          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
-          status TEXT NOT NULL DEFAULT 'healthy' CHECK (status IN ('healthy','cooldown','quota_exhausted','needs_review','disabled')),
-          weight INTEGER NOT NULL DEFAULT 100 CHECK (weight BETWEEN 1 AND 10000),
-          qps_limit INTEGER NOT NULL DEFAULT 1 CHECK (qps_limit BETWEEN 1 AND 10000),
-          daily_limit INTEGER NOT NULL DEFAULT 1000 CHECK (daily_limit BETWEEN 1 AND 100000000),
-          quota_scope_id TEXT NOT NULL,
-          cooldown_until TEXT,
-          failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
-          last_used_at TEXT,
-          last_success_at TEXT,
-          last_failure_at TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE provider_usage_daily (
-          credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
-          usage_date TEXT NOT NULL,
-          accepted_count INTEGER NOT NULL DEFAULT 0,
-          rejected_count INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (credential_id,usage_date)
-        );
-        INSERT INTO provider_credentials SELECT * FROM provider_credentials_legacy;
-        INSERT INTO provider_usage_daily SELECT * FROM provider_usage_daily_legacy;
-        DROP TABLE provider_usage_daily_legacy;
-        DROP TABLE provider_credentials_legacy;
-        CREATE INDEX idx_provider_credentials_pick ON provider_credentials(provider,enabled,status,cooldown_until,last_used_at);
-        INSERT OR IGNORE INTO control_migrations(version,applied_at) VALUES (2,datetime('now'));
-        COMMIT;`);
-    } catch (error) {
-      await this.database.exec('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally {
-      await this.database.exec('PRAGMA foreign_keys = ON');
-    }
-  }
-
-  async status(): Promise<{ initialized: boolean; frontendPasswordEnabled: boolean; apiAuthEnabled: boolean }> {
+  async status(): Promise<{ initialized: boolean; frontendPasswordEnabled: boolean; apiAuthEnabled: boolean; passwordChangeRequired: boolean }> {
     const admin = await this.database.prepare("SELECT id FROM auth_identities WHERE kind='admin'").first<{ id: string }>();
     return {
       initialized: Boolean(admin),
       frontendPasswordEnabled: await this.setting('frontend_password_enabled', false),
-      apiAuthEnabled: await this.setting('api_auth_enabled', true)
+      apiAuthEnabled: true,
+      passwordChangeRequired: await this.setting('admin_password_change_required', false)
     };
+  }
+
+  async providerRequestsToday(date = new Date().toISOString().slice(0, 10)): Promise<number> {
+    const total = await this.database.prepare(`SELECT COALESCE(SUM(accepted_count+rejected_count),0) AS total
+      FROM provider_usage_daily WHERE usage_date=?`).bind(date).first<number>('total');
+    return Number(total || 0);
   }
 
   async setting<T>(key: string, fallback: T): Promise<T> {
@@ -366,7 +355,8 @@ export class ControlStore {
   }
 
   private async setDefault(key: string, value: unknown): Promise<void> {
-    await this.database.prepare('INSERT OR IGNORE INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)')
+    await this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)
+      ON CONFLICT (key) DO NOTHING`)
       .bind(key, JSON.stringify(value), nowIso()).run();
   }
 
@@ -378,6 +368,34 @@ export class ControlStore {
     const value = strictMapDisplayConfig(input);
     await this.setSetting('map_display_config', value);
     return value;
+  }
+
+  async countryShortcuts(): Promise<CountryShortcutMap> {
+    return effectiveCountryShortcuts(await this.setting<unknown>('country_shortcuts', {}));
+  }
+
+  async countryShortcutAdminSettings(): Promise<Array<CountryShortcutConfig & { customized: boolean }>> {
+    const raw = await this.setting<unknown>('country_shortcuts', {});
+    const overrides = countryShortcutOverrides(raw);
+    return Object.values(effectiveCountryShortcuts(raw)).map((value) => ({
+      ...value,
+      customized: Boolean(overrides[value.countryCode])
+    }));
+  }
+
+  async updateCountryShortcuts(countryCode: CountryCode, input: unknown): Promise<CountryShortcutConfig> {
+    const value = strictCountryShortcutConfig(countryCode, input);
+    const overrides = countryShortcutOverrides(await this.setting<unknown>('country_shortcuts', {}));
+    overrides[countryCode] = value;
+    await this.setSetting('country_shortcuts', overrides);
+    return value;
+  }
+
+  async resetCountryShortcuts(countryCode: CountryCode): Promise<CountryShortcutConfig> {
+    const overrides = countryShortcutOverrides(await this.setting<unknown>('country_shortcuts', {}));
+    delete overrides[countryCode];
+    await this.setSetting('country_shortcuts', overrides);
+    return (await this.countryShortcuts())[countryCode];
   }
 
   private async browserMapCredentialRow(): Promise<BrowserMapCredentialRow | null> {
@@ -412,6 +430,19 @@ export class ControlStore {
     if (!row) throw new Error('CREDENTIAL_NOT_FOUND');
     try {
       return { id: row.id, secret: decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, this.masterKey) };
+    } catch {
+      throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    }
+  }
+
+  async revealYoudaoCredential(id: string): Promise<{ id: string; appKey: string; appSecret: string }> {
+    const row = await this.database.prepare('SELECT * FROM provider_credentials WHERE id=?').bind(id).first<CredentialRow>();
+    if (!row) throw new Error('CREDENTIAL_NOT_FOUND');
+    if (row.provider !== 'youdao') throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    try {
+      const parts = parseYoudaoSecret(decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, this.masterKey));
+      if (!parts) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+      return { id: row.id, ...parts };
     } catch {
       throw new Error('INVALID_PROVIDER_CREDENTIAL');
     }
@@ -489,8 +520,8 @@ export class ControlStore {
     } catch { return null; }
   }
 
-  async setPassword(kind: SessionRole, password: string, currentSessionToken?: string): Promise<void> {
-    const value = await hashPassword(password);
+  async setPassword(kind: SessionRole, password: string, currentSessionToken?: string, minimumLength = 10): Promise<void> {
+    const value = await hashPassword(password, minimumLength);
     const now = nowIso();
     await this.database.prepare(`INSERT INTO auth_identities(id,kind,password_hash,password_salt,created_at,updated_at)
       VALUES (?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET password_hash=excluded.password_hash,
@@ -508,7 +539,6 @@ export class ControlStore {
     frontendPasswordEnabled?: boolean;
     frontendPassword?: string;
     frontendPasswordConfirmation?: string;
-    apiAuthEnabled?: boolean;
     adminPassword?: string;
     adminPasswordConfirmation?: string;
   }, currentSessionToken: string): Promise<void> {
@@ -538,21 +568,18 @@ export class ControlStore {
       statements.push(currentSessionToken
         ? this.database.prepare("DELETE FROM auth_sessions WHERE role='admin' AND id_hash<>?").bind(tokenHash(currentSessionToken))
         : this.database.prepare("DELETE FROM auth_sessions WHERE role='admin'"));
+      statements.push(this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)
+        ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+        .bind('admin_password_change_required', JSON.stringify(false), now));
     }
     if (input.frontendPasswordEnabled !== undefined) {
       statements.push(this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)
         ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
         .bind('frontend_password_enabled', JSON.stringify(Boolean(input.frontendPasswordEnabled)), now));
     }
-    if (input.apiAuthEnabled !== undefined) {
-      statements.push(this.database.prepare(`INSERT INTO system_settings(key,value_json,updated_at) VALUES (?,?,?)
-        ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
-        .bind('api_auth_enabled', JSON.stringify(Boolean(input.apiAuthEnabled)), now));
-    }
     statements.push(this.database.prepare('INSERT INTO audit_events(actor,action,target,details_json,created_at) VALUES (?,?,?,?,?)')
       .bind('admin', 'settings.access.update', 'access', JSON.stringify({
         frontendPasswordEnabled: input.frontendPasswordEnabled,
-        apiAuthEnabled: input.apiAuthEnabled,
         frontendPasswordChanged: Boolean(frontendPassword),
         adminPasswordChanged: Boolean(adminPassword)
       }), now));
@@ -687,7 +714,6 @@ export class ControlStore {
   }
 
   async authorizeApiTokenDetailed(secret: string, scope = 'generate'): Promise<ApiAuthorization> {
-    if (!await this.setting('api_auth_enabled', true)) return { status: 'authorized', id: 'disabled', name: 'authentication-disabled' };
     if (!secret) return { status: 'unauthorized' };
     const row = await this.database.prepare(`SELECT id,name,scopes_json,rate_limit_per_minute,expires_at,revoked_at
       FROM api_tokens WHERE token_hash=?`).bind(tokenHash(secret)).first<ApiTokenRow>();
@@ -717,7 +743,8 @@ export class ControlStore {
   }
 
   async addCredential(input: CredentialInput): Promise<string> {
-    if (!['amap', 'baidu', 'tencent', 'onemap'].includes(input.provider) || !input.secret?.trim() || !input.label?.trim()) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    if (!(credentialProviderNames as readonly string[]).includes(input.provider) || !input.secret?.trim() || !input.label?.trim()) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    if (input.provider === 'youdao' && !parseYoudaoSecret(input.secret.trim())) throw new Error('INVALID_PROVIDER_CREDENTIAL');
     const id = randomUUID();
     const encrypted = encryptSecret(input.secret.trim(), this.masterKey);
     const now = nowIso();
@@ -729,14 +756,24 @@ export class ControlStore {
     const quotaLimit = boundedInteger(input.quotaLimit ?? input.dailyLimit, defaults.limit, 1, 100000000, 'INVALID_CREDENTIAL_QUOTA_LIMIT');
     const timezoneOffset = boundedInteger(input.quotaTimezoneOffset, defaults.timezoneOffset, -720, 840, 'INVALID_CREDENTIAL_QUOTA_TIMEZONE');
     const quotaService = input.quotaService?.trim().slice(0, 80) || defaults.service;
+    const quotaUsedBaseline = boundedInteger(input.quotaUsedBaseline, 0, 0, quotaLimit, 'INVALID_CREDENTIAL_QUOTA_BASELINE');
     await this.database.prepare(`INSERT INTO provider_credentials(
       id,provider,label,secret_ciphertext,secret_iv,secret_tag,weight,qps_limit,daily_limit,
       quota_service,quota_period,quota_limit,quota_timezone_offset,quota_scope_id,created_at,updated_at
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       id, input.provider, input.label.trim().slice(0, 80), encrypted.ciphertext, encrypted.iv, encrypted.tag,
       weight, qpsLimit, quotaLimit, quotaService, quotaPeriod, quotaLimit, timezoneOffset,
-      input.quotaScopeId?.trim().slice(0, 120) || `${input.provider}:${quotaService}:${id}`, now, now
+      input.quotaScopeId?.trim().slice(0, 120)
+        || (input.provider === 'google-geocoding' ? 'google-geocoding:project' : `${input.provider}:${quotaService}:${id}`), now, now
     ).run();
+    const row = await this.database.prepare('SELECT quota_scope_id FROM provider_credentials WHERE id=?').bind(id)
+      .first<{ quota_scope_id: string }>();
+    await this.database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,'admin',1,?,?)`).bind(
+      id, quotaService, row!.quota_scope_id, quotaPeriod, quotaLimit, timezoneOffset, now, now
+    ).run();
+    await this.setQuotaBaseline(id, quotaService, quotaPeriod, quotaUsedBaseline, quotaLimit, timezoneOffset);
     return id;
   }
 
@@ -754,10 +791,41 @@ export class ControlStore {
     return { id: await this.addCredential({ ...input, secret }), created: true };
   }
 
+  async youdaoCredentialStatus(): Promise<{ configured: boolean; appKeyMask: string }> {
+    const row = await this.database.prepare("SELECT * FROM provider_credentials WHERE provider='youdao' ORDER BY created_at")
+      .first<CredentialRow>();
+    if (!row) return { configured: false, appKeyMask: '' };
+    try {
+      const parts = parseYoudaoSecret(decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv, tag: row.secret_tag }, this.masterKey));
+      if (!parts) return { configured: false, appKeyMask: '' };
+      return { configured: true, appKeyMask: `${parts.appKey.slice(0, 4)}****` };
+    } catch {
+      return { configured: false, appKeyMask: '' };
+    }
+  }
+
+  async upsertYoudaoCredential(appKey: string, appSecret: string): Promise<void> {
+    const key = appKey?.trim();
+    const secretPart = appSecret?.trim();
+    if (!key || !secretPart || key.length > 2048 || secretPart.length > 2048) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    const secret = JSON.stringify({ appKey: key, appSecret: secretPart });
+    const row = await this.database.prepare("SELECT id FROM provider_credentials WHERE provider='youdao' ORDER BY created_at")
+      .first<{ id: string }>();
+    if (row) await this.updateCredential(row.id, { secret, enabled: true });
+    else await this.addCredential({ provider: 'youdao', label: 'YOUDAO_APP_KEY', secret });
+  }
+
+  private async ensureQuotaWindows(): Promise<void> {
+    await this.database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) SELECT id,quota_service,quota_scope_id,quota_period,quota_limit,quota_timezone_offset,'default',enabled,created_at,updated_at
+      FROM provider_credentials ON CONFLICT(credential_id,service,period) DO NOTHING`).run();
+  }
+
   async listCredentials(): Promise<Array<ReturnType<typeof publicCredential>>> {
     await this.resetExpiredQuotaStates();
     const rows = (await this.database.prepare('SELECT * FROM provider_credentials ORDER BY provider,label').all<CredentialRow>()).results;
-    await Promise.all(rows.map(async (row) => { row.used_in_period = await this.quotaUsage(row); }));
+    await Promise.all(rows.map(async (row) => { row.quota_windows = await this.credentialQuotaWindows(row); }));
     return rows.map((row) => publicCredential(row, this.masterKey));
   }
 
@@ -775,6 +843,41 @@ export class ControlStore {
     return [...providers];
   }
 
+  async credentialAvailability(providers: CredentialProviderName[]): Promise<CredentialAvailability> {
+    await this.resetExpiredQuotaStates();
+    const selectedProviders = [...new Set(providers)];
+    if (!selectedProviders.length) return { eligible: false, configured: false, nextAvailableAt: null, reason: 'unconfigured' };
+    const placeholders = selectedProviders.map(() => '?').join(',');
+    const rows = (await this.database.prepare(`SELECT * FROM provider_credentials
+      WHERE provider IN (${placeholders}) AND enabled=1 ORDER BY provider,last_used_at`).bind(...selectedProviders)
+      .all<CredentialRow>()).results;
+    if (!rows.length) return { eligible: false, configured: false, nextAvailableAt: null, reason: 'unconfigured' };
+    let nextAvailableAt: string | null = null;
+    let nextReason: 'cooldown' | 'quota' | null = null;
+    for (const row of rows) {
+      const inspection = inspectCredential(row, this.masterKey);
+      if (inspection.invalid || inspection.expired || row.status === 'disabled' || row.status === 'needs_review') continue;
+      const quotaWindows = await this.credentialQuotaWindows(row);
+      const quotaAvailable = !quotaWindows.some((window) => window.exhausted);
+      const cooldownAt = row.cooldown_until && Date.parse(row.cooldown_until) > Date.now() ? row.cooldown_until : null;
+      const pacingTime = row.last_used_at ? Date.parse(row.last_used_at) + 1000 / row.qps_limit : 0;
+      const pacingAt = Number.isFinite(pacingTime) && pacingTime > Date.now() ? new Date(pacingTime).toISOString() : null;
+      if (quotaAvailable && !cooldownAt && !pacingAt) return { eligible: true, configured: true, nextAvailableAt: nowIso(), reason: 'ready' };
+      const quotaResetAt = quotaWindows.filter((window) => window.exhausted)
+        .map((window) => window.resetAt).sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null;
+      const candidate = !quotaAvailable
+        ? quotaResetAt || cooldownAt || nextQuotaReset(row.quota_period, row.quota_timezone_offset).toISOString()
+        : cooldownAt || pacingAt;
+      const reason = !quotaAvailable || row.status === 'quota_exhausted' ? 'quota' : 'cooldown';
+      if (candidate && (!nextAvailableAt || Date.parse(candidate) < Date.parse(nextAvailableAt))) {
+        nextAvailableAt = candidate;
+        nextReason = reason;
+      }
+    }
+    if (nextReason) return { eligible: false, configured: true, nextAvailableAt, reason: nextReason };
+    return { eligible: false, configured: true, nextAvailableAt: null, reason: 'blocked' };
+  }
+
   async updateCredential(id: string, input: Record<string, unknown>): Promise<void> {
     const current = await this.database.prepare('SELECT * FROM provider_credentials WHERE id=?').bind(id).first<CredentialRow>();
     if (!current) throw new Error('CREDENTIAL_NOT_FOUND');
@@ -789,29 +892,91 @@ export class ControlStore {
     const timezoneOffset = boundedInteger(input.quotaTimezoneOffset, current.quota_timezone_offset, -720, 840, 'INVALID_CREDENTIAL_QUOTA_TIMEZONE');
     const quotaService = String(input.quotaService ?? current.quota_service).trim().slice(0, 80);
     if (!quotaService) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+    const quotaUsedBaseline = boundedInteger(input.quotaUsedBaseline, 0, 0, quotaLimit, 'INVALID_CREDENTIAL_QUOTA_BASELINE');
+    let encrypted = {
+      ciphertext: current.secret_ciphertext,
+      iv: current.secret_iv,
+      tag: current.secret_tag
+    };
+    let secretChanged = false;
+    if (typeof input.secret === 'string' && input.secret.trim()) {
+      const nextSecret = input.secret.trim();
+      if (current.provider === 'youdao' && !parseYoudaoSecret(nextSecret)) throw new Error('INVALID_PROVIDER_CREDENTIAL');
+      let existingSecret = '';
+      try {
+        existingSecret = decryptSecret(encrypted, this.masterKey);
+      } catch { /* replacing an unreadable credential is allowed */ }
+      secretChanged = !existingSecret || !safeEqual(existingSecret, nextSecret);
+      if (secretChanged) encrypted = encryptSecret(nextSecret, this.masterKey);
+    }
+    const enabled = input.enabled === undefined ? current.enabled : input.enabled ? 1 : 0;
     await this.database.prepare(`UPDATE provider_credentials SET label=?,enabled=?,weight=?,qps_limit=?,daily_limit=?,
       quota_service=?,quota_period=?,quota_limit=?,quota_timezone_offset=?,quota_scope_id=?,
-      status=CASE WHEN ?=0 THEN 'disabled' WHEN status='disabled' THEN 'healthy' ELSE status END,updated_at=? WHERE id=?`).bind(
-      label, input.enabled === undefined ? current.enabled : input.enabled ? 1 : 0, weight, qpsLimit, quotaLimit,
+      secret_ciphertext=?,secret_iv=?,secret_tag=?,
+      status=CASE WHEN ?=0 THEN 'disabled' WHEN ?=1 THEN 'healthy' WHEN status='disabled' THEN 'healthy' ELSE status END,
+      cooldown_until=CASE WHEN ?=1 THEN NULL ELSE cooldown_until END,
+      failure_count=CASE WHEN ?=1 THEN 0 ELSE failure_count END,
+      last_failure_at=CASE WHEN ?=1 THEN NULL ELSE last_failure_at END,
+      provider_reported_used=CASE WHEN ?=1 THEN NULL ELSE provider_reported_used END,
+      provider_reported_limit=CASE WHEN ?=1 THEN NULL ELSE provider_reported_limit END,
+      provider_reported_reset_at=CASE WHEN ?=1 THEN NULL ELSE provider_reported_reset_at END,
+      provider_reported_at=CASE WHEN ?=1 THEN NULL ELSE provider_reported_at END,
+      updated_at=? WHERE id=?`).bind(
+      label, enabled, weight, qpsLimit, quotaLimit,
       quotaService, quotaPeriod, quotaLimit, timezoneOffset, quotaScopeId,
-      input.enabled === undefined ? current.enabled : input.enabled ? 1 : 0, nowIso(), id
+      encrypted.ciphertext, encrypted.iv, encrypted.tag,
+      enabled, secretChanged ? 1 : 0,
+      secretChanged ? 1 : 0, secretChanged ? 1 : 0, secretChanged ? 1 : 0,
+      secretChanged ? 1 : 0, secretChanged ? 1 : 0, secretChanged ? 1 : 0, secretChanged ? 1 : 0,
+      nowIso(), id
     ).run();
+    const updatedAt = nowIso();
+    await this.database.prepare(`INSERT INTO provider_quota_windows(
+      credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,'admin',?,?,?) ON CONFLICT(credential_id,service,period) DO UPDATE SET
+      scope_id=excluded.scope_id,limit_count=excluded.limit_count,timezone_offset=excluded.timezone_offset,
+      source='admin',enabled=excluded.enabled,updated_at=excluded.updated_at`).bind(
+      id, quotaService, quotaScopeId, quotaPeriod, quotaLimit, timezoneOffset, enabled, current.created_at, updatedAt
+    ).run();
+    if (secretChanged) {
+      await this.database.batch([
+        this.database.prepare('DELETE FROM provider_usage_daily WHERE credential_id=?').bind(id),
+        this.database.prepare('DELETE FROM provider_usage_periods WHERE credential_id=?').bind(id),
+        this.database.prepare("DELETE FROM provider_quota_observations WHERE credential_id=? AND source='provider'").bind(id)
+      ]);
+    }
+    if (Object.hasOwn(input, 'quotaUsedBaseline')) {
+      await this.setQuotaBaseline(id, quotaService, quotaPeriod, quotaUsedBaseline, quotaLimit, timezoneOffset);
+    }
   }
 
   async deleteCredential(id: string): Promise<void> {
-    await this.database.prepare('DELETE FROM provider_credentials WHERE id=?').bind(id).run();
+    await this.database.transaction(async (database) => {
+      const credential = await database.prepare('SELECT id FROM provider_credentials WHERE id=? FOR UPDATE')
+        .bind(id).first<{ id: string }>();
+      if (!credential) throw new Error('CREDENTIAL_NOT_FOUND');
+      await database.prepare("UPDATE provider_credentials SET enabled=0,status='disabled',updated_at=? WHERE id=?")
+        .bind(nowIso(), id).run();
+      await database.prepare('DELETE FROM provider_credentials WHERE id=?').bind(id).run();
+    });
   }
 
-  async acquireCredential(provider: CredentialProviderName): Promise<{ id: string; provider: CredentialProviderName; secret: string } | null> {
+  async acquireCredential(
+    provider: CredentialProviderName,
+    options: CredentialAcquireOptions = {}
+  ): Promise<{ id: string; provider: CredentialProviderName; secret: string } | null> {
     await this.resetExpiredQuotaStates();
     const now = nowIso();
+    const excluded = new Set(options.excludeIds || []);
     const rows = (await this.database.prepare(`SELECT credential.* FROM provider_credentials credential
       WHERE credential.provider=? AND credential.enabled=1 AND credential.status NOT IN ('disabled','needs_review')
       AND (credential.cooldown_until IS NULL OR credential.cooldown_until<=?)
-      AND (credential.last_used_at IS NULL OR (julianday(?) - julianday(credential.last_used_at))*86400 >= 1.0/credential.qps_limit)
-      ORDER BY credential.last_used_at IS NOT NULL,credential.last_used_at`).bind(provider, now, now).all<CredentialRow>()).results;
+      ORDER BY credential.last_used_at IS NOT NULL,credential.last_used_at,credential.created_at,credential.id`)
+      .bind(provider, now).all<CredentialRow>()).results;
     let selected: CredentialRow | undefined;
     for (const candidate of rows) {
+      if (excluded.has(candidate.id)) continue;
+      if (candidate.last_used_at && Date.parse(candidate.last_used_at) + 1000 / candidate.qps_limit > Date.parse(now)) continue;
       const inspection = inspectCredential(candidate, this.masterKey);
       if (!inspection.invalid && !inspection.expired && await this.quotaAvailable(candidate)) { selected = candidate; break; }
     }
@@ -828,12 +993,11 @@ export class ControlStore {
   async acquireCredentialById(id: string): Promise<{ id: string; provider: CredentialProviderName; secret: string } | null> {
     await this.resetExpiredQuotaStates();
     const now = nowIso();
-    const row = await this.database.prepare(`SELECT credential.* FROM provider_credentials credential
-      WHERE credential.id=? AND credential.enabled=1 AND credential.status NOT IN ('disabled','needs_review')
-      AND (credential.cooldown_until IS NULL OR credential.cooldown_until<=?)
-      AND (credential.last_used_at IS NULL OR (julianday(?) - julianday(credential.last_used_at))*86400 >= 1.0/credential.qps_limit)`)
-      .bind(id, now, now).first<CredentialRow>();
+    const row = await this.database.prepare('SELECT * FROM provider_credentials WHERE id=?').bind(id).first<CredentialRow>();
     if (!row) return null;
+    if (!row.enabled || ['disabled', 'needs_review'].includes(row.status)
+      || (row.cooldown_until && Date.parse(row.cooldown_until) > Date.parse(now))
+      || (row.last_used_at && Date.parse(row.last_used_at) + 1000 / row.qps_limit > Date.parse(now))) return null;
     const inspection = inspectCredential(row, this.masterKey);
     if (inspection.invalid || inspection.expired || !await this.quotaAvailable(row)) return null;
     await this.database.prepare('UPDATE provider_credentials SET last_used_at=?,status=? WHERE id=?')
@@ -850,19 +1014,40 @@ export class ControlStore {
     const row = await this.database.prepare('SELECT * FROM provider_credentials WHERE id=?').bind(id).first<CredentialRow>();
     if (!row) return;
     const date = quotaPeriodStart('day', row.quota_timezone_offset, now);
-    const periodStart = quotaPeriodStart(row.quota_period, row.quota_timezone_offset, now);
     await this.database.prepare(`INSERT INTO provider_usage_daily(credential_id,usage_date,accepted_count,rejected_count)
       VALUES (?,?,?,?) ON CONFLICT(credential_id,usage_date) DO UPDATE SET
-      accepted_count=accepted_count+excluded.accepted_count,rejected_count=rejected_count+excluded.rejected_count`)
+      accepted_count=provider_usage_daily.accepted_count+excluded.accepted_count,
+      rejected_count=provider_usage_daily.rejected_count+excluded.rejected_count`)
       .bind(id, date, outcome === 'success' ? 1 : 0, outcome === 'success' ? 0 : 1).run();
-    await this.database.prepare(`INSERT INTO provider_usage_periods(credential_id,period_start,accepted_count,rejected_count)
-      VALUES (?,?,?,?) ON CONFLICT(credential_id,period_start) DO UPDATE SET
-      accepted_count=accepted_count+excluded.accepted_count,rejected_count=rejected_count+excluded.rejected_count`)
-      .bind(id, periodStart, outcome === 'success' ? 1 : 0, outcome === 'success' ? 0 : 1).run();
+    for (const periodStart of new Set([
+      quotaPeriodStart('day', row.quota_timezone_offset, now),
+      quotaPeriodStart('month', row.quota_timezone_offset, now)
+    ])) {
+      await this.database.prepare(`INSERT INTO provider_usage_periods(credential_id,period_start,accepted_count,rejected_count)
+        VALUES (?,?,?,?) ON CONFLICT(credential_id,period_start) DO UPDATE SET
+        accepted_count=provider_usage_periods.accepted_count+excluded.accepted_count,
+        rejected_count=provider_usage_periods.rejected_count+excluded.rejected_count`)
+        .bind(id, periodStart, outcome === 'success' ? 1 : 0, outcome === 'success' ? 0 : 1).run();
+    }
     if (observation && Number.isSafeInteger(observation.used) && Number.isSafeInteger(observation.limit)
-      && observation.used >= 0 && observation.limit > 0) {
+      && Number(observation.used) >= 0 && Number(observation.limit) > 0) {
+      const period = observation.period || row.quota_period;
+      const service = observation.service?.trim().slice(0, 80) || row.quota_service;
       const resetAt = observation.resetAt && Number.isFinite(Date.parse(observation.resetAt))
-        ? new Date(observation.resetAt).toISOString() : nextQuotaReset(row.quota_period, row.quota_timezone_offset, now).toISOString();
+        ? new Date(observation.resetAt).toISOString() : nextQuotaReset(period, row.quota_timezone_offset, now).toISOString();
+      await this.database.prepare(`INSERT INTO provider_quota_windows(
+        credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+      ) VALUES (?,?,?,?,?,?,'provider',1,?,?) ON CONFLICT(credential_id,service,period) DO UPDATE SET
+        limit_count=excluded.limit_count,source='provider',enabled=1,updated_at=excluded.updated_at`).bind(
+        id, service, row.quota_scope_id, period, observation.limit, row.quota_timezone_offset, now.toISOString(), now.toISOString()
+      ).run();
+      await this.database.prepare(`INSERT INTO provider_quota_observations(
+        credential_id,service,period,used_count,limit_count,reset_at,observed_at,source
+      ) VALUES (?,?,?,?,?,?,?,'provider') ON CONFLICT(credential_id,service,period) DO UPDATE SET
+        used_count=excluded.used_count,limit_count=excluded.limit_count,reset_at=excluded.reset_at,
+        observed_at=excluded.observed_at,source='provider'`).bind(
+        id, service, period, observation.used, observation.limit, resetAt, now.toISOString()
+      ).run();
       await this.database.prepare(`UPDATE provider_credentials SET provider_reported_used=?,provider_reported_limit=?,
         provider_reported_reset_at=?,provider_reported_at=? WHERE id=?`)
         .bind(observation.used, observation.limit, resetAt, now.toISOString(), id).run();
@@ -873,35 +1058,124 @@ export class ControlStore {
       return;
     }
     const failures = Number(row.failure_count || 0) + 1;
-    const cooldown = outcome === 'quota' ? nextQuotaReset(row.quota_period, row.quota_timezone_offset, now)
-      : new Date(now.getTime() + Math.min(300000, 1000 * 2 ** Math.min(failures, 8)));
+    const reportedRetryAt = observation?.retryAt && Number.isFinite(Date.parse(observation.retryAt))
+      ? new Date(observation.retryAt) : null;
+    const quotaPeriod = observation?.period || row.quota_period;
+    const cooldown = outcome === 'quota'
+      ? reportedRetryAt && reportedRetryAt.getTime() > now.getTime() ? reportedRetryAt : nextQuotaReset(quotaPeriod, row.quota_timezone_offset, now)
+      : reportedRetryAt && reportedRetryAt.getTime() > now.getTime() ? reportedRetryAt
+        : new Date(now.getTime() + Math.min(300000, 1000 * 2 ** Math.min(failures, 8)));
     const status = outcome === 'auth' || outcome === 'invalid' ? 'needs_review' : outcome === 'quota' ? 'quota_exhausted' : 'cooldown';
     await this.database.prepare(`UPDATE provider_credentials SET status=?,failure_count=?,cooldown_until=?,last_failure_at=?,updated_at=? WHERE id=?`)
       .bind(status, failures, cooldown.toISOString(), now.toISOString(), now.toISOString(), id).run();
+    if (outcome === 'quota') {
+      const service = observation?.service?.trim().slice(0, 80) || row.quota_service;
+      await this.database.prepare(`INSERT INTO provider_quota_windows(
+        credential_id,service,scope_id,period,limit_count,timezone_offset,source,enabled,created_at,updated_at
+      ) VALUES (?,?,?,?,?,?,'provider',1,?,?) ON CONFLICT(credential_id,service,period) DO NOTHING`).bind(
+        id, service, row.quota_scope_id, quotaPeriod, row.quota_limit, row.quota_timezone_offset,
+        now.toISOString(), now.toISOString()
+      ).run();
+      const window = await this.database.prepare(`SELECT limit_count FROM provider_quota_windows
+        WHERE credential_id=? AND service=? AND period=?`).bind(id, service, quotaPeriod)
+        .first<{ limit_count: number }>();
+      const limit = Number(window?.limit_count || row.quota_limit);
+      await this.database.prepare(`INSERT INTO provider_quota_observations(
+        credential_id,service,period,used_count,limit_count,reset_at,observed_at,source
+      ) VALUES (?,?,?,?,?,?,?,'provider') ON CONFLICT(credential_id,service,period) DO UPDATE SET
+        used_count=excluded.used_count,limit_count=excluded.limit_count,reset_at=excluded.reset_at,
+        observed_at=excluded.observed_at,source='provider'`).bind(
+        id, service, quotaPeriod, limit, limit, cooldown.toISOString(), now.toISOString()
+      ).run();
+      await this.database.prepare(`UPDATE provider_credentials SET provider_reported_used=?,
+        provider_reported_limit=?,provider_reported_reset_at=?,provider_reported_at=? WHERE id=?`)
+        .bind(limit, limit, cooldown.toISOString(), now.toISOString(), id).run();
+    }
   }
 
-  private async quotaUsage(row: CredentialRow, date = new Date()): Promise<number> {
-    const periodStart = quotaPeriodStart(row.quota_period, row.quota_timezone_offset, date);
+  private async quotaUsage(period: QuotaPeriod, service: string, scopeId: string, timezoneOffset: number, date = new Date()): Promise<number> {
+    const periodStart = quotaPeriodStart(period, timezoneOffset, date);
     return Number(await this.database.prepare(`SELECT COALESCE(SUM(usage.accepted_count+usage.rejected_count),0) AS total
       FROM provider_credentials credential JOIN provider_usage_periods usage ON usage.credential_id=credential.id
       WHERE credential.quota_scope_id=? AND credential.quota_service=? AND usage.period_start=?`)
-      .bind(row.quota_scope_id, row.quota_service, periodStart).first('total') || 0);
+      .bind(scopeId, service, periodStart).first('total') || 0);
+  }
+
+  private async credentialQuotaWindows(row: CredentialRow, date = new Date()): Promise<CredentialQuotaWindow[]> {
+    const rows = (await this.database.prepare(`SELECT quota_window.service,quota_window.scope_id,quota_window.period,quota_window.limit_count,
+      quota_window.timezone_offset,quota_window.source,observation.used_count,observation.limit_count AS observed_limit,
+      observation.reset_at,observation.observed_at,observation.source AS observation_source
+      FROM provider_quota_windows quota_window LEFT JOIN provider_quota_observations observation
+        ON observation.credential_id=quota_window.credential_id AND observation.service=quota_window.service AND observation.period=quota_window.period
+      WHERE quota_window.credential_id=? AND quota_window.enabled=1 ORDER BY quota_window.period,quota_window.service`).bind(row.id).all<Record<string, unknown>>()).results;
+    if (!rows.length) {
+      rows.push({
+        service: row.quota_service, scope_id: row.quota_scope_id, period: row.quota_period,
+        limit_count: row.quota_limit, timezone_offset: row.quota_timezone_offset, source: 'default'
+      });
+    }
+    return Promise.all(rows.map(async (window) => {
+      const period = String(window.period) as QuotaPeriod;
+      const service = String(window.service);
+      const scopeId = String(window.scope_id);
+      const timezoneOffset = Number(window.timezone_offset || 0);
+      const localUsed = await this.quotaUsage(period, service, scopeId, timezoneOffset, date);
+      const observedCurrent = window.observed_at && (!window.reset_at || Date.parse(String(window.reset_at)) > date.getTime());
+      const limit = observedCurrent && window.observed_limit !== null
+        ? Number(window.observed_limit) : Number(window.limit_count);
+      const baseline = observedCurrent && window.observation_source === 'local' ? Number(window.used_count || 0) : 0;
+      const used = observedCurrent && window.observation_source === 'provider'
+        ? Math.max(localUsed, Number(window.used_count || 0)) : localUsed + baseline;
+      const resetAt = observedCurrent && window.reset_at
+        ? new Date(String(window.reset_at)).toISOString()
+        : nextQuotaReset(period, timezoneOffset, date).toISOString();
+      return {
+        service, scopeId, period, limit, timezoneOffset, source: String(window.source || 'default'),
+        used, baseline, resetAt, usageSource: observedCurrent && window.observation_source === 'provider' ? 'provider' as const : 'local' as const,
+        exhausted: used >= limit
+      };
+    }));
+  }
+
+  private async setQuotaBaseline(
+    credentialId: string, service: string, period: QuotaPeriod, used: number, limit: number, timezoneOffset: number
+  ): Promise<void> {
+    const now = new Date();
+    const resetAt = nextQuotaReset(period, timezoneOffset, now).toISOString();
+    const row = await this.database.prepare('SELECT quota_scope_id FROM provider_credentials WHERE id=?').bind(credentialId)
+      .first<{ quota_scope_id: string }>();
+    if (!row) return;
+    const credentials = (await this.database.prepare(`SELECT id FROM provider_credentials
+      WHERE quota_scope_id=? AND quota_service=?`).bind(row.quota_scope_id, service).all<{ id: string }>()).results;
+    for (const credential of credentials) {
+      if (used === 0) {
+        await this.database.prepare(`DELETE FROM provider_quota_observations
+          WHERE credential_id=? AND service=? AND period=? AND source='local'`).bind(credential.id, service, period).run();
+        continue;
+      }
+      await this.database.prepare(`INSERT INTO provider_quota_observations(
+        credential_id,service,period,used_count,limit_count,reset_at,observed_at,source
+      ) VALUES (?,?,?,?,?,?,?,'local') ON CONFLICT(credential_id,service,period) DO UPDATE SET
+        used_count=excluded.used_count,limit_count=excluded.limit_count,reset_at=excluded.reset_at,
+        observed_at=excluded.observed_at,source='local'`).bind(
+        credential.id, service, period, used, limit, resetAt, now.toISOString()
+      ).run();
+    }
   }
 
   private async quotaAvailable(row: CredentialRow): Promise<boolean> {
-    const localUsed = await this.quotaUsage(row);
-    const providerUsed = row.provider_reported_at && row.provider_reported_used !== null
-      && (!row.provider_reported_reset_at || Date.parse(row.provider_reported_reset_at) > Date.now()) ? row.provider_reported_used : 0;
-    const limit = row.provider_reported_at && row.provider_reported_limit !== null
-      && (!row.provider_reported_reset_at || Date.parse(row.provider_reported_reset_at) > Date.now()) ? row.provider_reported_limit : row.quota_limit;
-    return Math.max(localUsed, providerUsed) < limit;
+    return !(await this.credentialQuotaWindows(row)).some((window) => window.exhausted);
   }
 
   private async resetExpiredQuotaStates(): Promise<void> {
     const now = nowIso();
+    await this.database.prepare('DELETE FROM provider_quota_observations WHERE reset_at IS NOT NULL AND reset_at<=?').bind(now).run();
     await this.database.prepare(`UPDATE provider_credentials SET status='healthy',cooldown_until=NULL,
-      provider_reported_used=NULL,provider_reported_limit=NULL,provider_reported_reset_at=NULL,provider_reported_at=NULL,updated_at=?
-      WHERE status='quota_exhausted' AND cooldown_until IS NOT NULL AND cooldown_until<=?`).bind(now, now).run();
+      provider_reported_used=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_used END,
+      provider_reported_limit=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_limit END,
+      provider_reported_reset_at=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_reset_at END,
+      provider_reported_at=CASE WHEN status='quota_exhausted' THEN NULL ELSE provider_reported_at END,updated_at=?
+      WHERE status IN ('cooldown','quota_exhausted') AND cooldown_until IS NOT NULL AND cooldown_until<=?`).bind(now, now).run();
   }
 
   async audit(actor: string, action: string, target: string, details: Record<string, unknown> = {}): Promise<void> {
@@ -920,19 +1194,88 @@ export class ControlStore {
     const now = nowIso();
     await this.database.prepare(`INSERT INTO sync_runs(id,kind,target_json,status,progress_json,created_at,updated_at)
       VALUES (?,?,?,'queued','{}',?,?)`).bind(id, kind, JSON.stringify(target), now, now).run();
+    if (kind.startsWith('china')) {
+      await this.database.prepare(`INSERT INTO sync_run_countries(
+        run_id,country_code,source_id,trigger_name,status,before_goals_json,after_goals_json,created_at,updated_at
+      ) VALUES (?,'CN','china-map-providers','automatic','queued','{}','{}',?,?)
+        ON CONFLICT(run_id,country_code,source_id) DO NOTHING`).bind(id, now, now).run();
+    }
     return id;
   }
 
   async updateRun(id: string, status: string, progress: Record<string, unknown>, error?: { code: string; message: string }): Promise<void> {
     const now = nowIso();
     await this.database.prepare(`UPDATE sync_runs SET status=?,progress_json=?,error_code=?,error_message=?,
-      started_at=COALESCE(started_at,?),completed_at=CASE WHEN ? IN ('succeeded','failed','cancelled') THEN ? ELSE completed_at END,updated_at=? WHERE id=?`)
+      started_at=COALESCE(started_at,?),completed_at=CASE WHEN ? IN ('succeeded','failed','cancelled','needs_review') THEN ? ELSE completed_at END,updated_at=? WHERE id=?`)
       .bind(status, JSON.stringify(progress), error?.code || null, error?.message?.slice(0, 1000) || null, now, status, now, now, id).run();
+    const accepted = Number(progress.accepted);
+    await this.database.prepare(`UPDATE sync_run_countries SET status=?,started_at=COALESCE(started_at,?),
+      completed_at=CASE WHEN ? IN ('succeeded','failed','cancelled','needs_review') THEN ? ELSE completed_at END,
+      heartbeat_at=?,net_growth=CASE WHEN ? THEN ? ELSE net_growth END,error_code=?,error_message=?,updated_at=? WHERE run_id=?`)
+      .bind(status, now, status, now, now, Number.isFinite(accepted) ? 1 : 0, Number.isFinite(accepted) ? accepted : null,
+        error?.code || null, error?.message?.slice(0, 1000) || null, now, id).run();
   }
 
   async runs(limit = 50): Promise<Array<Record<string, unknown>>> {
     const rows = (await this.database.prepare('SELECT * FROM sync_runs ORDER BY created_at DESC LIMIT ?').bind(limit).all<Record<string, unknown>>()).results;
     return rows.map((row) => ({ ...row, target: json(String(row.target_json || ''), {}), progress: json(String(row.progress_json || ''), {}), target_json: undefined, progress_json: undefined }));
+  }
+
+  async syncHistory(limit = 100, countryCode = '', offset = 0): Promise<Record<string, unknown>> {
+    const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit || 100)));
+    const boundedOffset = Math.max(0, Math.trunc(offset || 0));
+    const country = countryCode.trim().toUpperCase();
+    const rows = (await this.database.prepare(`SELECT run.id,run.kind,run.status AS run_status,run.target_json,
+      run.progress_json,run.error_code AS run_error_code,run.error_message AS run_error_message,
+      run.failure_phase AS run_failure_phase,
+      run.created_at AS run_created_at,run.started_at AS run_started_at,run.completed_at AS run_completed_at,
+      country.country_code,country.source_id,country.trigger_name,country.status,country.started_at,country.completed_at,
+      country.heartbeat_at,country.deadline_at,country.before_count,country.after_count,country.net_growth,
+      country.candidate_count,country.accepted_count,country.rejected_count,country.rejection_reasons_json,country.metrics_json,
+      country.before_goals_json,country.after_goals_json,country.error_code,country.error_message,country.failure_phase
+      FROM sync_runs run LEFT JOIN sync_run_countries country ON country.run_id=run.id
+      WHERE (?='' OR country.country_code=?) ORDER BY run.created_at DESC,country.country_code,country.source_id LIMIT ? OFFSET ?`)
+      .bind(country, country, boundedLimit + 1, boundedOffset).all<Record<string, unknown>>()).results;
+    const hasMore = rows.length > boundedLimit;
+    const pageRows = rows.slice(0, boundedLimit);
+    const scheduler = await this.database.prepare(`SELECT scheduler_id,heartbeat_at,last_planned_at,active_run_id,updated_at
+      FROM sync_scheduler_state WHERE scheduler_id='address-sync'`).first<Record<string, unknown>>();
+    const countries = (await this.database.prepare(`SELECT DISTINCT country_code FROM sync_run_countries
+      WHERE country_code<>'' ORDER BY country_code`).all<{ country_code: string }>()).results.map((row) => row.country_code);
+    return {
+      scheduler: scheduler || null,
+      countries,
+      limit: boundedLimit,
+      offset: boundedOffset,
+      hasMore,
+      nextOffset: hasMore ? boundedOffset + boundedLimit : null,
+      items: pageRows.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        countryCode: row.country_code || (String(row.kind || '').startsWith('china') ? 'CN' : null),
+        sourceId: row.source_id || '',
+        trigger: row.trigger_name || json<Record<string, unknown>>(String(row.target_json || ''), {}).trigger || 'automatic',
+        status: row.status || row.run_status,
+        createdAt: row.run_created_at,
+        startedAt: row.started_at || row.run_started_at,
+        completedAt: row.completed_at || row.run_completed_at,
+        heartbeatAt: row.heartbeat_at || null,
+        deadlineAt: row.deadline_at || null,
+        beforeCount: row.before_count === null || row.before_count === undefined ? null : Number(row.before_count),
+        afterCount: row.after_count === null || row.after_count === undefined ? null : Number(row.after_count),
+        netGrowth: row.net_growth === null || row.net_growth === undefined ? null : Number(row.net_growth),
+        candidateCount: row.candidate_count === null || row.candidate_count === undefined ? null : Number(row.candidate_count),
+        acceptedCount: row.accepted_count === null || row.accepted_count === undefined ? null : Number(row.accepted_count),
+        rejectedCount: row.rejected_count === null || row.rejected_count === undefined ? null : Number(row.rejected_count),
+        rejectionReasons: json(String(row.rejection_reasons_json || ''), {}),
+        metrics: json(String(row.metrics_json || ''), {}),
+        beforeGoals: syncGoalSnapshot(json(String(row.before_goals_json || ''), null)),
+        afterGoals: syncGoalSnapshot(json(String(row.after_goals_json || ''), null)),
+        errorCode: row.country_code ? row.error_code || null : row.run_error_code || null,
+        errorMessage: row.country_code ? row.error_message || null : row.run_error_message || null,
+        failurePhase: row.country_code ? row.failure_phase || null : row.run_failure_phase || null
+      }))
+    };
   }
 }
 
@@ -940,4 +1283,34 @@ const boundedInteger = (value: unknown, fallback: number, minimum: number, maxim
   const number = value === undefined ? fallback : Number(value);
   if (!Number.isInteger(number) || number < minimum || number > maximum) throw new Error(error);
   return number;
+};
+
+export type ServiceCredentialResolver = (provider: ServiceProviderName) => Promise<string | undefined>;
+
+const serviceEnvironmentSecret = (provider: ServiceProviderName, environment: Record<string, string | undefined>): string | undefined => {
+  if (provider === 'youdao') {
+    const appKey = environment.YOUDAO_APP_KEY?.trim();
+    const appSecret = environment.YOUDAO_APP_SECRET?.trim();
+    return appKey && appSecret ? JSON.stringify({ appKey, appSecret }) : undefined;
+  }
+  const names: Record<Exclude<ServiceProviderName, 'youdao'>, string> = {
+    geoapify: 'GEOAPIFY_API_KEY', 'google-geocoding': 'GOOGLE_GEOCODING_API_KEY', mappls: 'MAPPLS_API_KEY'
+  };
+  return environment[names[provider]]?.trim() || undefined;
+};
+
+export const createServiceCredentialResolver = (
+  store: ControlStore,
+  environment: Record<string, string | undefined>,
+  cacheMs = 60_000
+): ServiceCredentialResolver => {
+  const cache = new Map<ServiceProviderName, { value: string | undefined; expiresAt: number }>();
+  return async (provider) => {
+    const cached = cache.get(provider);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const stored = await store.acquireCredential(provider).catch(() => null);
+    const value = stored?.secret ?? serviceEnvironmentSecret(provider, environment);
+    cache.set(provider, { value, expiresAt: Date.now() + cacheMs });
+    return value;
+  };
 };

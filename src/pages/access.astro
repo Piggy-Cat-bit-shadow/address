@@ -1,4 +1,10 @@
 ---
-const target = '/';
+const fallback = '/en/access/';
 ---
-<!doctype html><html><head><meta http-equiv="refresh" content={`0;url=${target}`} /><title>Address Lite</title></head><body><a href={target}>Address Lite</a></body></html>
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width" /><meta name="robots" content="noindex,nofollow" /><link rel="icon" type="image/svg+xml" href="/favicon.svg" /><title>Address</title></head>
+  <body><a href={fallback}>Continue</a><script is:inline>
+    const supported=['en','zh-CN','zh-TW','ja','ko','de','fr','es','pt'];const values=navigator.languages||[navigator.language];let locale='en';for(const source of values){const tag=source.replace('_','-').toLowerCase();const exact=supported.find((value)=>value.toLowerCase()===tag);if(exact){locale=exact;break}if(/^zh-(hant|tw|hk|mo)/.test(tag)){locale='zh-TW';break}if(tag.startsWith('zh')){locale='zh-CN';break}const base=supported.find((value)=>value.toLowerCase()===tag.split('-')[0]);if(base){locale=base;break}}location.replace(`/${locale}/access/${location.search}${location.hash}`);
+  </script></body>
+</html>

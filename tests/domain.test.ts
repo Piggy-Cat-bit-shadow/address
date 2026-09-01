@@ -48,11 +48,13 @@ const googleResponse = (address: VerifiedAddress, overrides = {}): GoogleGeocode
 
 describe('localized region catalog', () => {
   it('shows full US names, common abbreviations and Chinese translations', () => {
-    expect(regionsForCountry('US')).toContainEqual({ value: 'California', label: 'California（CA）加利福尼亚州' });
+    expect(regionsForCountry('US')).toContainEqual(expect.objectContaining({
+      value: 'California', label: 'California（CA）加利福尼亚州', native: 'California', en: 'California', zhCN: '加利福尼亚州'
+    }));
   });
 
   it('keeps Chinese regions in Chinese without duplicated translations', () => {
-    expect(regionsForCountry('CN')).toContainEqual({ value: '广东省', label: '广东省' });
+    expect(regionsForCountry('CN')).toContainEqual(expect.objectContaining({ value: '广东省', label: '广东省' }));
   });
 });
 
@@ -103,7 +105,8 @@ describe('country postal formats and language variants', () => {
       const schema = country.addressSchema;
       expect(schema.filters.length, country.code).toBeGreaterThan(0);
       expect(new Set(schema.filters).size, country.code).toBe(schema.filters.length);
-      expect(schema.filters.every((field) => ['region', 'city', 'postcode'].includes(field)), country.code).toBe(true);
+      expect(schema.filters.every((field) => ['region', 'city', 'district', 'postcode'].includes(field)), country.code).toBe(true);
+      expect(schema.filters.includes('district'), country.code).toBe(country.code === 'CN');
       expect(schema.resultFields[0].field, country.code).toBe(country.code === 'CN' ? 'buildingName' : 'street');
       if (country.code === 'CN') expect(schema.resultFields[1].field).toBe('street');
       expect(schema.resultFields.at(-1)?.field, country.code).toBe('completeAddress');
@@ -113,22 +116,33 @@ describe('country postal formats and language variants', () => {
       for (const { label } of schema.resultFields) {
         expect(label.en.trim(), country.code).toBeTruthy();
         expect(label['zh-CN'].trim(), country.code).toBeTruthy();
+        expect(label.en, country.code).not.toMatch(/[/／]/u);
+        expect(label['zh-CN'], country.code).not.toMatch(/[/／]/u);
       }
+      expect(country.searchLabels.region.en, country.code).not.toMatch(/[/／]/u);
+      expect(country.searchLabels.region['zh-CN'], country.code).not.toMatch(/[/／]/u);
+      expect(country.searchLabels.city.en, country.code).not.toMatch(/[/／]/u);
+      expect(country.searchLabels.city['zh-CN'], country.code).not.toMatch(/[/／]/u);
     }
   });
 
   it('models the key US, Hong Kong, China, Japan and Singapore address rules', () => {
     const schemas = Object.fromEntries(countries.map((country) => [country.code, country.addressSchema]));
-    expect(schemas.US.filters).toEqual(['region', 'city', 'postcode']);
+    expect(schemas.US.filters).toEqual(['region', 'city']);
+    expect(schemas.US.resultFields.map(({ field }) => field)).toContain('postcode');
     expect(schemas.US.postalAdmin1Style).toBe('code');
     expect(schemas.US.resultFields.map(({ field }) => field)).not.toContain('district');
 
     expect(schemas.HK.filters).not.toContain('postcode');
     expect(schemas.HK.resultFields.map(({ field }) => field)).not.toContain('postcode');
+    expect(schemas.HK.resultFields.find(({ field }) => field === 'admin1')?.label['zh-CN']).toBe('地域');
+    expect(schemas.HK.resultFields.find(({ field }) => field === 'locality')?.label['zh-CN']).toBe('行政区');
+    expect(schemas.HK.resultFields.find(({ field }) => field === 'district')?.label['zh-CN']).toBe('地点');
 
-    expect(schemas.CN.filters).toEqual(['region', 'city']);
+    expect(schemas.CN.filters).toEqual(['region', 'city', 'district']);
     expect(schemas.CN.resultFields.map(({ field }) => field)).toContain('district');
     expect(schemas.CN.resultFields.map(({ field }) => field)).toContain('postcode');
+    expect(countries.find(({ code }) => code === 'CN')?.searchLabels.district?.['zh-CN']).toBe('区县');
 
     expect(schemas.JP.filters).toEqual(['region', 'city', 'postcode']);
     expect(schemas.JP.resultFields.map(({ field }) => field)).toContain('district');
@@ -137,6 +151,11 @@ describe('country postal formats and language variants', () => {
     expect(schemas.SG.resultFields.map(({ field }) => field)).toEqual([
       'street', 'postcode', 'completeAddress'
     ]);
+
+    expect(schemas.VN.resultFields.map(({ field }) => field)).not.toContain('district');
+    expect(schemas.MX.resultFields.find(({ field }) => field === 'district')?.label.en).toBe('Colonia');
+    expect(schemas.TH.resultFields.find(({ field }) => field === 'district')?.label.en).toBe('Subdistrict');
+    expect(schemas.ZA.resultFields.find(({ field }) => field === 'district')?.label.en).toBe('Suburb');
   });
 
   it('uses the requested Hong Kong and Taiwan names', () => {

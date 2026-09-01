@@ -1,0 +1,42 @@
+name: address-test
+
+services:
+  credential-broker:
+    profiles:
+      - isolated-local-broker
+
+  migrate:
+    env_file: !reset []
+    environment:
+      CREDENTIAL_BROKER_TOKEN_FILE: ""
+
+  api:
+    env_file: !reset []
+    environment:
+      CREDENTIAL_BROKER_URL: ${ADDRESS_PRODUCTION_BROKER_URL:-http://gateway:8792}
+      CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
+    volumes:
+      - ${ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE:?Set ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE}:/run/address-secrets/credential_broker_test_token:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  sync:
+    env_file: !reset []
+    environment:
+      CREDENTIAL_BROKER_URL: ${ADDRESS_PRODUCTION_BROKER_URL:-http://gateway:8792}
+      CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
+    volumes:
+      - ${ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE:?Set ADDRESS_PRODUCTION_BROKER_TEST_TOKEN_FILE}:/run/address-secrets/credential_broker_test_token:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+networks:
+  egress:
+    external: true
+    name: address_egress

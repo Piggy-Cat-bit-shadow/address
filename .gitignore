@@ -7,6 +7,7 @@ dist/
 # Local and secret configuration
 .env
 .env.*
+config/address.env
 !.env.example
 !**/.env.example
 .dev.vars
@@ -15,6 +16,7 @@ dist/
 *.p12
 *.pfx
 secrets/
+/.secrets/
 credentials/
 tokens/
 
@@ -22,6 +24,7 @@ tokens/
 coverage/
 *.log
 .data-cache/
+.research-tmp/
 data/
 logs/
 runtime/
@@ -29,10 +32,12 @@ backups/
 cache/
 tmp/
 temp/
+test-results/
 *.db
 *.sqlite
 *.sqlite3
 *.pid
+*.tgz
 RELEASE
 release/
 
@@ -55,8 +60,38 @@ AGENTS.md
 CLAUDE.md
 plan.md
 其他AI的分析.md
+/docs/source-capacity-audit.md
 
 # Legacy/local probes excluded from the public repository
 worker/
 tmp-probe.png
 .deploy.env
+
+# Database exports, bulk datasets, and release archives
+*.dump
+*.backup
+*.bak
+*.sql.gz
+*.tar
+*.tar.gz
+*.zip
+*.zst
+*.parquet
+*.pbf
+*.osm
+*.csv
+!scripts/fixtures/*.csv
+*.jsonl
+
+# Additional credentials and local package-manager authentication
+*.crt
+*.cer
+*.jks
+*.keystore
+.npmrc
+.pypirc
+.netrc
+.ssh/
+id_rsa
+id_ed25519
+id_ecdsa

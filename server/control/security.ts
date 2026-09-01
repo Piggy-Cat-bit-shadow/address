@@ -7,8 +7,8 @@ const digest = (value: string): Buffer => createHash('sha256').update(value).dig
 export const opaqueToken = (bytes = 32): string => randomBytes(bytes).toString('base64url');
 export const tokenHash = (value: string): string => digest(value).toString('base64url');
 
-export const hashPassword = async (password: string): Promise<{ hash: string; salt: string }> => {
-  if (password.length < 10 || password.length > 512) throw new Error('PASSWORD_LENGTH');
+export const hashPassword = async (password: string, minimumLength = 10): Promise<{ hash: string; salt: string }> => {
+  if (password.length < minimumLength || password.length > 512) throw new Error('PASSWORD_LENGTH');
   const salt = randomBytes(16);
   const derived = await scrypt(password, salt, 64) as Buffer;
   return { hash: derived.toString('base64url'), salt: salt.toString('base64url') };

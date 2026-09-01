@@ -1,0 +1,193 @@
+name: address
+
+x-app: &app
+  image: ${ADDRESS_IMAGE:-daimon23/address:latest}
+  init: true
+  environment: &app-environment
+    ADDRESS_ROOT: /srv/address
+    ADDRESS_DATA_ROOT: /srv/address/data
+    ADDRESS_SYNC_CACHE_DIR: /srv/address/data/staging
+    STATIC_ROOT: /srv/address/app/dist
+    SYNC_STATE_DIR: /srv/address/runtime/sync-control
+    CREDENTIAL_BROKER_URL: http://credential-broker:8792
+    CREDENTIAL_BROKER_TOKEN_FILE: /run/address-secrets/credential_broker_production_token
+    PYTHON_BIN: /srv/address/venv/bin/python
+    HOME: /srv/address/runtime/home
+    XDG_CACHE_HOME: /srv/address/runtime/cache
+    LOCATION_CATALOG_CACHE_DIR: /srv/address/runtime/cache/location-catalog
+    PIP_CACHE_DIR: /srv/address/runtime/pip-cache
+    POSTGRES_HOST: postgres
+    POSTGRES_DB: ${POSTGRES_DB:-address}
+    POSTGRES_USER: ${POSTGRES_USER:-address}
+    POSTGRES_PASSWORD_FILE: /run/address-secrets/postgres_password
+    CONFIG_MASTER_KEY_FILE: /run/address-secrets/config_master_key
+    ADMIN_BOOTSTRAP_PASSWORD_FILE: /run/address-secrets/admin_bootstrap_password
+    FRONTEND_BOOTSTRAP_PASSWORD_FILE: /run/address-secrets/frontend_bootstrap_password
+    SYNC_ADMIN_TOKEN_FILE: /run/address-secrets/sync_admin_token
+    COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+    TRUST_PROXY: ${TRUST_PROXY:-false}
+    SYNC_SCHEDULER_ENABLED: "true"
+    TRANSLATION_BACKFILL_ENABLED: ${TRANSLATION_BACKFILL_ENABLED:-true}
+  volumes: &app-volumes
+    - ./data/address:/srv/address/data
+    - ./runtime:/srv/address/runtime
+    - ./data/secrets:/run/address-secrets:ro
+  networks:
+    - internal
+    - egress
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+services:
+  bootstrap:
+    image: ${ADDRESS_IMAGE:-daimon23/address:latest}
+    init: true
+    restart: "no"
+    user: "0:0"
+    entrypoint: [node, ops/bootstrap-compose.mjs]
+    environment:
+      ADDRESS_SECRET_ROOT: /srv/address/data/secrets
+      ADDRESS_LEGACY_SECRET_ROOT: /srv/address/legacy-secrets
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-admin}
+      FRONTEND_INITIAL_PASSWORD: ${FRONTEND_INITIAL_PASSWORD:-}
+    volumes:
+      - ./data:/srv/address/data
+      - ./config/secrets:/srv/address/legacy-secrets
+    logging: *logging
+
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-address}
+      POSTGRES_USER: ${POSTGRES_USER:-address}
+      POSTGRES_PASSWORD_FILE: /run/address-secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - "max_connections=${POSTGRES_MAX_CONNECTIONS:-96}"
+      - -c
+      - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}"
+      - -c
+      - "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-8GB}"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./data/secrets:/run/address-secrets:ro
+    networks:
+      - internal
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  migrate:
+    <<: *app
+    restart: "on-failure:3"
+    environment:
+      <<: *app-environment
+      POSTGRES_STATEMENT_TIMEOUT_MS: 1800000
+    command: [node, node_modules/tsx/dist/cli.mjs, server/database/migrate.ts]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      API_HOST: 0.0.0.0
+      API_PORT: 8787
+      POSTGRES_POOL_MAX: ${API_POSTGRES_POOL_MAX:-16}
+      POSTGRES_POOL_MIN: ${API_POSTGRES_POOL_MIN:-1}
+      BATCH_GENERATION_CONCURRENCY: ${BATCH_GENERATION_CONCURRENCY:-4}
+      API_MAX_INFLIGHT_GENERATIONS: ${API_MAX_INFLIGHT_GENERATIONS:-4}
+      SYNC_CONTROL_URL: http://address-sync-control:8791
+    command: [node, node_modules/tsx/dist/cli.mjs, server/api/server.ts]
+    ports:
+      - ${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8787}:8787
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      credential-broker:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+  sync:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      SYNC_HOST: 0.0.0.0
+      SYNC_PORT: 8791
+      POSTGRES_POOL_MAX: ${SYNC_POSTGRES_POOL_MAX:-6}
+      POSTGRES_POOL_MIN: ${SYNC_POSTGRES_POOL_MIN:-1}
+    command: [node, node_modules/tsx/dist/cli.mjs, server/sync/index.mjs]
+    networks:
+      internal:
+        aliases:
+          - address-sync-control
+      egress: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      credential-broker:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8791/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+  credential-broker:
+    <<: *app
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      CREDENTIAL_BROKER_HOST: 0.0.0.0
+      CREDENTIAL_BROKER_PORT: 8792
+      POSTGRES_POOL_MAX: ${BROKER_POSTGRES_POOL_MAX:-3}
+      POSTGRES_POOL_MIN: ${BROKER_POSTGRES_POOL_MIN:-1}
+      CREDENTIAL_BROKER_PRODUCTION_TOKEN_FILE: /run/address-secrets/credential_broker_production_token
+      CREDENTIAL_BROKER_TEST_TOKEN_FILE: /run/address-secrets/credential_broker_test_token
+    command: [node, server/credential-broker/index.mjs]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8792/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 20s
+
+networks:
+  internal:
+    internal: true
+  egress:

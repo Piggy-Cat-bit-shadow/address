@@ -1,5 +1,5 @@
 import { Converter as createSimplifier } from 'opencc-js/t2cn';
-import type { SqliteDatabase } from '../../database/sqlite.mjs';
+import type { Database } from '../../database/database.mjs';
 import { pinyin } from 'pinyin-pro';
 import { formatAddressPresentation } from '../../../src/domain/address-format.ts';
 import {
@@ -12,7 +12,7 @@ import { translateGoogleBatch } from './google-translator.ts';
 import { translateYoudaoBatch } from './youdao-translator.ts';
 
 export interface LocalizationBindings {
-  LOCATION_DB?: SqliteDatabase;
+  LOCATION_DB?: Database;
   GEOAPIFY_API_KEY?: string;
   GOOGLE_TRANSLATION_ENABLED?: boolean | string;
   YOUDAO_APP_KEY?: string;
@@ -469,7 +469,7 @@ const cacheKey = (address: VerifiedAddress): string => [
 ].join(':');
 
 const readCached = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   address: VerifiedAddress,
   language: AddressLanguage
 ): Promise<AddressComponents | undefined> => {
@@ -481,7 +481,7 @@ const readCached = async (
 };
 
 const writeCached = async (
-  db: SqliteDatabase | undefined,
+  db: Database | undefined,
   address: VerifiedAddress,
   language: AddressLanguage,
   value: AddressComponents

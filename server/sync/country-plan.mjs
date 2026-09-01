@@ -14,7 +14,11 @@ export const successfulAt = (entry) => {
 export const isCountryDue = (entry, intervalDays, now) => {
   if (entry?.status === 'failed') return true;
   const lastSuccess = successfulAt(entry);
-  return !lastSuccess || now.getTime() - lastSuccess >= intervalDays * dayMilliseconds;
+  if (!lastSuccess) return true;
+  // Countries below their target count or a configured admin floor retry daily
+  // instead of waiting out the full source cadence.
+  const effectiveDays = (entry?.countryBelowTarget || entry?.countryBelowFloor) ? Math.min(1, intervalDays) : intervalDays;
+  return now.getTime() - lastSuccess >= effectiveDays * dayMilliseconds;
 };
 
 const dailyOrder = (state) => (left, right) => {

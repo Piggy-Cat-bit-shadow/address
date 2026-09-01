@@ -1,15 +1,32 @@
 # 地址数据同步
 
-同步服务使用同一 SQLite 数据库和国家级事务，不依赖容器或系统数据库。
+同步服务使用同一 PostgreSQL 数据库和国家级事务。
+
+## 运行前提
+
+- Node.js 24+，Python 3.10+（3.12 已验证）。先执行 `pip install -r server/sync/requirements.txt`（建议 venv），并通过 `PYTHON_BIN` 指向该解释器（默认 `python3`，Windows 为 `python`）。
+- 首次同步前必须先导入位置目录：`npm run data:catalog` 下载参考数据并生成 `.data-cache/catalog-seed.sql`，`npm run data:catalog:import` 写入 `POSTGRES_URL` 指向的数据库。导入期反向地理编码依赖 `catalog_regions` / `catalog_cities`，目录为空会显著降低接受率。
+- Overture 导出首次运行时 DuckDB 会联网安装 `httpfs` 与 `spatial` 扩展。
+
+## 凭据需求
+
+- 无需任何凭据：US、CA、MX、GB、DE、FR、IT、ES、NL、RU、JP、HK、TW、TH、PH、VN、MY、SA、IN、AU、TR、BR、NG、ZA（Overture、Geofabrik、官方开放数据）。
+- SG：无凭据即可完成；`ONEMAP_ACCESS_TOKEN` 可选，用于扩大 HDB 建筑匹配（Token 3 天过期）。
+- KR：`GEOAPIFY_API_KEY` 必需。K-apt 导出通过 Geoapify 反查邮编，缺少有效邮编的记录会被丢弃；无 Key 时后台会明确显示凭据缺失并等待配置。
+- IN：基础 OSM 来源无需凭据；配置 Mappls 后可为具有完整 OSM 住宅证据的种子补全行政区和 PIN。
+- IN、NG、PH、SA、TH、TR、VN：基础来源无需凭据；Google Geocoding 是可选补全来源。
+- CN：不经过本 ETL，由主 API 进程的中国小区同步使用高德（可选百度、腾讯交叉验证）Key，在 `/admin/` 配置。
 
 ## 运行模式
 
-- `node server/sync/address-etl.mjs --initial --all`：断点完成 27 国首次初始化。
-- `node server/sync/address-etl.mjs --daily --all`：选择失败优先或最早到期的一个国家。
+- `node server/sync/address-etl.mjs --initial --all`：断点完成 26 个 ETL 国家的首次初始化（CN 单独走中国小区同步）。
+- `node server/sync/address-etl.mjs --daily --all`：低层到期检查兼容模式；生产环境不使用它强制重复导入全部国家。
 - `node server/sync/address-etl.mjs --manual --shard US`：手动同步指定国家。
-- `node server/sync/index.mjs`：启动每日调度和管理 API。
+- `node server/sync/index.mjs`：启动同步管理 API；当 `SYNC_SCHEDULER_ENABLED=true` 时自动补跑未完成初始化，并定时唤醒生产队列重新计算执行资格。
 
-成功国家的 `next_sync_at` 为完成时间加 30 天。失败不会替换现有 active dataset。同步目录达到 40GB 后停止 shadow 扩容，预计达到 45GB 时中止写入。
+同步服务只在队列空闲时清理 staging 临时产物：启动时立即检查，此后默认每 15 分钟检查一次；死亡 PID 的临时文件立即回收，无 PID 的下载残片和临时目录默认保留 6 小时。
+
+生产队列按国家三重目标和逐来源能力状态分离“未完成”与“可执行”。相同输入指纹已经完成或耗尽时不重复导入；额度、冷却和未完成 checkpoint 到期后自动续跑；上游版本、新来源或提取能力变化后重新获得执行资格。失败不会替换现有 active dataset。同步目录达到 40GB 后停止 shadow 扩容，预计达到 45GB 时中止写入。`run-address-sync` 在可用内存低于 `ADDRESS_SYNC_MIN_FREE_MEMORY_BYTES`（默认 2 GiB）时拒绝启动；日本构建实测峰值约 6.5 GB RSS。
 
 ## 数据处理
 

@@ -8,9 +8,10 @@ import { countryByCode } from './countries';
 import type { GoogleResolution } from './google-geocoder';
 import { googleMapsLinksFromCoordinates } from './maps';
 import { generateBirthDate, generateExtensions } from './profile-model';
+import { generateProfilePresentations } from './profile-presentations';
 import { generateSandboxCard } from './sandbox-card';
 import type {
-  AddressComponents, CountryCode, GeneratedBundle, VerifiedAddress
+  AddressComponents, CountryCode, GeneratedBundle, GeneratedUnit, VerifiedAddress
 } from './types';
 
 export class DomainError extends Error {
@@ -157,6 +158,25 @@ const emailFor = (name: string, countryCode: CountryCode, suffix: string): strin
   return `${local || countryCode.toLowerCase()}${suffix}@outlook.com`;
 };
 
+const chinaGeneratedUnit = (seed: number): GeneratedUnit => {
+  const random = randomFromSeed(seed);
+  const building = String(1 + Math.floor(random() * 3));
+  const unit = String(1 + Math.floor(random() * 3));
+  const floor = 2 + Math.floor(random() * 5);
+  const roomOnFloor = String(1 + Math.floor(random() * 4)).padStart(2, '0');
+  const room = `${floor}${roomOnFloor}`;
+  return {
+    components: { building, unit, room },
+    variants: {
+      native: `${building}栋${unit}单元${room}室`,
+      en: `Building ${building}, Unit ${unit}, Room ${room}`,
+      'zh-CN': `${building}栋${unit}单元${room}室`
+    },
+    provenance: 'synthetic',
+    unitProvenance: 'synthetic'
+  };
+};
+
 export const generateBundle = (
   address: VerifiedAddress,
   residential: boolean,
@@ -177,10 +197,13 @@ export const generateBundle = (
   const fullName = fullNameFor(address.countryCode, gender, faker);
   const birthDate = generateBirthDate(random, now);
   const suffix = String(hashSeed(normalizedSeed) % 10000).padStart(4, '0');
-  const generatedUnit: GeneratedBundle['generatedUnit'] = undefined;
+  const generatedUnit = residential && address.countryCode === 'CN' && !address.components.unit
+    ? chinaGeneratedUnit(hashSeed(`${requestSeed}:china-unit`))
+    : undefined;
   const extensions = generateExtensions(
     address.countryCode, gender, fullName, birthDate, suffix, faker, random, now
   );
+  const profilePresentations = generateProfilePresentations(requestSeed, gender, extensions);
   const mapLinks = googleMapsLinksFromCoordinates(address.coordinates, googleMaps?.placeId, {
     countryCode: address.countryCode,
     components: address.countryCode === 'CN'
@@ -200,6 +223,7 @@ export const generateBundle = (
       phone: phoneFor(address.countryCode, country.callingCode, address.components, random),
       dateOfBirth: birthDate.toISOString().slice(0, 10)
     },
+    profilePresentations,
     extensions,
     address: presentedAddress,
     addressFormats: formatAllAddressPresentations(presentedAddress, fullName, generatedUnit),
