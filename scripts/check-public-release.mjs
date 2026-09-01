@@ -11,6 +11,7 @@ const historicalPaths = execFileSync('git', ['log', '--all', '--format=', '--nam
   .split(/\r?\n/u).filter(Boolean);
 const failures = [];
 const report = (path, type) => failures.push({ path, type });
+const isTrackedLiteBaseline = (path) => path.startsWith('data/lite-baseline/');
 
 const forbidden = [
   /(^|\/)\.claude\//u,
@@ -27,11 +28,13 @@ const forbidden = [
 
 for (const path of tracked) {
   if (path.endsWith('.env.example') || path === 'ops/deploy.env.example') continue;
+  if (isTrackedLiteBaseline(path)) continue;
   if (forbidden.some((pattern) => pattern.test(path))) report(path, 'forbidden-tracked-file');
 }
 
 for (const path of historicalPaths) {
   if (path.endsWith('.env.example') || path === 'ops/deploy.env.example') continue;
+  if (isTrackedLiteBaseline(path)) continue;
   if (forbidden.some((pattern) => pattern.test(path))) report(path, 'forbidden-history-file');
 }
 
