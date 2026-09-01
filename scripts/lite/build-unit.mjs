@@ -5,7 +5,7 @@ import process from 'node:process';
 import { performance } from 'node:perf_hooks';
 import { runAddressEtl } from '../../server/sync/address-etl.mjs';
 import { loadSourceCatalog } from '../../server/sync/source-adapters.mjs';
-import { openDatabase } from '../../server/database/sqlite.mjs';
+import { openPostgresDatabase } from '../../server/database/postgres.mjs';
 import { emptyResidentialFailure, emptyResidentialMetrics } from './failure-policy.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -30,6 +30,7 @@ const baseCatalog = await loadSourceCatalog();
 const baseShard = baseCatalog.shards.find((shard) => shard.countryCode === country);
 if (!baseShard) throw new Error(`No upstream source shard found for ${country}`);
 const adapter = baseShard.source.adapter;
+const database = await openPostgresDatabase({ environment: process.env });
 
 process.env.ADDRESS_SYNC_LITE = 'true';
 process.env.ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER = process.env.ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER || '2';
@@ -148,9 +149,7 @@ const hierarchy = (addresses, target) => {
     }))
   }));
 };
-const readVerifiedRows = async (databasePath) => {
-  const database = openDatabase(databasePath, { readOnly: true });
-  try {
+const readVerifiedRows = async (database) => {
     const result = await database.prepare(`SELECT
       id,country_code,admin1,admin1_code,locality,postal_locality,district,postcode,street,house_number,
       building_name,latitude,longitude,native_language,component_variants_json,address_variants_json,
@@ -159,9 +158,6 @@ const readVerifiedRows = async (databasePath) => {
       FROM address_pool_runtime
       WHERE active=1 AND residential_evidence=1 AND property_type IN ('residential','apartment')`).all();
     return result.results;
-  } finally {
-    database.close();
-  }
 };
 const tierCount = (target, tier) => manifest.candidateProfiles[target.scope].tiers[Math.min(tier, manifest.candidateProfiles[target.scope].tiers.length - 1)];
 const perLocality = (target) => manifest.candidateProfiles[target.scope].perLocality;
@@ -171,10 +167,9 @@ const buildAttempt = async (attemptTargets, tier, syntheticBounds) => {
   const identity = attemptTargets.length === 1 ? attemptTargets[0].id : group;
   const key = `${identity}-t${tier}`;
   const attemptRoot = resolve(workRoot, key);
-  const databasePath = resolve(attemptRoot, 'data/address.sqlite');
   const cacheDir = resolve(workRoot, `${country}-shared-cache`);
   await rm(attemptRoot, { recursive: true, force: true });
-  await mkdir(dirname(databasePath), { recursive: true });
+  await mkdir(attemptRoot, { recursive: true });
   const maxRecords = attemptTargets.reduce((sum, target) => sum + tierCount(target, tier), 0);
   const localityLimit = Math.max(...attemptTargets.map(perLocality));
   const shard = {
@@ -190,8 +185,11 @@ const buildAttempt = async (attemptTargets, tier, syntheticBounds) => {
   let result;
   let rows;
   try {
+    await database.exec(`TRUNCATE address_pool_evidence, address_pool, address_datasets, address_sources,
+      address_generation_index, address_pool_revisions, pool_coverage, sync_country_state, sync_country_runtime,
+      sync_shard_state, sync_source_execution_state, translation_cache CASCADE`);
     result = await runAddressEtl({
-      databasePath,
+      database,
       cacheDir,
       dataRoot: resolve(attemptRoot, 'data'),
       requestedShards: [shard.id],
@@ -208,7 +206,7 @@ const buildAttempt = async (attemptTargets, tier, syntheticBounds) => {
       cpuConcurrency: 1,
       catalog
     });
-    rows = await readVerifiedRows(databasePath);
+    rows = await readVerifiedRows(database);
   } catch (error) {
     if (!emptyResidentialFailure(error)) throw error;
     const metrics = emptyResidentialMetrics(error);
@@ -216,7 +214,7 @@ const buildAttempt = async (attemptTargets, tier, syntheticBounds) => {
     result = { reports: [{ ...metrics }] };
     rows = [];
   }
-  return { result, rows, databasePath, elapsedMs: Math.round(performance.now() - started), maxRecords, localityLimit };
+  return { result, rows, elapsedMs: Math.round(performance.now() - started), maxRecords, localityLimit };
 };
 
 const outputs = [];
@@ -289,5 +287,6 @@ for (const { target, addresses, attempt } of outputs) {
   else console.log(`[address-lite] ${target.id}: ${addresses.length} static addresses, ${payload.stats.postcodes} postcode slots`);
 }
 
-// Temporary SQLite, Python/DuckDB output and raw PBF never leave the Actions runner.
+await database.close();
+// Temporary PostgreSQL, Python/DuckDB output and raw PBF never leave the Actions runner.
 await rm(workRoot, { recursive: true, force: true }).catch(() => {});

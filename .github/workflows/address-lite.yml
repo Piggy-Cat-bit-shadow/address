@@ -108,6 +108,19 @@ jobs:
     if: needs.resolve.outputs.decision == 'refresh'
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: address-lite-runner
+          POSTGRES_DB: address_lite
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d address_lite"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -141,6 +154,7 @@ jobs:
           ADDRESS_SYNC_RETAIN_RAW: 'false'
           ADDRESS_SYNC_PREPARE_CONCURRENCY: '1'
           ADDRESS_SYNC_CPU_CONCURRENCY: '1'
+          POSTGRES_URL: postgresql://postgres:address-lite-runner@127.0.0.1:5432/address_lite
           ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER: '2'
           ADDRESS_SYNC_LITE_MIN_CANDIDATES: '32'
           ADDRESS_SYNC_LITE_MAX_CANDIDATES: '15000'
