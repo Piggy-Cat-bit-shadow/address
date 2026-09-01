@@ -1,4 +1,13 @@
 .lite-shell {
+  --text: var(--ink);
+  --border: var(--line);
+  --border-strong: #c8d0dc;
+  --control: #fff;
+  --subtle: #f8fafc;
+  --action-bg: var(--ink);
+  --action-text: #fff;
+  --focus-ring: rgba(24, 34, 48, .18);
+  --card-shadow: 0 1px 3px rgba(16, 24, 40, .04);
   width: min(1040px, calc(100% - 32px));
   margin: 0 auto;
   padding: 48px 0 calc(80px + env(safe-area-inset-bottom));
