@@ -29,7 +29,6 @@ permissions:
 
 env:
   NODE_VERSION: '24'
-  PYTHON_VERSION: '3.12'
   ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.site'
 
 jobs:
@@ -107,7 +106,6 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Build native OSM data
         run: |
           mkdir -p "$RUNNER_TEMP/lite-out"
