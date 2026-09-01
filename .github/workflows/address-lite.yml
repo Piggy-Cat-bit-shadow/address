@@ -29,7 +29,7 @@ permissions:
 
 env:
   NODE_VERSION: '24'
-  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.site'
+  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.top'
 
 jobs:
   resolve:

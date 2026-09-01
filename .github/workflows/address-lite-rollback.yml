@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.site'
+  ADDRESS_LITE_PUBLIC_URL: 'https://address.zhuzhu.jiejie12131.top'
 
 jobs:
   rollback:
