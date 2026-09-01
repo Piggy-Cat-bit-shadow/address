@@ -106,12 +106,32 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - name: Download and verify previous Snapshot baseline
+        if: needs.resolve.outputs.candidateAvailable == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: address-lite-selected-data
+          path: ${{ runner.temp }}/previous-snapshot
+      - name: Prepare verified fallback baseline
+        shell: bash
+        run: |
+          fallback_args=()
+          if [[ -f "$RUNNER_TEMP/previous-snapshot/address-lite-data.tar.gz" ]]; then
+            checksum_tool=sha256sum
+            "$checksum_tool" -c "$RUNNER_TEMP/previous-snapshot/address-lite-data.tar.gz.sha256"
+            mkdir -p "$RUNNER_TEMP/previous-snapshot/restored"
+            tar --no-same-owner -xzf "$RUNNER_TEMP/previous-snapshot/address-lite-data.tar.gz" -C "$RUNNER_TEMP/previous-snapshot/restored"
+            node scripts/lite/verify-static.mjs --data "$RUNNER_TEMP/previous-snapshot/restored/public/data"
+            fallback_args=(--fallback-data "$RUNNER_TEMP/previous-snapshot/restored/public/data")
+          fi
+          printf '%s\n' "${fallback_args[@]}" > "$RUNNER_TEMP/fallback-args"
       - name: Build native OSM data
         run: |
           mkdir -p "$RUNNER_TEMP/lite-out"
           node scripts/lite/build-native.mjs \
             --out "$RUNNER_TEMP/lite-out" \
-            --metrics "$RUNNER_TEMP/lite-out/metrics/native.json"
+            --metrics "$RUNNER_TEMP/lite-out/metrics/native.json" \
+            $(if [[ -s "$RUNNER_TEMP/fallback-args" ]]; then cat "$RUNNER_TEMP/fallback-args"; fi)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: lite-all
