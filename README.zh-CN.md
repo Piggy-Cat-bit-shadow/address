@@ -1,6 +1,6 @@
 <p align="center"><img src="public/favicon.svg" width="88" height="88" alt="Address Logo" /></p>
-<h1 align="center">Address</h1>
-<p align="center"><strong>基于 PostgreSQL 的自托管真实住宅地址生成器</strong></p>
+<h1 align="center">Address Lite</h1>
+<p align="center"><strong>基于真实 OpenStreetMap 住宅地址记录构建的超轻量纯静态住宅地址生成器</strong></p>
 
 <p align="center">
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
@@ -13,7 +13,7 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/在线演示-address.333186.xyz-1769e0" alt="在线演示" /></a>
 </p>
 
-**Address 是真实住宅地址生成器。** 发布池中的住宅基础地址来自官方开放数据、国家或地区地址登记、地图登记建筑及具有明确住宅用途证据的开放地图数据，不使用随机街道、门牌或邮编冒充真实地址。每条记录保留来源坐标，可用于 Google Maps、高德地图等覆盖相应地区的地图服务定位；具体平台的文字搜索结果取决于其地区覆盖、索引名称和更新时间。
+Address Lite 是 [daimon3332/address](https://github.com/daimon3332/address) 的轻量纯静态 fork/profile，使用 Native OSM / Overpass 生成静态 JSON，再构建 Astro 静态站点交由 Nginx 提供服务。生产环境不运行数据库、Node API、Python 或 Worker；仓库保留完整 upstream core 仅用于历史与同步兼容。
 
 ## 核心功能
 

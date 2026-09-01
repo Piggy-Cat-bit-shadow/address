@@ -1,6 +1,6 @@
 <p align="center"><img src="public/favicon.svg" width="88" height="88" alt="Address logo" /></p>
-<h1 align="center">Address</h1>
-<p align="center"><strong>Self-hosted Real Residential Address Generator backed by PostgreSQL</strong></p>
+<h1 align="center">Address Lite</h1>
+<p align="center"><strong>An ultra-light, runtime-static residential address generator built from verified OpenStreetMap residential address records.</strong></p>
 
 <p align="center">
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
@@ -13,7 +13,13 @@
   <a href="https://address.333186.xyz"><img src="https://img.shields.io/badge/Live-address.333186.xyz-1769e0" alt="Live demo" /></a>
 </p>
 
-**Address is a real residential address generator.** Its published residential base addresses come from official open data, national or regional address registers, map-registered buildings, and open-map records with explicit residential evidence. It does not pass randomly assembled streets, house numbers, or postcodes off as real addresses. Every record retains source coordinates for positioning in services such as Google Maps or AMap where they cover the relevant region; text-search results depend on each platform's coverage, indexed names, and update cycle.
+Address Lite is a lightweight static fork/profile of [daimon3332/address](https://github.com/daimon3332/address). It uses a Native OSM / Overpass pipeline to produce verified static JSON, then an Astro static site served by Nginx.
+
+```text
+GitHub Actions -> Native OSM / Overpass -> Verified static JSON -> Astro static build -> Nginx
+```
+
+The Lite product has 26 countries/regions, 95 curated targets, and at most three real residential records per postcode slot. Production uses zero database, Node API, Python, or worker processes. The repository retains the upstream Address core for ancestry and synchronization compatibility; PostgreSQL, Node API, and sync supervisor belong to that retained upstream core and are not Address Lite production architecture.
 
 ## Highlights
 
