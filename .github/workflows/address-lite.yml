@@ -37,8 +37,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      matrixGroups: ${{ steps.matrix.outputs.groups }}
       requestedMode: ${{ steps.resolve.outputs.requestedMode }}
       deployRequested: ${{ steps.resolve.outputs.deployRequested }}
       decision: ${{ steps.resolve.outputs.decision }}
@@ -64,12 +62,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Validate Lite manifest
         run: node scripts/lite/check-config.mjs
-      - id: matrix
-        shell: bash
-        run: |
-          matrix="$(node scripts/lite/matrix.mjs)"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "groups=$(node -e 'const value=JSON.parse(process.argv[1]);console.log(value.include.length)' "$matrix")" >> "$GITHUB_OUTPUT"
       - id: resolve
         name: Resolve verified data source
         env:
@@ -552,7 +544,6 @@ jobs:
           SNAPSHOT_SHA: ${{ needs.site-build.outputs.sourceSha || needs.resolve.outputs.snapshotSourceSha }}
           SNAPSHOT_GENERATED: ${{ needs.site-build.outputs.generatedAt || needs.resolve.outputs.snapshotGeneratedAt }}
           SNAPSHOT_AGE: ${{ needs.resolve.outputs.snapshotAgeDays }}
-          MATRIX_GROUPS: ${{ needs.resolve.outputs.matrixGroups }}
           SOURCE_RESULT: ${{ needs.source-refresh.result }}
           ASSEMBLE_RESULT: ${{ needs.data-assemble.result }}
           SITE_RESULT: ${{ needs.site-build.result }}
@@ -560,8 +551,8 @@ jobs:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
         run: |
           completed="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | startswith("lite-"))] | length' | awk '{sum+=$1} END {print sum+0}')"
-          launched=0
-          [[ "$SOURCE_RESULT" != 'skipped' ]] && launched="${MATRIX_GROUPS:-0}"
+           launched=0
+           [[ "$SOURCE_RESULT" != 'skipped' ]] && launched=1
           snapshot_id="${SNAPSHOT_ID_BUILT:-$SNAPSHOT_ID_RESOLVED}"
           cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
           ## Address Lite pipeline
