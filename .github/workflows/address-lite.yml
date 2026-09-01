@@ -107,24 +107,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.decision == 'refresh'
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: address-lite-runner
-          POSTGRES_DB: address_lite
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d address_lite"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -133,42 +116,18 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: server/sync/requirements.txt
       - name: Install runtime dependencies
         run: |
           npm ci --omit=dev
-          python -m pip install --disable-pip-version-check -r server/sync/requirements.txt
-      - name: Build verified residential target group
-        env:
-          ADDRESS_SYNC_LITE: 'true'
-          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
-          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
-          ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
-          ADDRESS_SYNC_TRANSLATION_COUNTRIES: ''
-          TRANSLATION_BACKFILL_ENABLED: 'false'
-          GOOGLE_TRANSLATION_ENABLED: 'false'
-          ADDRESS_SYNC_RETAIN_RAW: 'false'
-          ADDRESS_SYNC_PREPARE_CONCURRENCY: '1'
-          ADDRESS_SYNC_CPU_CONCURRENCY: '1'
-          POSTGRES_URL: postgresql://postgres:address-lite-runner@127.0.0.1:5432/address_lite
-          ADDRESS_SYNC_LITE_CANDIDATE_MULTIPLIER: '2'
-          ADDRESS_SYNC_LITE_MIN_CANDIDATES: '32'
-          ADDRESS_SYNC_LITE_MAX_CANDIDATES: '15000'
+      - name: Build native OSM data
         run: |
           mkdir -p "$RUNNER_TEMP/lite-out"
-          /usr/bin/time -v node scripts/lite/build-unit.mjs \
-            --group '${{ matrix.group }}' \
+          node scripts/lite/build-native.mjs \
             --out "$RUNNER_TEMP/lite-out" \
-            --work "$RUNNER_TEMP/lite-work" \
-            2> >(tee "$RUNNER_TEMP/time-${{ matrix.group }}.log" >&2)
-          cp "$RUNNER_TEMP/time-${{ matrix.group }}.log" "$RUNNER_TEMP/lite-out/metrics/time-${{ matrix.group }}.log"
+            --metrics "$RUNNER_TEMP/lite-out/metrics/native.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: lite-${{ matrix.group }}
+          name: lite-all
           path: ${{ runner.temp }}/lite-out
           if-no-files-found: error
           retention-days: 7

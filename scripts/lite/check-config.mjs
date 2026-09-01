@@ -14,7 +14,6 @@ export const validateManifest = (manifest) => {
   const errors = [];
   const targetIds = new Set();
   const files = new Set();
-  const groupCountries = new Map();
   const categories = new Set(['low_tax', 'major_city']);
   let outputCap = 0;
 
@@ -24,11 +23,7 @@ export const validateManifest = (manifest) => {
   if (!manifest.candidateProfiles || typeof manifest.candidateProfiles !== 'object') errors.push('candidateProfiles is missing');
 
   for (const [scope, profile] of Object.entries(manifest.candidateProfiles || {})) {
-    const tiers = profile.tiers || [];
-    if (!tiers.length || tiers.some((value) => !Number.isSafeInteger(value) || value < 1)) errors.push(`${scope}: invalid candidate tiers`);
-    if (tiers.some((value, index) => index > 0 && value <= tiers[index - 1])) errors.push(`${scope}: candidate tiers must be strictly increasing`);
-    if (!Number.isSafeInteger(profile.perLocality) || profile.perLocality < 1) errors.push(`${scope}: invalid perLocality`);
-    if (!Number.isSafeInteger(profile.outputCap) || profile.outputCap < manifest.maxAddressesPerPostcode) errors.push(`${scope}: invalid outputCap`);
+      if (!Number.isSafeInteger(profile.outputCap) || profile.outputCap < manifest.maxAddressesPerPostcode) errors.push(`${scope}: invalid outputCap`);
   }
 
   for (const target of manifest.targets || []) {
@@ -55,10 +50,6 @@ export const validateManifest = (manifest) => {
     targetIds.add(target.id);
     if (!target.file || files.has(target.file)) errors.push(`${target.id}: duplicate/blank output file ${target.file}`);
     files.add(target.file);
-    if (!target.jobGroup) errors.push(`${target.id}: missing jobGroup`);
-    const existingCountry = groupCountries.get(target.jobGroup);
-    if (existingCountry && existingCountry !== target.country) errors.push(`${target.id}: jobGroup ${target.jobGroup} mixes countries`);
-    groupCountries.set(target.jobGroup, target.country);
     if (!Array.isArray(target.bounds) || target.bounds.length !== 4 || target.bounds.some((value) => !Number.isFinite(value))) {
       errors.push(`${target.id}: invalid bounds`);
     } else {
@@ -73,7 +64,7 @@ export const validateManifest = (manifest) => {
     outputCap,
     countries: new Set((manifest.targets || []).map((target) => target.country)).size,
     targets: targetIds.size,
-    groups: groupCountries.size
+    groups: 1
   };
 };
 

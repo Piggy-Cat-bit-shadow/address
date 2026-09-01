@@ -87,20 +87,7 @@ describe('Address Lite dual fingerprints', () => {
     await mkdir(resolve(root, 'src/components'), { recursive: true });
     await writeFile(resolve(root, 'src/components/LiteApp.css'), '.changed{}\n');
     expect(await computeDataFingerprints({ root })).toEqual(before);
-    const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
-    lock.packages['node_modules/react'].version = '20.0.0';
-    await writeFile(resolve(root, 'package-lock.json'), JSON.stringify(lock));
-    expect(await computeDataFingerprints({ root })).toEqual(before);
-    await writeFile(resolve(root, 'server/sync/fixture.mjs'), 'residential gate changed\n');
-    expect((await computeDataFingerprints({ root })).refreshFingerprint).not.toBe(before.refreshFingerprint);
-  });
-
-  it('invalidates refresh when an ETL runtime dependency changes', async () => {
-    const root = await writeFixtureRepository();
-    const before = await computeDataFingerprints({ root });
-    const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
-    lock.packages['node_modules/pinyin-pro'].version = '4.0.0';
-    await writeFile(resolve(root, 'package-lock.json'), JSON.stringify(lock));
+    await writeFile(resolve(root, 'scripts/lite/build-native.mjs'), 'changed');
     expect((await computeDataFingerprints({ root })).refreshFingerprint).not.toBe(before.refreshFingerprint);
   });
 

@@ -16,6 +16,7 @@
     "check": "astro check && tsc -p server/api/tsconfig.json --noEmit",
     "test": "vitest run tests",
     "test:lite-mobile": "npm run build && node tests/lite-mobile.e2e.mjs",
+    "test:lite": "vitest run tests/lite-*.test.mjs",
     "test:admin-e2e": "npm run build && node tests/admin-console.e2e.mjs",
     "test:watch": "vitest tests",
     "data:regions": "node scripts/update-regions.mjs",

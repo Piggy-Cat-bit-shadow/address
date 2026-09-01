@@ -8,23 +8,11 @@ export const FINGERPRINT_ALGORITHM_VERSION = 1;
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 export const refreshCodeInputs = Object.freeze([
-  'scripts/lite/build-unit.mjs',
+  'config/lite-seeds.json',
+  'scripts/lite/build-native.mjs',
   'scripts/lite/check-config.mjs',
   'scripts/lite/data-fingerprint.mjs',
-  'scripts/lite/failure-policy.mjs',
-  'scripts/lite/matrix.mjs',
   'scripts/lite/verify-static.mjs',
-  'server/database',
-  'server/lib',
-  'server/sync',
-  'src/domain/address-quality.d.mts',
-  'src/domain/address-quality.mjs',
-  'src/domain/non-residential-rules.d.mts',
-  'src/domain/non-residential-rules.mjs',
-  'src/domain/non-residential.d.mts',
-  'src/domain/non-residential.mjs',
-  'src/domain/postcode-patterns.d.mts',
-  'src/domain/postcode-patterns.mjs'
 ]);
 
 export const assembleCodeInputs = Object.freeze([
@@ -47,50 +35,19 @@ export const refreshManifestProjection = (manifest) => ({
   schemaVersion: manifest.schemaVersion,
   profile: manifest.profile,
   maxAddressesPerPostcode: manifest.maxAddressesPerPostcode,
-  candidateProfiles: manifest.candidateProfiles,
+  candidateProfiles: Object.fromEntries(Object.entries(manifest.candidateProfiles).map(([scope, profile]) => [scope, { outputCap: profile.outputCap }])),
   targets: (manifest.targets || []).map((target) => ({
     id: target.id,
     country: target.country,
     scope: target.scope,
     bounds: target.bounds,
     regionAliases: target.regionAliases || [],
-    jobGroup: target.jobGroup
   })).sort((left, right) => left.id.localeCompare(right.id))
 });
 
 export const assembleManifestProjection = (manifest) => canonicalize(manifest);
 
-const refreshRuntimePackages = Object.freeze(['opencc-js', 'pinyin-pro']);
-export const refreshRuntimeProjection = async (root) => {
-  const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
-  const packages = lock.packages || {};
-  const selected = {};
-  const pending = [...refreshRuntimePackages];
-  while (pending.length) {
-    const name = pending.shift();
-    if (selected[name]) continue;
-    const details = packages[`node_modules/${name}`];
-    if (!details) throw new Error(`Refresh runtime dependency is missing from package-lock.json: ${name}`);
-    selected[name] = {
-      version: details.version,
-      integrity: details.integrity,
-      dependencies: details.dependencies || {}
-    };
-    pending.push(...Object.keys(details.dependencies || {}));
-  }
-  return {
-    nodeMajor: 24,
-    python: '3.12',
-    prepareConcurrency: 1,
-    cpuConcurrency: 1,
-    overtureBuildings: true,
-    requireResidential: true,
-    candidateMultiplier: 2,
-    minCandidates: 32,
-    maxCandidates: 15000,
-    packages: selected
-  };
-};
+export const refreshRuntimeProjection = async () => ({ nodeMajor: 24, engine: 'osm-overpass-native-v1' });
 
 const filesUnder = async (root, entry) => {
   const absolute = resolve(root, entry);

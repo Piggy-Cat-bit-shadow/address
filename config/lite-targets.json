@@ -4,30 +4,12 @@
   "maxAddressesPerPostcode": 3,
   "candidateProfiles": {
     "micro": {
-      "tiers": [
-        48,
-        128,
-        320
-      ],
-      "perLocality": 48,
       "outputCap": 6
     },
     "city": {
-      "tiers": [
-        128,
-        384,
-        1024
-      ],
-      "perLocality": 64,
       "outputCap": 12
     },
     "region": {
-      "tiers": [
-        768,
-        2048,
-        5000
-      ],
-      "perLocality": 96,
       "outputCap": 24
     }
   },
@@ -152,7 +134,6 @@
         39.85
       ],
       "file": "US/DE.json",
-      "jobGroup": "US-DE",
       "note": "≈ 0% general sales tax",
       "tax": {
         "type": "tax_free",
@@ -180,7 +161,6 @@
         46.35
       ],
       "file": "US/OR.json",
-      "jobGroup": "US-OR",
       "note": "≈ 0% general sales tax",
       "tax": {
         "type": "tax_free",
@@ -208,7 +188,6 @@
         45.35
       ],
       "file": "US/NH.json",
-      "jobGroup": "US-NH",
       "note": "≈ 0% general sales tax; meals/lodging may be taxed separately",
       "tax": {
         "type": "tax_free",
@@ -236,7 +215,6 @@
         49.1
       ],
       "file": "US/MT.json",
-      "jobGroup": "US-MT",
       "note": "≈ 0% general sales tax; some resort areas differ",
       "tax": {
         "type": "tax_free",
@@ -264,7 +242,6 @@
         40.95
       ],
       "file": "US/NYC.json",
-      "jobGroup": "US-NYC",
       "note": "",
       "regionAliases": [
         "New York",
@@ -285,7 +262,6 @@
         34.35
       ],
       "file": "US/LA.json",
-      "jobGroup": "US-LA",
       "note": "",
       "regionAliases": [
         "California",
@@ -306,7 +282,6 @@
         42.1
       ],
       "file": "US/CHI.json",
-      "jobGroup": "US-CHI",
       "note": "",
       "regionAliases": [
         "Illinois",
@@ -327,7 +302,6 @@
         60.05
       ],
       "file": "CA/AB.json",
-      "jobGroup": "CA-AB",
       "note": "≈ 5% federal GST; PST 0%",
       "tax": {
         "type": "vat_gst_reduced",
@@ -355,7 +329,6 @@
         69.8
       ],
       "file": "CA/YT.json",
-      "jobGroup": "CA-YT",
       "note": "≈ 5% GST",
       "tax": {
         "type": "vat_gst_reduced",
@@ -383,7 +356,6 @@
         78.8
       ],
       "file": "CA/NT.json",
-      "jobGroup": "CA-NT",
       "note": "≈ 5% GST",
       "tax": {
         "type": "vat_gst_reduced",
@@ -411,7 +383,6 @@
         84.0
       ],
       "file": "CA/NU.json",
-      "jobGroup": "CA-NU",
       "note": "≈ 5% GST",
       "tax": {
         "type": "vat_gst_reduced",
@@ -439,7 +410,6 @@
         43.9
       ],
       "file": "CA/TOR.json",
-      "jobGroup": "CA-TOR",
       "note": "",
       "regionAliases": [
         "Ontario",
@@ -460,7 +430,6 @@
         45.75
       ],
       "file": "CA/MTL.json",
-      "jobGroup": "CA-MTL",
       "note": "",
       "regionAliases": [
         "Quebec",
@@ -482,7 +451,6 @@
         49.4
       ],
       "file": "CA/VAN.json",
-      "jobGroup": "CA-VAN",
       "note": "",
       "regionAliases": [
         "British Columbia",
@@ -503,7 +471,6 @@
         19.65
       ],
       "file": "MX/MEX.json",
-      "jobGroup": "MX-MEX",
       "note": ""
     },
     {
@@ -520,7 +487,6 @@
         20.9
       ],
       "file": "MX/GDL.json",
-      "jobGroup": "MX-GDL",
       "note": ""
     },
     {
@@ -537,7 +503,6 @@
         25.95
       ],
       "file": "MX/MTY.json",
-      "jobGroup": "MX-MTY",
       "note": ""
     },
     {
@@ -554,7 +519,6 @@
         51.75
       ],
       "file": "GB/LON.json",
-      "jobGroup": "GB",
       "note": ""
     },
     {
@@ -571,7 +535,6 @@
         52.65
       ],
       "file": "GB/BHM.json",
-      "jobGroup": "GB",
       "note": ""
     },
     {
@@ -588,7 +551,6 @@
         53.65
       ],
       "file": "GB/MAN.json",
-      "jobGroup": "GB",
       "note": ""
     },
     {
@@ -605,7 +567,6 @@
         47.74
       ],
       "file": "DE/BUS.json",
-      "jobGroup": "DE-BUS",
       "note": "Swiss VAT area; general rate around 8.1%",
       "tax": {
         "type": "special_tax_zone",
@@ -629,7 +590,6 @@
         54.21
       ],
       "file": "DE/HEL.json",
-      "jobGroup": "DE-HEL",
       "note": "Special customs/VAT area",
       "tax": {
         "type": "customs_free_zone",
@@ -653,7 +613,6 @@
         52.75
       ],
       "file": "DE/BER.json",
-      "jobGroup": "DE-BER",
       "note": ""
     },
     {
@@ -670,7 +629,6 @@
         53.8
       ],
       "file": "DE/HAM.json",
-      "jobGroup": "DE-HAM",
       "note": ""
     },
     {
@@ -687,7 +645,6 @@
         48.35
       ],
       "file": "DE/MUC.json",
-      "jobGroup": "DE-MUC",
       "note": ""
     },
     {
@@ -704,7 +661,6 @@
         49.05
       ],
       "file": "FR/PAR.json",
-      "jobGroup": "FR-PAR",
       "note": ""
     },
     {
@@ -721,7 +677,6 @@
         43.5
       ],
       "file": "FR/MRS.json",
-      "jobGroup": "FR-MRS",
       "note": ""
     },
     {
@@ -738,7 +693,6 @@
         46.0
       ],
       "file": "FR/LYO.json",
-      "jobGroup": "FR-LYO",
       "note": ""
     },
     {
@@ -755,7 +709,6 @@
         46.0
       ],
       "file": "IT/CAM.json",
-      "jobGroup": "IT-CAM",
       "note": "ILCCI general rate around Swiss VAT level",
       "tax": {
         "type": "special_tax_zone",
@@ -779,7 +732,6 @@
         46.6
       ],
       "file": "IT/LIV.json",
-      "jobGroup": "IT-LIV",
       "note": "Special customs/VAT area",
       "tax": {
         "type": "customs_free_zone",
@@ -803,7 +755,6 @@
         42.1
       ],
       "file": "IT/ROM.json",
-      "jobGroup": "IT-ROM",
       "note": ""
     },
     {
@@ -820,7 +771,6 @@
         45.65
       ],
       "file": "IT/MIL.json",
-      "jobGroup": "IT-MIL",
       "note": ""
     },
     {
@@ -837,7 +787,6 @@
         41.1
       ],
       "file": "IT/NAP.json",
-      "jobGroup": "IT-NAP",
       "note": ""
     },
     {
@@ -854,7 +803,6 @@
         29.5
       ],
       "file": "ES/CAN.json",
-      "jobGroup": "ES-CAN",
       "note": "IGIC general rate around 7%",
       "tax": {
         "type": "special_tax_zone",
@@ -882,7 +830,6 @@
         35.34
       ],
       "file": "ES/MEL.json",
-      "jobGroup": "ES-MEL",
       "note": "Special IPSI tax regime",
       "tax": {
         "type": "special_tax_zone",
@@ -906,7 +853,6 @@
         35.93
       ],
       "file": "ES/CEU.json",
-      "jobGroup": "ES-CEU",
       "note": "Special IPSI tax regime",
       "tax": {
         "type": "special_tax_zone",
@@ -930,7 +876,6 @@
         40.65
       ],
       "file": "ES/MAD.json",
-      "jobGroup": "ES-MAD",
       "note": ""
     },
     {
@@ -947,7 +892,6 @@
         41.6
       ],
       "file": "ES/BCN.json",
-      "jobGroup": "ES-BCN",
       "note": ""
     },
     {
@@ -964,7 +908,6 @@
         39.7
       ],
       "file": "ES/VLC.json",
-      "jobGroup": "ES-VLC",
       "note": ""
     },
     {
@@ -981,7 +924,6 @@
         52.55
       ],
       "file": "NL/AMS.json",
-      "jobGroup": "NL-AMS",
       "note": ""
     },
     {
@@ -998,7 +940,6 @@
         52.1
       ],
       "file": "NL/RTM.json",
-      "jobGroup": "NL-RTM",
       "note": ""
     },
     {
@@ -1015,7 +956,6 @@
         52.2
       ],
       "file": "NL/HAG.json",
-      "jobGroup": "NL-HAG",
       "note": ""
     },
     {
@@ -1032,7 +972,6 @@
         55.95
       ],
       "file": "RU/MOW.json",
-      "jobGroup": "RU",
       "note": ""
     },
     {
@@ -1049,7 +988,6 @@
         60.2
       ],
       "file": "RU/LED.json",
-      "jobGroup": "RU",
       "note": ""
     },
     {
@@ -1066,7 +1004,6 @@
         55.25
       ],
       "file": "RU/OVB.json",
-      "jobGroup": "RU",
       "note": ""
     },
     {
@@ -1083,7 +1020,6 @@
         22.6
       ],
       "file": "HK/SAR.json",
-      "jobGroup": "HK",
       "note": "No general sales tax / VAT / GST",
       "tax": {
         "type": "tax_free",
@@ -1107,7 +1043,6 @@
         22.32
       ],
       "file": "HK/HKI.json",
-      "jobGroup": "HK",
       "note": ""
     },
     {
@@ -1124,7 +1059,6 @@
         22.37
       ],
       "file": "HK/KLN.json",
-      "jobGroup": "HK",
       "note": ""
     },
     {
@@ -1141,7 +1075,6 @@
         22.48
       ],
       "file": "HK/ST.json",
-      "jobGroup": "HK",
       "note": ""
     },
     {
@@ -1158,7 +1091,6 @@
         25.25
       ],
       "file": "TW/TPE.json",
-      "jobGroup": "TW-TPE",
       "note": ""
     },
     {
@@ -1175,7 +1107,6 @@
         25.35
       ],
       "file": "TW/NWT.json",
-      "jobGroup": "TW-NWT",
       "note": ""
     },
     {
@@ -1192,7 +1123,6 @@
         23.0
       ],
       "file": "TW/KHH.json",
-      "jobGroup": "TW-KHH",
       "note": ""
     },
     {
@@ -1209,7 +1139,6 @@
         35.9
       ],
       "file": "JP/TYO.json",
-      "jobGroup": "JP-TYO",
       "note": ""
     },
     {
@@ -1226,7 +1155,6 @@
         34.85
       ],
       "file": "JP/OSA.json",
-      "jobGroup": "JP-OSA",
       "note": ""
     },
     {
@@ -1243,7 +1171,6 @@
         35.65
       ],
       "file": "JP/YOK.json",
-      "jobGroup": "JP-YOK",
       "note": ""
     },
     {
@@ -1260,7 +1187,6 @@
         37.72
       ],
       "file": "KR/SEL.json",
-      "jobGroup": "KR",
       "note": ""
     },
     {
@@ -1277,7 +1203,6 @@
         35.4
       ],
       "file": "KR/PUS.json",
-      "jobGroup": "KR",
       "note": ""
     },
     {
@@ -1294,7 +1219,6 @@
         37.65
       ],
       "file": "KR/ICN.json",
-      "jobGroup": "KR",
       "note": ""
     },
     {
@@ -1311,7 +1235,6 @@
         1.5
       ],
       "file": "SG/SIN.json",
-      "jobGroup": "SG",
       "note": ""
     },
     {
@@ -1328,7 +1251,6 @@
         11.0
       ],
       "file": "VN/SGN.json",
-      "jobGroup": "VN",
       "note": ""
     },
     {
@@ -1345,7 +1267,6 @@
         21.3
       ],
       "file": "VN/HAN.json",
-      "jobGroup": "VN",
       "note": ""
     },
     {
@@ -1362,7 +1283,6 @@
         16.25
       ],
       "file": "VN/DAD.json",
-      "jobGroup": "VN",
       "note": ""
     },
     {
@@ -1379,7 +1299,6 @@
         14.05
       ],
       "file": "TH/BKK.json",
-      "jobGroup": "TH",
       "note": ""
     },
     {
@@ -1396,7 +1315,6 @@
         19.1
       ],
       "file": "TH/CNX.json",
-      "jobGroup": "TH",
       "note": ""
     },
     {
@@ -1413,7 +1331,6 @@
         8.2
       ],
       "file": "TH/HKT.json",
-      "jobGroup": "TH",
       "note": ""
     },
     {
@@ -1430,7 +1347,6 @@
         14.7
       ],
       "file": "PH/MNL.json",
-      "jobGroup": "PH",
       "note": ""
     },
     {
@@ -1447,7 +1363,6 @@
         14.85
       ],
       "file": "PH/QC.json",
-      "jobGroup": "PH",
       "note": ""
     },
     {
@@ -1464,7 +1379,6 @@
         10.5
       ],
       "file": "PH/CEB.json",
-      "jobGroup": "PH",
       "note": ""
     },
     {
@@ -1481,7 +1395,6 @@
         6.5
       ],
       "file": "MY/LGK.json",
-      "jobGroup": "MY",
       "note": "Duty-free status applies to many qualifying goods; exceptions exist",
       "tax": {
         "type": "customs_free_zone",
@@ -1505,7 +1418,6 @@
         5.45
       ],
       "file": "MY/LBU.json",
-      "jobGroup": "MY",
       "note": "Duty-free status applies to many qualifying goods; exceptions exist",
       "tax": {
         "type": "customs_free_zone",
@@ -1529,7 +1441,6 @@
         2.9
       ],
       "file": "MY/TIO.json",
-      "jobGroup": "MY",
       "note": "Duty-free status applies to many qualifying goods; exceptions exist",
       "tax": {
         "type": "customs_free_zone",
@@ -1553,7 +1464,6 @@
         3.3
       ],
       "file": "MY/KUL.json",
-      "jobGroup": "MY",
       "note": ""
     },
     {
@@ -1570,7 +1480,6 @@
         5.55
       ],
       "file": "MY/PEN.json",
-      "jobGroup": "MY",
       "note": ""
     },
     {
@@ -1587,7 +1496,6 @@
         1.65
       ],
       "file": "MY/JHB.json",
-      "jobGroup": "MY",
       "note": ""
     },
     {
@@ -1604,7 +1512,6 @@
         19.35
       ],
       "file": "IN/BOM.json",
-      "jobGroup": "IN",
       "note": ""
     },
     {
@@ -1621,7 +1528,6 @@
         28.9
       ],
       "file": "IN/DEL.json",
-      "jobGroup": "IN",
       "note": ""
     },
     {
@@ -1638,7 +1544,6 @@
         13.25
       ],
       "file": "IN/BLR.json",
-      "jobGroup": "IN",
       "note": ""
     },
     {
@@ -1655,7 +1560,6 @@
         -33.55
       ],
       "file": "AU/SYD.json",
-      "jobGroup": "AU-SYD",
       "note": ""
     },
     {
@@ -1672,7 +1576,6 @@
         -37.45
       ],
       "file": "AU/MEL.json",
-      "jobGroup": "AU-MEL",
       "note": ""
     },
     {
@@ -1689,7 +1592,6 @@
         -27.1
       ],
       "file": "AU/BNE.json",
-      "jobGroup": "AU-BNE",
       "note": ""
     },
     {
@@ -1706,7 +1608,6 @@
         41.35
       ],
       "file": "TR/IST.json",
-      "jobGroup": "TR",
       "note": ""
     },
     {
@@ -1723,7 +1624,6 @@
         40.2
       ],
       "file": "TR/ANK.json",
-      "jobGroup": "TR",
       "note": ""
     },
     {
@@ -1740,7 +1640,6 @@
         38.7
       ],
       "file": "TR/IZM.json",
-      "jobGroup": "TR",
       "note": ""
     },
     {
@@ -1757,7 +1656,6 @@
         25.05
       ],
       "file": "SA/RUH.json",
-      "jobGroup": "SA",
       "note": ""
     },
     {
@@ -1774,7 +1672,6 @@
         21.9
       ],
       "file": "SA/JED.json",
-      "jobGroup": "SA",
       "note": ""
     },
     {
@@ -1791,7 +1688,6 @@
         26.65
       ],
       "file": "SA/DMM.json",
-      "jobGroup": "SA",
       "note": ""
     },
     {
@@ -1808,7 +1704,6 @@
         -23.3
       ],
       "file": "BR/SAO.json",
-      "jobGroup": "BR",
       "note": ""
     },
     {
@@ -1825,7 +1720,6 @@
         -22.65
       ],
       "file": "BR/RIO.json",
-      "jobGroup": "BR",
       "note": ""
     },
     {
@@ -1842,7 +1736,6 @@
         -15.35
       ],
       "file": "BR/BSB.json",
-      "jobGroup": "BR",
       "note": ""
     },
     {
@@ -1859,7 +1752,6 @@
         6.8
       ],
       "file": "NG/LOS.json",
-      "jobGroup": "NG",
       "note": ""
     },
     {
@@ -1876,7 +1768,6 @@
         9.35
       ],
       "file": "NG/ABV.json",
-      "jobGroup": "NG",
       "note": ""
     },
     {
@@ -1893,7 +1784,6 @@
         12.35
       ],
       "file": "NG/KAN.json",
-      "jobGroup": "NG",
       "note": ""
     },
     {
@@ -1910,7 +1800,6 @@
         -25.85
       ],
       "file": "ZA/JNB.json",
-      "jobGroup": "ZA",
       "note": ""
     },
     {
@@ -1927,7 +1816,6 @@
         -33.65
       ],
       "file": "ZA/CPT.json",
-      "jobGroup": "ZA",
       "note": ""
     },
     {
@@ -1944,7 +1832,6 @@
         -29.6
       ],
       "file": "ZA/DUR.json",
-      "jobGroup": "ZA",
       "note": ""
     }
   ]
