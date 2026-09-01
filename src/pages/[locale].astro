@@ -2,12 +2,12 @@
 import LiteApp from '../components/LiteApp';
 import Layout from '../layouts/Layout.astro';
 import type { Locale } from '../domain/types';
-import { localeStaticPaths } from '../domain/locales';
+import { localeStaticPaths, uiTextLocale } from '../domain/locales';
 
 export const getStaticPaths = localeStaticPaths;
 
 const locale = Astro.params.locale as Locale;
 ---
 <Layout locale={locale}>
-  <LiteApp client:load locale={locale} />
+  <LiteApp client:load locale={uiTextLocale(locale)} />
 </Layout>
